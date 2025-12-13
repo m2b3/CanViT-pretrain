@@ -1,7 +1,7 @@
 [project]
 name = "avp-vit"
 version = "0.1.0"
-description = "Add your description here"
+description = "Active Visual Pondering for Vision Transformers"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,11 +9,17 @@ dependencies = [
     "torchvision",
     "omegaconf",
     "dinov3",
+    "ijepa",
     "ybml",
 ]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [tool.uv.sources]
-dinov3 = { path = "dinov3", editable = true }
+dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
+ijepa = { git = "https://github.com/yberreby/ijepa.git" }
 ybml = { git = "https://github.com/yberreby/ybml.git" }
 
 [dependency-groups]
@@ -26,9 +32,7 @@ dev = [
 
 [tool.pytest.ini_options]
 python_files = ["test.py", "test_*.py"]
-testpaths = ["avp", "tests"]
+testpaths = ["avp_vit", "tests"]
 
 [tool.basedpyright]
-ignore = ["dinov3"]
-extraPaths = ["dinov3"]
 reportMissingImports = "warning"

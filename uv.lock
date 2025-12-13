@@ -59,9 +59,10 @@ wheels = [
 [[package]]
 name = "avp-vit"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "dinov3" },
+    { name = "ijepa" },
     { name = "omegaconf" },
     { name = "torch" },
     { name = "torchvision" },
@@ -78,7 +79,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dinov3", editable = "dinov3" },
+    { name = "dinov3", git = "https://github.com/yberreby/dinov3.git" },
+    { name = "ijepa", git = "https://github.com/yberreby/ijepa.git" },
     { name = "omegaconf" },
     { name = "torch" },
     { name = "torchvision" },
@@ -445,7 +447,7 @@ wheels = [
 [[package]]
 name = "dinov3"
 version = "0.0.1"
-source = { editable = "dinov3" }
+source = { git = "https://github.com/yberreby/dinov3.git#54694f7627fd815f62a5dcc82944ffa6153bbb76" }
 dependencies = [
     { name = "ftfy" },
     { name = "omegaconf" },
@@ -457,24 +459,6 @@ dependencies = [
     { name = "torchmetrics" },
     { name = "torchvision" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "docstr-coverage", marker = "extra == 'dev'", specifier = "==2.3.2" },
-    { name = "ftfy" },
-    { name = "mypy", extras = ["reports"], marker = "extra == 'dev'", specifier = "==1.17" },
-    { name = "omegaconf" },
-    { name = "pylint", marker = "extra == 'dev'", specifier = "==3.3.8" },
-    { name = "regex" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.12.8" },
-    { name = "scikit-learn" },
-    { name = "submitit" },
-    { name = "termcolor" },
-    { name = "torch" },
-    { name = "torchmetrics" },
-    { name = "torchvision" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "docker"
@@ -775,6 +759,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/6f/6d/0703ccc57f3a72335
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0e/61/66938bbb5fc52dbdf84594873d5b51fb1f7c7794e9c0f5bd885f30bc507b/idna-3.11-py3-none-any.whl", hash = "sha256:771a87f49d9defaf64091e6e6fe9c18d4833f140bd19464795bc32d966ca37ea", size = 71008, upload-time = "2025-10-12T14:55:18.883Z" },
 ]
+
+[[package]]
+name = "ijepa"
+version = "0.1.0"
+source = { git = "https://github.com/yberreby/ijepa.git#fc9469a838ea2b6239a62d7a2f43c9cc536f6dc0" }
 
 [[package]]
 name = "importlib-metadata"

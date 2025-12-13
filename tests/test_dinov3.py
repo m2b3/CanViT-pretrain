@@ -5,8 +5,9 @@ import pytest
 import torch
 from dinov3.models.vision_transformer import vit_small
 
-from avp import AVPConfig, AVPViT
-from avp.rope import compute_rope, glimpse_positions
+from avp_vit import AVPConfig, AVPViT
+from avp_vit.backend.dinov3 import DINOv3Backend
+from avp_vit.rope import compute_rope, glimpse_positions
 
 
 @pytest.mark.parametrize("rope_dtype", ["fp32", "bf16"])
@@ -51,7 +52,7 @@ def test_rope_matches_backbone_forward(rope_dtype: str):
     backbone.init_weights()
     backbone.eval()
 
-    dtype = backbone.rope_embed.dtype
+    backend = DINOv3Backend(backbone)
     B = 2
     img = torch.randn(B, 3, 112, 112)
 
@@ -59,15 +60,15 @@ def test_rope_matches_backbone_forward(rope_dtype: str):
         native_out = backbone.forward_features(img)
     native_tokens = native_out["x_prenorm"]
 
-    x, (H, W) = backbone.prepare_tokens_with_masks(img, masks=None)
+    x, H, W = backend.prepare_tokens(img)
     centers = torch.zeros(B, 2)
     scales = torch.ones(B)
-    local_pos = glimpse_positions(centers, scales, H, W, dtype=dtype)
-    local_rope = compute_rope(local_pos, backbone.rope_embed.periods)
+    positions = glimpse_positions(centers, scales, H, W, dtype=backend.rope_dtype)
+    rope = compute_rope(positions, backend.rope_periods)
 
     with torch.no_grad():
-        for block in backbone.blocks:
-            x = block(x, local_rope)
+        for i in range(backend.n_blocks):
+            x = backend.forward_block(i, x, rope)
 
     assert torch.allclose(x, native_tokens, atol=1e-5)
 
@@ -78,20 +79,19 @@ def test_per_batch_rope_differs():
     backbone = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype="fp32")
     backbone.init_weights()
 
-    B, H, W, D = 2, 7, 7, backbone.embed_dim
-    n_prefix = 1 + backbone.n_storage_tokens
-    dtype = backbone.rope_embed.dtype
+    backend = DINOv3Backend(backbone)
+    B, H, W = 2, 7, 7
 
-    local = torch.randn(1, n_prefix + H * W, D).expand(B, -1, -1).clone()
+    local = torch.randn(1, backend.n_prefix_tokens + H * W, backend.embed_dim).expand(B, -1, -1).clone()
     centers = torch.tensor([[-0.5, -0.5], [0.5, 0.5]])
     scales = torch.tensor([0.3, 0.7])
 
-    local_pos = glimpse_positions(centers, scales, H, W, dtype=dtype)
-    local_rope = compute_rope(local_pos, backbone.rope_embed.periods)
+    positions = glimpse_positions(centers, scales, H, W, dtype=backend.rope_dtype)
+    rope = compute_rope(positions, backend.rope_periods)
 
     out = local.clone()
-    for block in backbone.blocks:
-        out = block(out, local_rope)
+    for i in range(backend.n_blocks):
+        out = backend.forward_block(i, out, rope)
 
     assert not torch.allclose(out[0], out[1], atol=1e-3)
 
@@ -102,23 +102,22 @@ def test_avp_identity_init():
     backbone = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype="fp32")
     backbone.init_weights()
 
+    backend = DINOv3Backend(backbone)
     cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, gate_init=0.0)
-    avp = AVPViT.from_dinov3(backbone, cfg)
-    dtype = backbone.rope_embed.dtype
+    avp = AVPViT(backend, cfg)
 
-    B, H, W, D = 2, 7, 7, backbone.embed_dim
-    n_prefix = 1 + backbone.n_storage_tokens
+    B, H, W = 2, 7, 7
 
-    local = torch.randn(B, n_prefix + H * W, D)
+    local = torch.randn(B, backend.n_prefix_tokens + H * W, backend.embed_dim)
     centers = torch.zeros(B, 2)
     scales = torch.ones(B)
 
-    local_pos = glimpse_positions(centers, scales, H, W, dtype=dtype)
-    local_rope = compute_rope(local_pos, backbone.rope_embed.periods)
+    positions = glimpse_positions(centers, scales, H, W, dtype=backend.rope_dtype)
+    rope = compute_rope(positions, backend.rope_periods)
 
     expected = local.clone()
-    for block in backbone.blocks:
-        expected = block(expected, local_rope)
+    for i in range(backend.n_blocks):
+        expected = backend.forward_block(i, expected, rope)
 
     actual_local, actual_scene = avp(local.clone(), centers, scales)
 
