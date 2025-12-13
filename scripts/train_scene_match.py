@@ -53,6 +53,7 @@ class Config:
     # Viewpoints
     use_policy: bool = True  # Use learned policy for viewpoint selection
     n_policy_viewpoints: int = 2  # Number of policy-selected viewpoints (after first imposed)
+    policy_noise_std: float = 0.05  # Gaussian noise std on pol_out during training (DDPG-style)
     n_random_viewpoints: int = 2  # For non-policy mode: random viewpoints after full scene
     # For imposed first viewpoint:
     min_viewpoint_scale: float = 0.3
@@ -209,10 +210,12 @@ def train_step_policy(
     first_vp: Viewpoint,
     n_policy_steps: int,
     pol_scale: float,
+    noise_std: float = 0.0,
 ) -> Tensor:
     """Train with policy-selected viewpoints.
 
     First viewpoint is imposed, subsequent viewpoints selected by policy.
+    If noise_std > 0, adds Gaussian noise to pol_out before tanh (DDPG-style exploration).
     """
     with torch.no_grad():
         target = teacher.forward_norm_patches(images)
@@ -230,7 +233,10 @@ def train_step_policy(
         # Generate next viewpoint from policy (except on last step)
         if i < n_total - 1:
             assert out.pol_out is not None, "Policy must be enabled for train_step_policy"
-            vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
+            pol_out = out.pol_out
+            if noise_std > 0:
+                pol_out = pol_out + torch.randn_like(pol_out) * noise_std
+            vp = avp.policy_to_viewpoint(pol_out, pol_scale)
 
     return loss_sum / n_total
 
@@ -299,12 +305,21 @@ def plot_viewpoint_trajectory(
     axes[0].legend(loc="upper right", fontsize=8)
     axes[0].axis("off")
 
-    # Right: scatter ALL batch items' centers per timestep
+    # Right: scatter ALL batch items' centers per timestep with trajectory lines
     ax = axes[1]
+    B = viewpoints[0].centers.shape[0]
+    # Gather all centers: [n_views, B, 2]
+    all_centers = [vp.centers.cpu().numpy() for vp in viewpoints]
+    # Draw lines for each batch item
+    for b in range(B):
+        xs = [all_centers[t][b, 1] for t in range(n_views)]
+        ys = [all_centers[t][b, 0] for t in range(n_views)]
+        ax.plot(xs, ys, color="gray", alpha=0.3, linewidth=1, zorder=1)
+    # Scatter points per timestep
     for i, vp in enumerate(viewpoints):
-        centers = vp.centers.cpu().numpy()  # [B, 2] where [:, 0]=y, [:, 1]=x
+        centers = vp.centers.cpu().numpy()
         cx_all, cy_all = centers[:, 1], centers[:, 0]
-        ax.scatter(cx_all, cy_all, c=[colors[i]], s=40, alpha=0.6, label=f"t={i}")
+        ax.scatter(cx_all, cy_all, c=[colors[i]], s=40, alpha=0.6, label=f"t={i}", zorder=2)
     ax.set_xlim(-1.1, 1.1)
     ax.set_ylim(-1.1, 1.1)
     ax.set_aspect("equal")
@@ -312,7 +327,7 @@ def plot_viewpoint_trajectory(
     ax.axvline(0, color="gray", linestyle="--", alpha=0.3)
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
-    ax.set_title(f"All Centers (B={viewpoints[0].centers.shape[0]})")
+    ax.set_title(f"All Centers (B={B})")
     ax.legend(loc="upper right", fontsize=8)
     ax.invert_yaxis()
 
@@ -329,7 +344,8 @@ class MultistepResult:
     locals: list[Tensor]
     glimpse_imgs: list[Tensor]
     mses: list[float]
-    viewpoints: list[Viewpoint]
+    viewpoints: list[Viewpoint]  # Actually executed (may include noise)
+    viewpoints_deterministic: list[Viewpoint] | None = None  # Policy output without noise
 
 
 def run_multistep_inference(
@@ -372,8 +388,12 @@ def run_multistep_inference_policy(
     first_vp: Viewpoint,
     n_policy_steps: int,
     pol_scale: float,
+    noise_std: float = 0.0,
 ) -> MultistepResult:
-    """Run multi-step inference with policy-selected viewpoints."""
+    """Run multi-step inference with policy-selected viewpoints.
+
+    If noise_std > 0, adds Gaussian noise and tracks both deterministic and sampled viewpoints.
+    """
     n_prefix = teacher.n_prefix_tokens
     n_total = 1 + n_policy_steps
 
@@ -385,6 +405,7 @@ def run_multistep_inference_policy(
         glimpse_imgs: list[Tensor] = []
         mses: list[float] = []
         viewpoints: list[Viewpoint] = []
+        viewpoints_det: list[Viewpoint] | None = [] if noise_std > 0 else None
 
         vp = first_vp
         for i in range(n_total):
@@ -402,10 +423,17 @@ def run_multistep_inference_policy(
             # Generate next viewpoint from policy (except on last step)
             if i < n_total - 1:
                 assert out.pol_out is not None
-                vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
+                vp_det = avp.policy_to_viewpoint(out.pol_out, pol_scale)
+                if viewpoints_det is not None:
+                    viewpoints_det.append(vp_det)
+                if noise_std > 0:
+                    noisy = out.pol_out + torch.randn_like(out.pol_out) * noise_std
+                    vp = avp.policy_to_viewpoint(noisy, pol_scale)
+                else:
+                    vp = vp_det
 
     return MultistepResult(
-        teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints
+        teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints, viewpoints_det
     )
 
 
@@ -553,7 +581,7 @@ def log_train_pca(
     B = images.shape[0]
     if cfg.use_policy:
         first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
-        result = run_multistep_inference_policy(avp, teacher, images, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg))
+        result = run_multistep_inference_policy(avp, teacher, images, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg), cfg.policy_noise_std)
     else:
         viewpoints = make_viewpoints(B, cfg)
         result = run_multistep_inference(avp, teacher, images, viewpoints)
@@ -581,7 +609,7 @@ def eval_and_log(
 
     if cfg.use_policy:
         first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
-        result = run_multistep_inference_policy(avp, teacher, images, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg))
+        result = run_multistep_inference_policy(avp, teacher, images, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg))  # No noise for eval
     else:
         viewpoints = make_viewpoints(B, cfg)
         result = run_multistep_inference(avp, teacher, images, viewpoints)
@@ -701,7 +729,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         optimizer.zero_grad()
         if cfg.use_policy:
             first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
-            loss = train_step_policy(avp, teacher, teacher_img, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg))
+            loss = train_step_policy(avp, teacher, teacher_img, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg), cfg.policy_noise_std)
         else:
             viewpoints = make_viewpoints(B, cfg)
             loss = train_step_fixed(avp, teacher, teacher_img, viewpoints)
