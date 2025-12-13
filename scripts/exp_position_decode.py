@@ -56,13 +56,13 @@ def run_experiment(
     out_dir: str = "outputs/exp_position_decode",
 ) -> None:
     """Run position decoding experiment with real AVPViT."""
-    device = torch.device(device)
+    dev = torch.device(device)
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
     print("Loading DINOv3 backbone...")
     model = dinov3_vits16(weights=str(CKPT_PATH), pretrained=True)
-    backbone = DINOv3Backbone(model.eval().to(device))
+    backbone = DINOv3Backbone(model.eval().to(dev))
     for p in backbone.parameters():
         p.requires_grad = False
 
@@ -71,7 +71,7 @@ def run_experiment(
         glimpse_grid_size=glimpse_grid_size,
         use_policy=True,
     )
-    avp = AVPViT(backbone, cfg).to(device)
+    avp = AVPViT(backbone, cfg).to(dev)
 
     trainable = [p for p in avp.parameters() if p.requires_grad]
     n_params = sum(p.numel() for p in trainable)
@@ -85,9 +85,9 @@ def run_experiment(
     print(f"Config: scene_size={scene_size}, scene_grid={scene_grid_size}, glimpse_grid={glimpse_grid_size}, B={B}, lr={lr}")
 
     for step in range(n_steps):
-        images, target = make_gaussian_images(B, scene_size, device)
+        images, target = make_gaussian_images(B, scene_size, dev)
 
-        vp = Viewpoint.full_scene(B, device)
+        vp = Viewpoint.full_scene(B, dev)
         _, scene, pol_out = avp.forward_step(images, vp, None)
 
         assert pol_out is not None
@@ -125,9 +125,10 @@ def run_experiment(
 
     avp.eval()
     with torch.no_grad():
-        images, target = make_gaussian_images(8, scene_size, device)
-        vp = Viewpoint.full_scene(8, device)
+        images, target = make_gaussian_images(8, scene_size, dev)
+        vp = Viewpoint.full_scene(8, dev)
         _, _, pol_out = avp.forward_step(images, vp, None)
+        assert pol_out is not None
         pred = torch.tanh(pol_out)
 
     fig, axes = plt.subplots(2, 4, figsize=(12, 6))
@@ -147,9 +148,10 @@ def run_experiment(
     plt.close()
 
     with torch.no_grad():
-        images, target = make_gaussian_images(256, scene_size, device)
-        vp = Viewpoint.full_scene(256, device)
+        images, target = make_gaussian_images(256, scene_size, dev)
+        vp = Viewpoint.full_scene(256, dev)
         _, _, pol_out = avp.forward_step(images, vp, None)
+        assert pol_out is not None
         pred = torch.tanh(pol_out)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 5))
