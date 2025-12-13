@@ -247,9 +247,15 @@ def pca_rgb(pca: PCA, features: Tensor, H: int, W: int) -> Tensor:
 
 
 def tensor_to_img(t: Tensor) -> Tensor:
-    """Convert [3, H, W] tensor to displayable [H, W, 3] in [0, 1]."""
+    """Convert [3, H, W] normalized tensor to displayable [H, W, 3] in [0, 1].
+
+    Assumes ImageNet normalization, reverses it for display.
+    """
     t = t.detach().cpu().float()
-    t = (t - t.min()) / (t.max() - t.min() + 1e-8)
+    mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
+    std = torch.tensor(IMAGENET_STD).view(3, 1, 1)
+    t = t * std + mean
+    t = t.clamp(0, 1)
     return t.permute(1, 2, 0)
 
 
@@ -258,68 +264,57 @@ def plot_viewpoint_trajectory(
     viewpoints: list[Viewpoint],
     batch_idx: int = 0,
 ) -> Figure:
-    """Plot image with viewpoint boxes and scatter of centers.
+    """Plot image with viewpoint boxes and scatter of ALL batch centers.
 
-    Coordinate convention: centers in [-1, 1], (0,0) = image center.
-    Box corners: center ± scale (clamped to [-1, 1]).
-    Pixel coords: (c + 1) / 2 * size.
+    Left: single sample's image with viewpoint boxes
+    Right: scatter of ALL batch items' centers per timestep (shows distribution)
+
+    Coordinate convention: centers[:, 0] = y, centers[:, 1] = x, in [-1, 1].
     """
     img = tensor_to_img(image).numpy()
     H, W = img.shape[:2]
+    n_views = len(viewpoints)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    # Left: image with boxes
-    axes[0].imshow(img)
     cmap = plt.get_cmap("viridis")
-    colors = [cmap(i / max(1, len(viewpoints) - 1)) for i in range(len(viewpoints))]
+    colors = [cmap(i / max(1, n_views - 1)) for i in range(n_views)]
 
+    # Left: image with boxes for batch_idx sample
+    axes[0].imshow(img)
     for i, vp in enumerate(viewpoints):
         cy, cx = vp.centers[batch_idx].cpu().numpy()
         s = vp.scales[batch_idx].item()
+        px_cx, px_cy = (cx + 1) / 2 * W, (cy + 1) / 2 * H
+        hw, hh = s * W / 2, s * H / 2
 
-        # Convert from [-1,1] to pixel coords
-        # center pixel = (c + 1) / 2 * size
-        px_cx = (cx + 1) / 2 * W
-        px_cy = (cy + 1) / 2 * H
-        px_half_w = s * W / 2
-        px_half_h = s * H / 2
-
-        # Rectangle: bottom-left corner, width, height
         rect = Rectangle(
-            (px_cx - px_half_w, px_cy - px_half_h),
-            2 * px_half_w,
-            2 * px_half_h,
-            linewidth=2,
-            edgecolor=colors[i],
-            facecolor="none",
+            (px_cx - hw, px_cy - hh), 2 * hw, 2 * hh,
+            linewidth=2, edgecolor=colors[i], facecolor="none",
             label=f"t={i} ({vp.name}, s={s:.2f})",
         )
         axes[0].add_patch(rect)
         axes[0].plot(px_cx, px_cy, "o", color=colors[i], markersize=6)
         axes[0].text(px_cx + 3, px_cy - 3, str(i), color=colors[i], fontsize=10, fontweight="bold")
-
-    axes[0].set_title("Viewpoint Trajectory")
+    axes[0].set_title(f"Trajectory (sample {batch_idx})")
     axes[0].legend(loc="upper right", fontsize=8)
     axes[0].axis("off")
 
-    # Right: scatter of centers in [-1, 1] space
+    # Right: scatter ALL batch items' centers per timestep
+    ax = axes[1]
     for i, vp in enumerate(viewpoints):
-        cy, cx = vp.centers[batch_idx].cpu().numpy()
-        s = vp.scales[batch_idx].item()
-        axes[1].scatter(cx, cy, c=[colors[i]], s=100, label=f"t={i} (s={s:.2f})")
-        axes[1].text(cx + 0.02, cy + 0.02, str(i), fontsize=10)
-
-    axes[1].set_xlim(-1.1, 1.1)
-    axes[1].set_ylim(-1.1, 1.1)
-    axes[1].set_aspect("equal")
-    axes[1].axhline(0, color="gray", linestyle="--", alpha=0.3)
-    axes[1].axvline(0, color="gray", linestyle="--", alpha=0.3)
-    axes[1].set_xlabel("X (center)")
-    axes[1].set_ylabel("Y (center)")
-    axes[1].set_title("Viewpoint Centers")
-    axes[1].legend(loc="upper right", fontsize=8)
-    axes[1].invert_yaxis()  # Match image coords (y increases downward)
+        centers = vp.centers.cpu().numpy()  # [B, 2] where [:, 0]=y, [:, 1]=x
+        cx_all, cy_all = centers[:, 1], centers[:, 0]
+        ax.scatter(cx_all, cy_all, c=[colors[i]], s=40, alpha=0.6, label=f"t={i}")
+    ax.set_xlim(-1.1, 1.1)
+    ax.set_ylim(-1.1, 1.1)
+    ax.set_aspect("equal")
+    ax.axhline(0, color="gray", linestyle="--", alpha=0.3)
+    ax.axvline(0, color="gray", linestyle="--", alpha=0.3)
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_title(f"All Centers (B={viewpoints[0].centers.shape[0]})")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.invert_yaxis()
 
     plt.tight_layout()
     return fig
@@ -414,70 +409,133 @@ def run_multistep_inference_policy(
     )
 
 
+def _vp_to_pixel_box(
+    vp: Viewpoint, sample_idx: int, H: int, W: int
+) -> tuple[float, float, float, float]:
+    """Convert viewpoint to pixel coordinates (cx, cy, half_w, half_h).
+
+    Coordinate convention: centers[:, 0] = y, centers[:, 1] = x, in [-1, 1].
+    """
+    cy, cx = vp.centers[sample_idx].cpu().numpy()
+    s = vp.scales[sample_idx].item()
+    px_cx = (cx + 1) / 2 * W
+    px_cy = (cy + 1) / 2 * H
+    return px_cx, px_cy, s * W / 2, s * H / 2
+
+
 def plot_multistep_pca(
     result: MultistepResult,
-    teacher_img: Tensor,
+    full_image: Tensor,
     scene_grid_size: int,
     glimpse_grid_size: int,
+    sample_idx: int = 0,
 ) -> Figure:
     """Create multi-row PCA visualization figure.
 
-    Columns: Glimpse | Teacher | Scene | Local | Delta | Error
-    - Local: 7x7 processed glimpse features using same PCA as scene
-    - Delta: spatial change in scene from previous timestep (blank for t=0)
+    Columns: Trajectory | Glimpse | Teacher | Scene | Local | Delta | Error
+    - Trajectory: full image with cumulative viewpoint boxes and path
+    - Local: glimpse features using same PCA as scene
+    - Delta: spatial change in scene from previous timestep
+
+    Args:
+        full_image: [3, H, W] the full input image for this sample
+        sample_idx: Which batch sample to visualize
     """
     S = scene_grid_size
     G = glimpse_grid_size
-    B = teacher_img.shape[0]
     n_views = len(result.viewpoints)
 
-    idx = int(torch.randint(B, (1,)).item())
-    teacher_i = result.teacher_patches[idx]
+    teacher_i = result.teacher_patches[sample_idx]
     pca = fit_pca(teacher_i)
     teacher_pca = pca_rgb(pca, teacher_i, S, S)
+    full_img_np = tensor_to_img(full_image).numpy()
+    H, W = full_img_np.shape[:2]
 
-    fig, axes = plt.subplots(n_views, 6, figsize=(24, 4 * n_views))
+    # Precompute viewpoint pixel coords
+    vp_coords = [_vp_to_pixel_box(vp, sample_idx, H, W) for vp in result.viewpoints]
+
+    # Precompute error maps for consistent colorbar
+    error_maps = []
+    for row in range(n_views):
+        scene_i = result.scenes[row][sample_idx]
+        error_map = (scene_i - teacher_i).pow(2).mean(dim=-1).view(S, S).cpu()
+        error_maps.append(error_map)
+    error_vmax = max(e.max().item() for e in error_maps)
+
+    # Color scheme for trajectory
+    cmap = plt.get_cmap("viridis")
+    colors = [cmap(i / max(1, n_views - 1)) for i in range(n_views)]
+
+    fig, axes = plt.subplots(n_views, 7, figsize=(28, 4 * n_views))
 
     for row, vp in enumerate(result.viewpoints):
-        glimpse_i = result.glimpse_imgs[row][idx]
-        scene_i = result.scenes[row][idx]
-        local_i = result.locals[row][idx]
+        glimpse_i = result.glimpse_imgs[row][sample_idx]
+        scene_i = result.scenes[row][sample_idx]
+        local_i = result.locals[row][sample_idx]
         scene_pca = pca_rgb(pca, scene_i, S, S)
         local_pca = pca_rgb(pca, local_i, G, G)
-        error_map = (scene_i - teacher_i).pow(2).mean(dim=-1).view(S, S).cpu()
 
-        # Delta: change from previous scene (L2 norm of difference per patch)
+        # Delta
         if row > 0:
-            prev_scene_i = result.scenes[row - 1][idx]
+            prev_scene_i = result.scenes[row - 1][sample_idx]
             delta_map = (scene_i - prev_scene_i).pow(2).mean(dim=-1).view(S, S).cpu()
         else:
             delta_map = torch.zeros(S, S)
 
-        axes[row, 0].imshow(tensor_to_img(glimpse_i).numpy())
-        axes[row, 0].set_title(f"Glimpse ({vp.name})")
-        axes[row, 0].axis("off")
+        # Col 0: Trajectory - full image with cumulative boxes and path
+        ax = axes[row, 0]
+        ax.imshow(full_img_np)
+        # Draw all boxes up to current row
+        for t in range(row + 1):
+            px_cx, px_cy, hw, hh = vp_coords[t]
+            alpha = 1.0 if t == row else 0.4
+            rect = Rectangle(
+                (px_cx - hw, px_cy - hh), 2 * hw, 2 * hh,
+                linewidth=2, edgecolor=colors[t], facecolor="none", alpha=alpha
+            )
+            ax.add_patch(rect)
+            ax.plot(px_cx, px_cy, "o", color=colors[t], markersize=5, alpha=alpha)
+            ax.text(px_cx + 3, px_cy - 3, str(t), color=colors[t], fontsize=8, alpha=alpha)
+        # Draw path lines
+        for t in range(1, row + 1):
+            x0, y0 = vp_coords[t - 1][:2]
+            x1, y1 = vp_coords[t][:2]
+            ax.plot([x0, x1], [y0, y1], "-", color=colors[t], linewidth=1.5, alpha=0.7)
+        ax.set_title(f"t={row}" if row == 0 else f"t={row}")
+        ax.axis("off")
 
-        axes[row, 1].imshow(teacher_pca.numpy())
-        axes[row, 1].set_title("Teacher (HR)")
+        # Col 1: Glimpse
+        axes[row, 1].imshow(tensor_to_img(glimpse_i).numpy())
+        axes[row, 1].set_title(f"Glimpse ({vp.name})")
         axes[row, 1].axis("off")
 
-        axes[row, 2].imshow(scene_pca.numpy())
-        axes[row, 2].set_title(f"Scene t={row}")
+        # Col 2: Teacher PCA
+        axes[row, 2].imshow(teacher_pca.numpy())
+        axes[row, 2].set_title("Teacher" if row == 0 else "")
         axes[row, 2].axis("off")
 
-        axes[row, 3].imshow(local_pca.numpy())
-        axes[row, 3].set_title(f"Local t={row}")
+        # Col 3: Scene PCA
+        axes[row, 3].imshow(scene_pca.numpy())
+        axes[row, 3].set_title(f"Scene t={row}")
         axes[row, 3].axis("off")
 
-        im_delta = axes[row, 4].imshow(delta_map.numpy(), cmap="viridis")
-        axes[row, 4].set_title("Δ Scene" if row > 0 else "Δ (n/a)")
+        # Col 4: Local PCA
+        axes[row, 4].imshow(local_pca.numpy())
+        axes[row, 4].set_title(f"Local t={row}")
         axes[row, 4].axis("off")
-        fig.colorbar(im_delta, ax=axes[row, 4], fraction=0.046, pad=0.04)
 
-        im_err = axes[row, 5].imshow(error_map.numpy(), cmap="hot")
-        axes[row, 5].set_title(f"MSE={result.mses[row]:.2f}")
+        # Col 5: Delta
+        im_delta = axes[row, 5].imshow(delta_map.numpy(), cmap="viridis")
+        axes[row, 5].set_title("Δ Scene" if row > 0 else "Δ (n/a)")
         axes[row, 5].axis("off")
-        fig.colorbar(im_err, ax=axes[row, 5], fraction=0.046, pad=0.04)
+        fig.colorbar(im_delta, ax=axes[row, 5], fraction=0.046, pad=0.04)
+
+        # Col 6: Error
+        sample_mse = error_maps[row].mean().item()
+        im_err = axes[row, 6].imshow(error_maps[row].numpy(), cmap="hot", vmin=0, vmax=error_vmax)
+        axes[row, 6].set_title(f"Err ({sample_mse:.3f})")
+        axes[row, 6].axis("off")
+        fig.colorbar(im_err, ax=axes[row, 6], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     return fig
@@ -499,11 +557,11 @@ def log_train_pca(
     else:
         viewpoints = make_viewpoints(B, cfg)
         result = run_multistep_inference(avp, teacher, images, viewpoints)
-    fig = plot_multistep_pca(result, images, cfg.scene_grid_size, cfg.glimpse_grid_size)
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-    buf.seek(0)
-    exp.log_image(buf, name="train/pca", step=step)
+    fig = plot_multistep_pca(result, images[0], cfg.scene_grid_size, cfg.glimpse_grid_size, sample_idx=0)
+    with io.BytesIO() as buf:
+        plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        buf.seek(0)
+        exp.log_image(buf, name="train/pca", step=step)
     plt.close(fig)
 
 
@@ -519,6 +577,7 @@ def eval_and_log(
     imgs = val_iter.next_batch()
     images = imgs.to(cfg.device)
     B = images.shape[0]
+    sample_idx = 0  # Consistent sample for all visualizations
 
     if cfg.use_policy:
         first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
@@ -527,30 +586,30 @@ def eval_and_log(
         viewpoints = make_viewpoints(B, cfg)
         result = run_multistep_inference(avp, teacher, images, viewpoints)
 
-    fig = plot_multistep_pca(result, images, cfg.scene_grid_size, cfg.glimpse_grid_size)
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-    buf.seek(0)
-    exp.log_image(buf, name="val/pca", step=step)
+    fig = plot_multistep_pca(result, images[sample_idx], cfg.scene_grid_size, cfg.glimpse_grid_size, sample_idx=sample_idx)
+    with io.BytesIO() as buf:
+        plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        buf.seek(0)
+        exp.log_image(buf, name="val/pca", step=step)
     plt.close(fig)
 
-    # Log viewpoint trajectory
-    fig_traj = plot_viewpoint_trajectory(images[0], result.viewpoints, batch_idx=0)
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-    buf.seek(0)
-    exp.log_image(buf, name="val/trajectory", step=step)
+    # Log viewpoint trajectory (same sample as PCA)
+    fig_traj = plot_viewpoint_trajectory(images[sample_idx], result.viewpoints, batch_idx=sample_idx)
+    with io.BytesIO() as buf:
+        plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        buf.seek(0)
+        exp.log_image(buf, name="val/trajectory", step=step)
     plt.close(fig_traj)
 
-    # Log MSE evolution
+    # Log MSE evolution (batch-averaged)
     for t, mse in enumerate(result.mses):
         exp.log_metric(f"val/mse_t{t}", mse, step=step)
 
-    # Log viewpoint stats
+    # Log viewpoint stats for visualized sample
     for t, vp in enumerate(result.viewpoints):
-        exp.log_metric(f"val/vp_scale_t{t}", vp.scales[0].item(), step=step)
-        exp.log_metric(f"val/vp_cx_t{t}", vp.centers[0, 1].item(), step=step)
-        exp.log_metric(f"val/vp_cy_t{t}", vp.centers[0, 0].item(), step=step)
+        exp.log_metric(f"val/vp_scale_t{t}", vp.scales[sample_idx].item(), step=step)
+        exp.log_metric(f"val/vp_cx_t{t}", vp.centers[sample_idx, 1].item(), step=step)
+        exp.log_metric(f"val/vp_cy_t{t}", vp.centers[sample_idx, 0].item(), step=step)
 
     val_loss = result.mses[-1]
     exp.log_metric("val/loss", val_loss, step=step)
