@@ -265,6 +265,12 @@ def tensor_to_img(t: Tensor) -> Tensor:
     return t.permute(1, 2, 0)
 
 
+def _timestep_colors(n: int) -> list[tuple[float, float, float, float]]:
+    """Generate n colors from viridis colormap for timestep visualization."""
+    cmap = plt.get_cmap("viridis")
+    return [cmap(i / max(1, n - 1)) for i in range(n)]
+
+
 def plot_viewpoint_trajectory(
     image: Tensor,
     viewpoints: list[Viewpoint],
@@ -280,10 +286,9 @@ def plot_viewpoint_trajectory(
     img = tensor_to_img(image).numpy()
     H, W = img.shape[:2]
     n_views = len(viewpoints)
+    colors = _timestep_colors(n_views)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    cmap = plt.get_cmap("viridis")
-    colors = [cmap(i / max(1, n_views - 1)) for i in range(n_views)]
 
     # Left: image with boxes for batch_idx sample
     axes[0].imshow(img)
@@ -344,8 +349,7 @@ class MultistepResult:
     locals: list[Tensor]
     glimpse_imgs: list[Tensor]
     mses: list[float]
-    viewpoints: list[Viewpoint]  # Actually executed (may include noise)
-    viewpoints_deterministic: list[Viewpoint] | None = None  # Policy output without noise
+    viewpoints: list[Viewpoint]
 
 
 def run_multistep_inference(
@@ -392,7 +396,7 @@ def run_multistep_inference_policy(
 ) -> MultistepResult:
     """Run multi-step inference with policy-selected viewpoints.
 
-    If noise_std > 0, adds Gaussian noise and tracks both deterministic and sampled viewpoints.
+    If noise_std > 0, adds Gaussian noise to pol_out before tanh.
     """
     n_prefix = teacher.n_prefix_tokens
     n_total = 1 + n_policy_steps
@@ -405,7 +409,6 @@ def run_multistep_inference_policy(
         glimpse_imgs: list[Tensor] = []
         mses: list[float] = []
         viewpoints: list[Viewpoint] = []
-        viewpoints_det: list[Viewpoint] | None = [] if noise_std > 0 else None
 
         vp = first_vp
         for i in range(n_total):
@@ -423,17 +426,13 @@ def run_multistep_inference_policy(
             # Generate next viewpoint from policy (except on last step)
             if i < n_total - 1:
                 assert out.pol_out is not None
-                vp_det = avp.policy_to_viewpoint(out.pol_out, pol_scale)
-                if viewpoints_det is not None:
-                    viewpoints_det.append(vp_det)
+                pol_out = out.pol_out
                 if noise_std > 0:
-                    noisy = out.pol_out + torch.randn_like(out.pol_out) * noise_std
-                    vp = avp.policy_to_viewpoint(noisy, pol_scale)
-                else:
-                    vp = vp_det
+                    pol_out = pol_out + torch.randn_like(pol_out) * noise_std
+                vp = avp.policy_to_viewpoint(pol_out, pol_scale)
 
     return MultistepResult(
-        teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints, viewpoints_det
+        teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints
     )
 
 
@@ -490,10 +489,7 @@ def plot_multistep_pca(
         error_maps.append(error_map)
     error_vmax = max(e.max().item() for e in error_maps)
 
-    # Color scheme for trajectory
-    cmap = plt.get_cmap("viridis")
-    colors = [cmap(i / max(1, n_views - 1)) for i in range(n_views)]
-
+    colors = _timestep_colors(n_views)
     fig, axes = plt.subplots(n_views, 7, figsize=(28, 4 * n_views))
 
     for row, vp in enumerate(result.viewpoints):
