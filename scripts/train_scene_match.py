@@ -50,6 +50,10 @@ class Config:
     use_output_proj: bool = True
     use_scene_registers: bool = True
     freeze_inner_backbone: bool = False
+    # Viewpoints
+    n_random_viewpoints: int = 1
+    min_viewpoint_scale: float = 0.3
+    max_viewpoint_scale: float = 1.0
     # Training
     n_steps: int = 50000
     batch_size: int = 32
@@ -78,13 +82,23 @@ class Config:
         return self.glimpse_grid_size * PATCH_SIZE
 
 
-def make_viewpoints(B: int, device: torch.device) -> list[Viewpoint]:
-    """Full scene + 4 quadrants in random order."""
-    quadrants = [(0, 0), (1, 0), (0, 1), (1, 1)]
-    perm = torch.randperm(4).tolist()
-    return [Viewpoint.full_scene(B, device)] + [
-        Viewpoint.quadrant(B, device, quadrants[i][0], quadrants[i][1]) for i in perm
-    ]
+def random_viewpoint(
+    B: int, device: torch.device, min_scale: float, max_scale: float
+) -> Viewpoint:
+    """Random viewpoint with scale in [min_scale, max_scale], center constrained to stay in bounds."""
+    scales = torch.rand(B, device=device) * (max_scale - min_scale) + min_scale
+    # Center must satisfy |c| <= 1 - s to keep glimpse in [-1, 1]
+    max_offset = (1 - scales).unsqueeze(1)  # [B, 1]
+    centers = (torch.rand(B, 2, device=device) * 2 - 1) * max_offset  # [B, 2] in [-max_offset, max_offset]
+    return Viewpoint(name="random", centers=centers, scales=scales)
+
+
+def make_viewpoints(B: int, cfg: Config) -> list[Viewpoint]:
+    """Full scene + n_random random viewpoints."""
+    vps = [Viewpoint.full_scene(B, cfg.device)]
+    for _ in range(cfg.n_random_viewpoints):
+        vps.append(random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale))
+    return vps
 
 
 def load_teacher(device: torch.device) -> DINOv3Backbone:
@@ -343,7 +357,7 @@ def eval_and_log(
     """Eval on one random val batch, log multi-row PCA plots to Comet."""
     imgs = val_iter.next_batch()
     images = imgs.to(cfg.device)
-    viewpoints = make_viewpoints(images.shape[0], cfg.device)
+    viewpoints = make_viewpoints(images.shape[0], cfg)
 
     result = run_multistep_inference(avp, teacher, images, viewpoints)
 
@@ -444,7 +458,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             imgs, _ = next(train_iter)
 
         teacher_img = imgs.to(cfg.device)
-        viewpoints = make_viewpoints(teacher_img.shape[0], cfg.device)
+        viewpoints = make_viewpoints(teacher_img.shape[0], cfg)
 
         optimizer.zero_grad()
         loss = train_step(avp, teacher, teacher_img, viewpoints)
