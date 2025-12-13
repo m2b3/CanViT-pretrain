@@ -22,7 +22,6 @@ from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
 from ytch.correctness import assert_shape
 from ytch.device import get_sensible_device
-from ytch.lr.warmup import get_linear_warmup_scheduler
 from ytch.model import count_parameters
 
 from avp_vit import AVPConfig, AVPViT
@@ -60,6 +59,7 @@ class Config:
     viz_every: int = 50
     val_every: int = 50
     n_init_samples: int = 64
+    ckpt_dir: Path = Path("checkpoints")
     device: torch.device = field(default_factory=get_sensible_device)
 
 
@@ -412,7 +412,19 @@ def eval_and_log(
     return val_loss
 
 
+def save_checkpoint(
+    avp: AVPViT, ckpt_path: Path, exp: comet_ml.Experiment, step: int, val_loss: float
+) -> None:
+    """Save model checkpoint, log to Comet."""
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(avp.state_dict(), ckpt_path)
+    size_mb = ckpt_path.stat().st_size / (1024 * 1024)
+    log.info(f"Saved checkpoint: {ckpt_path} ({size_mb:.1f} MB), val_loss={val_loss:.4f}")
+    exp.log_metric("ckpt/val_loss", val_loss, step=step)
+
+
 def main() -> None:
+    torch.set_float32_matmul_precision("high")
     cfg = tyro.cli(Config)
     log.info(f"Config: {cfg}")
 
@@ -452,18 +464,32 @@ def main() -> None:
     log.info(f"Trainable: {n_trainable:,}, Teacher: {n_teacher:,}")
     exp.log_parameters({"trainable_params": n_trainable, "teacher_params": n_teacher})
 
-    # Optimizer
+    # Optimizer + LR schedule (linear warmup -> cosine decay to 0)
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
     optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
     warmup_steps = int(cfg.n_steps * cfg.warmup_ratio)
-    scheduler = get_linear_warmup_scheduler(optimizer, warmup_steps)
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_steps
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=cfg.n_steps - warmup_steps, eta_min=0.0
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
+    )
 
-    # Initial eval
-    eval_and_log(exp, 0, avp, teacher, val_sample, cfg)
+    # Checkpointing setup
+    ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
+    best_val_loss = float("inf")
+
+    # Initial eval + checkpoint
+    val_loss = eval_and_log(exp, 0, avp, teacher, val_sample, cfg)
+    save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
+    best_val_loss = val_loss
 
     # Training
     ema_loss, alpha = 0.0, 2 / (cfg.log_every + 1)
-    pbar = tqdm(range(cfg.n_steps), desc="Training")
+    pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
     for step in pbar:
         if cfg.mix_real_noise and base_img is not None:
             sample = mixed_sample(base_img, cfg)
@@ -482,12 +508,13 @@ def main() -> None:
 
         if step % cfg.log_every == 0:
             lr = scheduler.get_last_lr()[0]
+            sps = pbar.format_dict["rate"] * cfg.batch_size if pbar.format_dict["rate"] else 0
             exp.log_metrics(
                 {"train/loss": ema_loss, "train/grad_norm": grad_norm, "train/lr": lr},
                 step=step,
             )
-            pbar.set_postfix(
-                loss=f"{ema_loss:.2e}", grad=f"{grad_norm:.2e}", lr=f"{lr:.2e}"
+            pbar.set_postfix_str(
+                f"loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e} sps={sps:.0f}"
             )
 
         if step > 0 and step % cfg.viz_every == 0:
@@ -499,11 +526,16 @@ def main() -> None:
             log_train_pca(exp, step, sample, teacher_patches, local_patches, scene, cfg)
 
         if step > 0 and step % cfg.val_every == 0:
-            eval_and_log(exp, step, avp, teacher, val_sample, cfg)
+            val_loss = eval_and_log(exp, step, avp, teacher, val_sample, cfg)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                save_checkpoint(avp, ckpt_path, exp, step, val_loss)
 
-    # Final eval
+    # Final eval + checkpoint if best
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_sample, cfg)
-    log.info(f"Final: train_ema={ema_loss:.4f}, val={val_loss:.4f}")
+    if val_loss < best_val_loss:
+        save_checkpoint(avp, ckpt_path, exp, cfg.n_steps, val_loss)
+    log.info(f"Final: train_ema={ema_loss:.4f}, val={val_loss:.4f}, best={best_val_loss:.4f}")
     exp.end()
 
 
