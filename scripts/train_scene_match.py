@@ -472,18 +472,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             ema_loss = ema_loss_t.item()
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
-            sps = (
-                pbar.format_dict["rate"] * cfg.batch_size
-                if pbar.format_dict["rate"]
-                else 0
-            )
             exp.log_metrics(
                 {"train/loss": ema_loss, "train/grad_norm": grad_norm, "train/lr": lr},
                 step=step,
             )
-            pbar.set_postfix_str(
-                f"loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e} sps={sps:.0f}"
-            )
+            pbar.set_postfix_str(f"loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
         if step > 0 and step % cfg.viz_every == 0:
             log_train_pca(exp, step, avp, teacher, teacher_img, viewpoints, cfg)
