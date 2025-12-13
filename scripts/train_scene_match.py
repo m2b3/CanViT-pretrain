@@ -109,15 +109,6 @@ def load_teacher(device: torch.device) -> DINOv3Backbone:
     return backbone
 
 
-def get_teacher_raw_patches(teacher: DINOv3Backbone, images: Tensor) -> Tensor:
-    """Get raw teacher patch features BEFORE LayerNorm."""
-    with torch.no_grad():
-        x, H, W = teacher.prepare_tokens(images)
-        for i in range(teacher.n_blocks):
-            x = teacher.forward_block(i, x, rope=None)
-        return x[:, teacher.n_prefix_tokens:].clone()
-
-
 def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     backbone_copy = copy.deepcopy(teacher)
     for p in backbone_copy.parameters():
@@ -203,9 +194,10 @@ def train_step_fixed(
     viewpoints: list[Viewpoint],
 ) -> Tensor:
     """Train with fixed (pre-defined) viewpoints."""
-    target_raw = get_teacher_raw_patches(teacher, images)
+    with torch.no_grad():
+        target = teacher.forward_norm_patches(images)
     return avp.forward_with_loss(
-        images, viewpoints, lambda scene: nn.functional.mse_loss(scene, target_raw)
+        images, viewpoints, lambda scene: nn.functional.mse_loss(scene, target)
     )
 
 
@@ -221,7 +213,8 @@ def train_step_policy(
 
     First viewpoint is imposed, subsequent viewpoints selected by policy.
     """
-    target_raw = get_teacher_raw_patches(teacher, images)
+    with torch.no_grad():
+        target = teacher.forward_norm_patches(images)
     n_total = 1 + n_policy_steps
 
     scene: Tensor | None = None
@@ -231,7 +224,7 @@ def train_step_policy(
     for i in range(n_total):
         out = avp.forward_step(images, vp, scene)
         scene = out.scene
-        loss_sum = loss_sum + nn.functional.mse_loss(avp.output_proj(scene), target_raw)
+        loss_sum = loss_sum + nn.functional.mse_loss(avp.output_proj(scene), target)
 
         # Generate next viewpoint from policy (except on last step)
         if i < n_total - 1:
@@ -277,10 +270,7 @@ def run_multistep_inference(
     images: Tensor,
     viewpoints: list[Viewpoint],
 ) -> MultistepResult:
-    """Run multi-step inference, collecting intermediate scenes, locals, and MSEs.
-
-    All features are normalized with teacher's LayerNorm for fair comparison and viz.
-    """
+    """Run multi-step inference, collecting intermediate scenes, locals, and MSEs."""
     n_prefix = teacher.n_prefix_tokens
     with torch.inference_mode():
         teacher_patches = teacher.forward_norm_patches(images)
@@ -297,11 +287,9 @@ def run_multistep_inference(
             # Strip prefix tokens and apply teacher's output norm for fair comparison
             local_patches = teacher.output_norm(out.local[:, n_prefix:])
             locals_list.append(local_patches)
-            # Apply output_proj then LayerNorm for normalized scene features
             scene_proj = avp.output_proj(scene)
-            scene_norm = teacher.output_norm(scene_proj)
-            scenes.append(scene_norm)
-            mse = nn.functional.mse_loss(scene_norm, teacher_patches).item()
+            scenes.append(scene_proj)
+            mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
             mses.append(mse)
 
     return MultistepResult(
@@ -339,9 +327,8 @@ def run_multistep_inference_policy(
             local_patches = teacher.output_norm(out.local[:, n_prefix:])
             locals_list.append(local_patches)
             scene_proj = avp.output_proj(scene)
-            scene_norm = teacher.output_norm(scene_proj)
-            scenes.append(scene_norm)
-            mse = nn.functional.mse_loss(scene_norm, teacher_patches).item()
+            scenes.append(scene_proj)
+            mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
             mses.append(mse)
 
             # Generate next viewpoint from policy (except on last step)
@@ -529,8 +516,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             "teacher_params": n_teacher,
             "train_size": n_train,
             "val_size": n_val,
-            "train_loss_type": "raw_mse",  # MSE on pre-LayerNorm features
-            "val_loss_type": "normed_mse",  # MSE on post-LayerNorm features
         }
     )
 
