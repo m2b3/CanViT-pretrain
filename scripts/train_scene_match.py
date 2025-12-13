@@ -9,6 +9,7 @@ from pathlib import Path
 import comet_ml
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 import optuna
 import torch
 import torch.nn as nn
@@ -252,6 +253,78 @@ def tensor_to_img(t: Tensor) -> Tensor:
     return t.permute(1, 2, 0)
 
 
+def plot_viewpoint_trajectory(
+    image: Tensor,
+    viewpoints: list[Viewpoint],
+    batch_idx: int = 0,
+) -> Figure:
+    """Plot image with viewpoint boxes and scatter of centers.
+
+    Coordinate convention: centers in [-1, 1], (0,0) = image center.
+    Box corners: center ± scale (clamped to [-1, 1]).
+    Pixel coords: (c + 1) / 2 * size.
+    """
+    img = tensor_to_img(image).numpy()
+    H, W = img.shape[:2]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Left: image with boxes
+    axes[0].imshow(img)
+    cmap = plt.get_cmap("viridis")
+    colors = [cmap(i / max(1, len(viewpoints) - 1)) for i in range(len(viewpoints))]
+
+    for i, vp in enumerate(viewpoints):
+        cy, cx = vp.centers[batch_idx].cpu().numpy()
+        s = vp.scales[batch_idx].item()
+
+        # Convert from [-1,1] to pixel coords
+        # center pixel = (c + 1) / 2 * size
+        px_cx = (cx + 1) / 2 * W
+        px_cy = (cy + 1) / 2 * H
+        px_half_w = s * W / 2
+        px_half_h = s * H / 2
+
+        # Rectangle: bottom-left corner, width, height
+        rect = Rectangle(
+            (px_cx - px_half_w, px_cy - px_half_h),
+            2 * px_half_w,
+            2 * px_half_h,
+            linewidth=2,
+            edgecolor=colors[i],
+            facecolor="none",
+            label=f"t={i} ({vp.name}, s={s:.2f})",
+        )
+        axes[0].add_patch(rect)
+        axes[0].plot(px_cx, px_cy, "o", color=colors[i], markersize=6)
+        axes[0].text(px_cx + 3, px_cy - 3, str(i), color=colors[i], fontsize=10, fontweight="bold")
+
+    axes[0].set_title("Viewpoint Trajectory")
+    axes[0].legend(loc="upper right", fontsize=8)
+    axes[0].axis("off")
+
+    # Right: scatter of centers in [-1, 1] space
+    for i, vp in enumerate(viewpoints):
+        cy, cx = vp.centers[batch_idx].cpu().numpy()
+        s = vp.scales[batch_idx].item()
+        axes[1].scatter(cx, cy, c=[colors[i]], s=100, label=f"t={i} (s={s:.2f})")
+        axes[1].text(cx + 0.02, cy + 0.02, str(i), fontsize=10)
+
+    axes[1].set_xlim(-1.1, 1.1)
+    axes[1].set_ylim(-1.1, 1.1)
+    axes[1].set_aspect("equal")
+    axes[1].axhline(0, color="gray", linestyle="--", alpha=0.3)
+    axes[1].axvline(0, color="gray", linestyle="--", alpha=0.3)
+    axes[1].set_xlabel("X (center)")
+    axes[1].set_ylabel("Y (center)")
+    axes[1].set_title("Viewpoint Centers")
+    axes[1].legend(loc="upper right", fontsize=8)
+    axes[1].invert_yaxis()  # Match image coords (y increases downward)
+
+    plt.tight_layout()
+    return fig
+
+
 @dataclass
 class MultistepResult:
     """Results from multi-step AVP inference."""
@@ -461,9 +534,23 @@ def eval_and_log(
     exp.log_image(buf, name="val/pca", step=step)
     plt.close(fig)
 
+    # Log viewpoint trajectory
+    fig_traj = plot_viewpoint_trajectory(images[0], result.viewpoints, batch_idx=0)
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+    buf.seek(0)
+    exp.log_image(buf, name="val/trajectory", step=step)
+    plt.close(fig_traj)
+
     # Log MSE evolution
     for t, mse in enumerate(result.mses):
         exp.log_metric(f"val/mse_t{t}", mse, step=step)
+
+    # Log viewpoint stats
+    for t, vp in enumerate(result.viewpoints):
+        exp.log_metric(f"val/vp_scale_t{t}", vp.scales[0].item(), step=step)
+        exp.log_metric(f"val/vp_cx_t{t}", vp.centers[0, 1].item(), step=step)
+        exp.log_metric(f"val/vp_cy_t{t}", vp.centers[0, 0].item(), step=step)
 
     val_loss = result.mses[-1]
     exp.log_metric("val/loss", val_loss, step=step)
