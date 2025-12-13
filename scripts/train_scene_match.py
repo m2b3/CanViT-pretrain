@@ -32,10 +32,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
 CKPT_PATH = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
-TRAIN_IMAGE_URLS = [
-    "https://dl.fbaipublicfiles.com/dinov3/notebooks/pca/test_image.jpg",  # dog
-    "https://dl.fbaipublicfiles.com/dino/img.png",  # bird
-]
+TRAIN_IMAGE_URL = "https://dl.fbaipublicfiles.com/dinov3/notebooks/pca/test_image.jpg"
 VAL_IMAGE_URL = "https://dl.fbaipublicfiles.com/dinov2/images/example.jpg"
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -58,6 +55,7 @@ class Config:
     log_every: int = 20
     viz_every: int = 50
     val_every: int = 50
+    ckpt_every: int = 1000
     n_init_samples: int = 64
     ckpt_dir: Path = Path("checkpoints")
     device: torch.device = field(default_factory=get_sensible_device)
@@ -450,7 +448,7 @@ def main() -> None:
     # Load base image for mixed training
     base_img: Tensor | None = None
     if cfg.mix_real_noise:
-        base_img = load_base_image(TRAIN_IMAGE_URLS[0], cfg.device)
+        base_img = load_base_image(TRAIN_IMAGE_URL, cfg.device)
         log.info(f"Loaded base image: {base_img.shape}")
 
     # Load val sample
@@ -531,7 +529,8 @@ def main() -> None:
             val_loss = eval_and_log(exp, step, avp, teacher, val_sample, cfg)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_checkpoint(avp, ckpt_path, exp, step, val_loss)
+                if step % cfg.ckpt_every == 0:
+                    save_checkpoint(avp, ckpt_path, exp, step, val_loss)
 
     # Final eval + checkpoint if best
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_sample, cfg)
