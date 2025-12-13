@@ -118,14 +118,15 @@ def test_scene_registers_disabled_by_default():
     assert avp.scene_registers is None
 
 
-def test_scene_registers_uses_backbone_count():
-    cfg = AVPConfig(scene_grid_size=4, use_scene_registers=True)
+def test_scene_registers_scales_with_token_ratio():
+    # scene=14, glimpse=7 -> ratio=4, so 4 backbone regs -> 16 scene regs
+    cfg = AVPConfig(scene_grid_size=14, glimpse_grid_size=7, use_scene_registers=True)
     backbone = MockBackbone(64, 4, 2, n_register_tokens=4)
     avp = AVPViT(backbone, cfg)
 
-    assert avp.n_scene_registers == 4
+    assert avp.n_scene_registers == 16  # 4 * (14/7)² = 4 * 4 = 16
     assert avp.scene_registers is not None
-    assert avp.scene_registers.shape == (1, 4, 64)
+    assert avp.scene_registers.shape == (1, 16, 64)
 
 
 def test_scene_registers_output_shape_unchanged():

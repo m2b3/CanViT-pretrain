@@ -45,12 +45,15 @@ class AVPViT(nn.Module):
         num_heads = backbone.num_heads
         n_blocks = backbone.n_blocks
 
-        self.n_scene_registers = backbone.n_register_tokens if cfg.use_scene_registers else 0
-        if self.n_scene_registers > 0:
+        # Scale scene registers proportionally to scene/glimpse token ratio
+        if cfg.use_scene_registers and backbone.n_register_tokens > 0:
+            ratio = (cfg.scene_grid_size / cfg.glimpse_grid_size) ** 2
+            self.n_scene_registers = round(backbone.n_register_tokens * ratio)
             self.scene_registers = nn.Parameter(
                 torch.randn(1, self.n_scene_registers, embed_dim)
             )
         else:
+            self.n_scene_registers = 0
             self.scene_registers = None
 
         self.scene_tokens = nn.Parameter(
