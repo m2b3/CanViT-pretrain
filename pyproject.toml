@@ -6,12 +6,12 @@ authors = [{ name = "Yohaï-Eliel BERREBY", email = "me@yberreby.com" }]
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "torch",
-    "torchvision",
-    "omegaconf",
     "dinov3",
     "ybml",
     "ijepa",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+    "omegaconf>=2.4.0.dev4",
 ]
 
 [build-system]

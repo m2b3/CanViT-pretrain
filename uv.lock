@@ -81,9 +81,9 @@ dev = [
 requires-dist = [
     { name = "dinov3", git = "https://github.com/yberreby/dinov3.git" },
     { name = "ijepa", git = "https://github.com/yberreby/ijepa.git" },
-    { name = "omegaconf" },
-    { name = "torch" },
-    { name = "torchvision" },
+    { name = "omegaconf", specifier = ">=2.4.0.dev4" },
+    { name = "torch", specifier = ">=2.9.1" },
+    { name = "torchvision", specifier = ">=0.24.1" },
     { name = "ybml", git = "https://github.com/yberreby/ybml.git" },
 ]
 
