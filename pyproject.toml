@@ -1,0 +1,15 @@
+[project]
+name = "avp-vit"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "torchvision",
+    "omegaconf",
+    "dinov3",
+]
+
+[tool.uv.sources]
+dinov3 = { path = "dinov3", editable = true }
