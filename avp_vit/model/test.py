@@ -198,3 +198,64 @@ def test_glimpse_size_from_backbone():
     avp = AVPViT(backbone, cfg)
 
     assert avp.glimpse_size == 7 * PATCH_SIZE  # 112
+
+
+def test_policy_disabled_by_default():
+    cfg = AVPConfig(scene_grid_size=4)
+    backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    assert avp.pol_token is None
+    assert avp.pol_norm is None
+    assert avp.pol_proj is None
+
+
+def test_policy_enabled():
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_policy=True)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    assert avp.pol_token is not None
+    assert avp.pol_token.shape == (1, 1, embed_dim)
+    assert avp.pol_norm is not None
+    assert isinstance(avp.pol_norm, torch.nn.LayerNorm)
+    assert avp.pol_proj is not None
+    assert isinstance(avp.pol_proj, torch.nn.Linear)
+
+
+def test_policy_forward_step_returns_pol_out():
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_policy=True)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+
+    local, scene, pol_out = avp.forward_step(images, vp, None)
+
+    assert local.shape == (B, 10, embed_dim)  # CLS + 3x3 glimpse grid
+    assert scene.shape == (B, 16, embed_dim)  # 4x4 scene grid
+    assert pol_out is not None
+    assert pol_out.shape == (B, 2)
+
+
+def test_policy_to_viewpoint():
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_policy=True)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 4
+    pol_out = torch.randn(B, 2) * 10  # Large values to test tanh clamping
+    scale = 0.25
+
+    vp = avp.policy_to_viewpoint(pol_out, scale)
+
+    assert vp.centers.shape == (B, 2)
+    assert vp.scales.shape == (B,)
+    assert (vp.scales == scale).all()
+    # Centers should be bounded by max_offset = 1 - scale = 0.75
+    assert (vp.centers.abs() <= 0.75 + 1e-6).all()

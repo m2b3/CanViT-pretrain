@@ -106,6 +106,15 @@ def load_teacher(device: torch.device) -> DINOv3Backbone:
     return backbone
 
 
+def get_teacher_raw_patches(teacher: DINOv3Backbone, images: Tensor) -> Tensor:
+    """Get raw teacher patch features BEFORE LayerNorm."""
+    with torch.inference_mode():
+        x, H, W = teacher.prepare_tokens(images)
+        for i in range(teacher.n_blocks):
+            x = teacher.forward_block(i, x, rope=None)
+        return x[:, teacher.n_prefix_tokens:].clone()
+
+
 def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     backbone_copy = copy.deepcopy(teacher)
     for p in backbone_copy.parameters():
@@ -184,12 +193,14 @@ def train_step(
     images: Tensor,
     viewpoints: list[Viewpoint],
 ) -> Tensor:
-    """Compute average MSE loss across viewpoints."""
-    with torch.inference_mode():
-        target = teacher.forward_norm_patches(images)
-    target = target.clone()
+    """Compute average MSE loss on RAW features (pre-LayerNorm).
+
+    Training on raw features then applying LayerNorm at eval converges better
+    than training on normalized features directly.
+    """
+    target_raw = get_teacher_raw_patches(teacher, images)
     return avp.forward_with_loss(
-        images, viewpoints, lambda scene: nn.functional.mse_loss(scene, target)
+        images, viewpoints, lambda scene: nn.functional.mse_loss(scene, target_raw)
     )
 
 
@@ -229,7 +240,10 @@ def run_multistep_inference(
     images: Tensor,
     viewpoints: list[Viewpoint],
 ) -> MultistepResult:
-    """Run multi-step inference, collecting intermediate scenes, locals, and MSEs."""
+    """Run multi-step inference, collecting intermediate scenes, locals, and MSEs.
+
+    All features are normalized with teacher's LayerNorm for fair comparison and viz.
+    """
     n_prefix = teacher.n_prefix_tokens
     with torch.inference_mode():
         teacher_patches = teacher.forward_norm_patches(images)
@@ -245,9 +259,11 @@ def run_multistep_inference(
             # Strip prefix tokens and apply teacher's output norm for fair comparison
             local_patches = teacher.output_norm(local[:, n_prefix:])
             locals_list.append(local_patches)
+            # Apply output_proj then LayerNorm for normalized scene features
             scene_proj = avp.output_proj(scene)
-            scenes.append(scene_proj)
-            mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
+            scene_norm = teacher.output_norm(scene_proj)
+            scenes.append(scene_norm)
+            mse = nn.functional.mse_loss(scene_norm, teacher_patches).item()
             mses.append(mse)
 
     return MultistepResult(
@@ -420,6 +436,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             "teacher_params": n_teacher,
             "train_size": n_train,
             "val_size": n_val,
+            "train_loss_type": "raw_mse",  # MSE on pre-LayerNorm features
+            "val_loss_type": "normed_mse",  # MSE on post-LayerNorm features
         }
     )
 

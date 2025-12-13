@@ -19,6 +19,7 @@ class AVPConfig:
     use_scene_registers: bool = False
     gate_init: float = 0.0
     use_output_proj: bool = False
+    use_policy: bool = False  # Enable learned viewpoint policy
 
 
 @final
@@ -40,6 +41,9 @@ class AVPViT(nn.Module):
     read_gate: nn.ParameterList
     write_gate: nn.ParameterList
     output_proj: nn.Module
+    pol_token: nn.Parameter | None
+    pol_norm: nn.Module | None
+    pol_proj: nn.Module | None
 
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
@@ -101,6 +105,21 @@ class AVPViT(nn.Module):
         else:
             self.output_proj = nn.Identity()
 
+        # Policy: learnable POL token + LayerNorm + projection to (y, x)
+        if cfg.use_policy:
+            self.pol_token = nn.Parameter(
+                torch.randn(1, 1, embed_dim) / (embed_dim**0.5)
+            )
+            self.pol_norm = nn.LayerNorm(embed_dim)
+            self.pol_proj = nn.Linear(embed_dim, 2)
+            # Small uniform init to avoid tanh saturation at start
+            nn.init.uniform_(self.pol_proj.weight, -1e-2, 1e-2)
+            nn.init.zeros_(self.pol_proj.bias)
+        else:
+            self.pol_token = None
+            self.pol_norm = None
+            self.pol_proj = None
+
     def _init_scene(self, B: int, scene: Tensor | None) -> Tensor:
         """Initialize scene: use provided or expand scene_tokens, prepend registers."""
         if scene is None:
@@ -115,8 +134,11 @@ class AVPViT(nn.Module):
         centers: Tensor,
         scales: Tensor,
         scene: Tensor | None,
-    ) -> tuple[Tensor, Tensor]:
-        """Process one glimpse: read from scene, forward through backbone, write to scene."""
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
+        """Process one glimpse: read from scene, forward through backbone, write to scene.
+
+        Returns (local, scene, pol_out) where pol_out is raw policy output [B, 2] or None.
+        """
         B = local.shape[0]
         H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
@@ -125,7 +147,18 @@ class AVPViT(nn.Module):
 
         scene_t = self._init_scene(B, scene)
 
+        # Prepend POL token to local stream if policy enabled
+        has_pol = self.pol_token is not None
+        if has_pol:
+            pol = self.pol_token.expand(B, -1, -1)  # [B, 1, D]
+            local = torch.cat([pol, local], dim=1)  # [B, 1+N, D]
+
+        # Compute positions: POL uses viewpoint center, patches use glimpse_positions
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
+        if has_pol:
+            pol_pos = centers.unsqueeze(1).to(rope_dtype)  # [B, 1, 2]
+            local_pos = torch.cat([pol_pos, local_pos], dim=1)  # [B, 1+H*W, 2]
+
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
 
         local_rope = compute_rope(local_pos, periods)
@@ -140,13 +173,20 @@ class AVPViT(nn.Module):
                 scene_t, local, scene_rope, local_rope
             )
 
+        # Extract POL token and decode policy output
+        pol_out: Tensor | None = None
+        if has_pol:
+            assert self.pol_norm is not None and self.pol_proj is not None
+            pol_out = self.pol_proj(self.pol_norm(local[:, 0, :]))  # [B, 2]
+            local = local[:, 1:, :]  # Strip POL from local
+
         # Strip registers, return grid tokens only
-        return local, scene_t[:, n_reg:]
+        return local, scene_t[:, n_reg:], pol_out
 
     def forward_step(
         self, images: Tensor, viewpoint: Viewpoint, scene: Tensor | None = None
-    ) -> tuple[Tensor, Tensor]:
-        """Single step: extract glimpse, process, return (local, scene)."""
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
+        """Single step: extract glimpse, process, return (local, scene, pol_out)."""
         glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
         tokens, _, _ = self.backbone.prepare_tokens(glimpse)
         return self._process_glimpse(tokens, viewpoint.centers, viewpoint.scales, scene)
@@ -156,7 +196,7 @@ class AVPViT(nn.Module):
         """Process full images through viewpoints, return final scene representation."""
         scene: Tensor | None = None
         for vp in viewpoints:
-            _, scene = self.forward_step(images, vp, scene)
+            _, scene, _ = self.forward_step(images, vp, scene)
         assert scene is not None
         return self.output_proj(scene)
 
@@ -174,7 +214,22 @@ class AVPViT(nn.Module):
         scene: Tensor | None = None
         loss_sum = torch.tensor(0.0, device=images.device)
         for vp in viewpoints:
-            _, scene = self.forward_step(images, vp, scene)
+            _, scene, _ = self.forward_step(images, vp, scene)
             scene_proj = self.output_proj(scene)
             loss_sum = loss_sum + loss_fn(scene_proj)
         return loss_sum / len(viewpoints)
+
+    def policy_to_viewpoint(self, pol_out: Tensor, scale: float) -> Viewpoint:
+        """Convert raw policy output to bounded Viewpoint.
+
+        Args:
+            pol_out: [B, 2] raw output from pol_proj
+            scale: fixed scale for policy viewpoints
+
+        Returns:
+            Viewpoint with centers clamped to valid bounds
+        """
+        max_offset = 1.0 - scale
+        centers = torch.tanh(pol_out) * max_offset  # [B, 2] in [-max_offset, max_offset]
+        scales = torch.full((pol_out.shape[0],), scale, device=pol_out.device)
+        return Viewpoint(name="policy", centers=centers, scales=scales)
