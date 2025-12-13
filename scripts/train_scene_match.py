@@ -419,8 +419,17 @@ def run_multistep_inference_policy(
     first_vp: Viewpoint,
     n_policy_steps: int,
     pol_scale: float,
+    epsilon: float = 0.0,
+    min_scale: float = 0.3,
+    max_scale: float = 1.0,
 ) -> MultistepResult:
-    """Run multi-step inference with deterministic policy-selected viewpoints."""
+    """Run multi-step inference with policy-selected viewpoints.
+
+    If epsilon > 0, uses epsilon-greedy per batch item (for train viz).
+    If epsilon = 0 (default), deterministic policy (for eval).
+    """
+    B = images.shape[0]
+    device = images.device
     n_prefix = teacher.n_prefix_tokens
     n_total = 1 + n_policy_steps
 
@@ -446,10 +455,18 @@ def run_multistep_inference_policy(
             mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
             mses.append(mse)
 
-            # Generate next viewpoint from policy (except on last step)
+            # Generate next viewpoint (except on last step)
             if i < n_total - 1:
                 assert out.pol_out is not None
-                vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
+                if epsilon > 0:
+                    use_random = torch.rand(B, device=device) < epsilon
+                    rand_vp = random_viewpoint(B, device, min_scale, max_scale)
+                    pol_vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
+                    centers = torch.where(use_random.unsqueeze(1), rand_vp.centers, pol_vp.centers)
+                    scales = torch.where(use_random, rand_vp.scales, pol_vp.scales)
+                    vp = Viewpoint(name="mixed", centers=centers, scales=scales)
+                else:
+                    vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
 
     return MultistepResult(
         teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints
@@ -602,7 +619,7 @@ def log_train_pca(
     images: Tensor,
     cfg: Config,
 ) -> None:
-    """Log multi-row train PCA viz to Comet."""
+    """Log multi-row train PCA viz and trajectory to Comet."""
     B = images.shape[0]
     if cfg.use_policy:
         first_vp = random_viewpoint(
@@ -615,10 +632,14 @@ def log_train_pca(
             first_vp,
             cfg.n_policy_viewpoints,
             policy_scale(cfg),
+            cfg.epsilon,
+            cfg.min_viewpoint_scale,
+            cfg.max_viewpoint_scale,
         )
     else:
         viewpoints = make_viewpoints(B, cfg)
         result = run_multistep_inference(avp, teacher, images, viewpoints)
+
     fig = plot_multistep_pca(
         result, images[0], cfg.scene_grid_size, cfg.glimpse_grid_size, sample_idx=0
     )
@@ -627,6 +648,14 @@ def log_train_pca(
         buf.seek(0)
         exp.log_image(buf, name="train/pca", step=step)
     plt.close(fig)
+
+    # Log trajectory showing epsilon-greedy exploration
+    fig_traj = plot_viewpoint_trajectory(images[0], result.viewpoints, batch_idx=0)
+    with io.BytesIO() as buf:
+        plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        buf.seek(0)
+        exp.log_image(buf, name="train/trajectory", step=step)
+    plt.close(fig_traj)
 
 
 def eval_and_log(
