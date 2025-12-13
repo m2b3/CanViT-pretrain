@@ -22,9 +22,7 @@ class IJEPABackbone(ViTBackbone, nn.Module):
     _rope_periods: Tensor
     _rope_dtype: torch.dtype
 
-    def __init__(
-        self, backbone: IJEPAVisionTransformer, rope_dtype: torch.dtype = torch.float32
-    ) -> None:
+    def __init__(self, backbone: IJEPAVisionTransformer, rope_dtype: torch.dtype) -> None:
         nn.Module.__init__(self)
         self._backbone = backbone
         self._rope_dtype = rope_dtype

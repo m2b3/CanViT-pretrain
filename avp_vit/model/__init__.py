@@ -88,7 +88,7 @@ class AVPViT(nn.Module):
         )
 
         pos = make_grid_positions(
-            cfg.scene_grid_size, cfg.scene_grid_size, self.scene_tokens.device
+            cfg.scene_grid_size, cfg.scene_grid_size, self.scene_tokens.device, dtype=backbone.rope_dtype
         )
         self.register_buffer("scene_positions", pos)
         self.scene_positions = pos

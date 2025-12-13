@@ -39,7 +39,7 @@ def load_image(url: str, size: int = 448) -> tuple[Image.Image, torch.Tensor]:
 def extract_features(backbone: DINOv3Backbone, x: torch.Tensor) -> tuple[torch.Tensor, int, int]:
     with torch.inference_mode():
         tokens, H, W = backbone.prepare_tokens(x)
-        pos = make_grid_positions(H, W, tokens.device).unsqueeze(0).to(backbone.rope_dtype)
+        pos = make_grid_positions(H, W, tokens.device, dtype=backbone.rope_dtype).unsqueeze(0)
         rope = compute_rope(pos, backbone.rope_periods)
         for i in range(backbone.n_blocks):
             tokens = backbone.forward_block(i, tokens, rope)

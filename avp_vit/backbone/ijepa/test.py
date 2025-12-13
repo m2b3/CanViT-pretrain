@@ -13,7 +13,7 @@ def test_forward_matches_native():
     native = vit_small(img_size=[112], patch_size=16)
     native.eval()
 
-    backbone = IJEPABackbone(native)
+    backbone = IJEPABackbone(native, rope_dtype=torch.float32)
 
     B = 2
     img = torch.randn(B, 3, 112, 112)
@@ -34,7 +34,7 @@ def test_forward_matches_native():
 def test_properties():
     """Backbone exposes correct properties."""
     native = vit_small(img_size=[112], patch_size=16)
-    backbone = IJEPABackbone(native)
+    backbone = IJEPABackbone(native, rope_dtype=torch.float32)
 
     assert backbone.embed_dim == 384
     assert backbone.num_heads == 6

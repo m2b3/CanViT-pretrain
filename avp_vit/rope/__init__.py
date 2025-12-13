@@ -16,9 +16,9 @@ from ytch.correctness import assert_shape
 
 def make_rope_periods(
     head_dim: int,
+    dtype: torch.dtype,
     base: float = 100.0,
     device: torch.device | None = None,
-    dtype: torch.dtype = torch.float32,
 ) -> Tensor:
     """Create RoPE frequency periods (DINOv3-style)."""
     n_freqs = head_dim // 4
@@ -26,9 +26,7 @@ def make_rope_periods(
     return base**exponents
 
 
-def grid_offsets(
-    grid_h: int, grid_w: int, device: torch.device, dtype: torch.dtype = torch.float32
-) -> Tensor:
+def grid_offsets(grid_h: int, grid_w: int, device: torch.device, dtype: torch.dtype) -> Tensor:
     """Normalized grid offsets in [-1, 1]^2 (DINOv3 convention).
 
     This is the SINGLE SOURCE OF TRUTH for patch center coordinates.
@@ -50,10 +48,7 @@ def grid_offsets(
 
 
 def make_grid_positions(
-    grid_h: int,
-    grid_w: int,
-    device: torch.device,
-    dtype: torch.dtype = torch.float32,
+    grid_h: int, grid_w: int, device: torch.device, dtype: torch.dtype
 ) -> Tensor:
     """Fixed grid positions in [-1, 1]^2 (DINOv3 convention)."""
     out = grid_offsets(grid_h, grid_w, device, dtype)
@@ -62,11 +57,7 @@ def make_grid_positions(
 
 
 def glimpse_positions(
-    centers: Tensor,
-    scales: Tensor,
-    grid_h: int,
-    grid_w: int,
-    dtype: torch.dtype = torch.float32,
+    centers: Tensor, scales: Tensor, grid_h: int, grid_w: int, dtype: torch.dtype
 ) -> Tensor:
     """Compute scene-space positions for glimpse patch tokens."""
     B = centers.shape[0]

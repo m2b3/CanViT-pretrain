@@ -34,7 +34,7 @@ class MockBackbone(ViTBackbone, nn.Module):
         self._n_register_tokens = n_register_tokens
         self._patch_size = patch_size
         head_dim = embed_dim // num_heads
-        self.register_buffer("_rope_periods", make_rope_periods(head_dim))
+        self.register_buffer("_rope_periods", make_rope_periods(head_dim, dtype=torch.float32))
 
     @property
     @override

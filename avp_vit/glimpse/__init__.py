@@ -70,7 +70,7 @@ def extract_glimpse(img: Tensor, viewpoint: Viewpoint, size: int) -> Tensor:
 
     # Get grid offsets from the single source of truth
     # Shape: [size*size, 2] with (y, x) coordinates
-    offsets = grid_offsets(size, size, device, torch.float32)
+    offsets = grid_offsets(size, size, device, dtype=torch.float32)
 
     # Reshape to [1, size, size, 2]
     offsets = offsets.view(size, size, 2).unsqueeze(0)

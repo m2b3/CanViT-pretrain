@@ -12,44 +12,44 @@ from . import (
 
 
 def test_make_rope_periods_shape():
-    periods = make_rope_periods(head_dim=64)
+    periods = make_rope_periods(64, dtype=torch.float32)
     assert periods.shape == (16,)
 
 
 def test_make_rope_periods_dtype():
-    periods = make_rope_periods(head_dim=64, dtype=torch.bfloat16)
+    periods = make_rope_periods(64, dtype=torch.bfloat16)
     assert periods.dtype == torch.bfloat16
 
 
 def test_grid_positions_shape():
-    pos = make_grid_positions(7, 7, torch.device("cpu"))
+    pos = make_grid_positions(7, 7, torch.device("cpu"), dtype=torch.float32)
     assert pos.shape == (49, 2)
 
 
 def test_grid_positions_range():
-    pos = make_grid_positions(7, 7, torch.device("cpu"))
+    pos = make_grid_positions(7, 7, torch.device("cpu"), dtype=torch.float32)
     assert pos.min() > -1 and pos.max() < 1
 
 
 def test_glimpse_positions_shape():
     centers = torch.rand(4, 2)
     scales = torch.rand(4)
-    pos = glimpse_positions(centers, scales, 7, 7)
+    pos = glimpse_positions(centers, scales, 7, 7, dtype=torch.float32)
     assert pos.shape == (4, 49, 2)
 
 
 def test_glimpse_center_zero_scale_one_matches_grid():
     """center=0, scale=1 should produce same positions as make_grid_positions."""
-    grid = make_grid_positions(7, 7, torch.device("cpu"))
+    grid = make_grid_positions(7, 7, torch.device("cpu"), dtype=torch.float32)
     centers = torch.zeros(1, 2)
     scales = torch.ones(1)
-    glimpse = glimpse_positions(centers, scales, 7, 7)
+    glimpse = glimpse_positions(centers, scales, 7, 7, dtype=torch.float32)
     assert torch.allclose(glimpse[0], grid)
 
 
 def test_compute_rope_shape():
     positions = torch.randn(2, 49, 2)
-    periods = make_rope_periods(head_dim=64)
+    periods = make_rope_periods(64, dtype=torch.float32)
     sin, cos = compute_rope(positions, periods)
     assert sin.shape == (2, 1, 49, 64)
     assert cos.shape == (2, 1, 49, 64)

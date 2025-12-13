@@ -21,7 +21,7 @@ def backbone(request: pytest.FixtureRequest) -> ViTBackbone:
         return DINOv3Backbone(native)
     else:
         native = ijepa_vit_small(img_size=[112], patch_size=16)
-        return IJEPABackbone(native)
+        return IJEPABackbone(native, rope_dtype=torch.float32)
 
 
 def test_avp_forward_shapes(backbone: ViTBackbone) -> None:
