@@ -29,6 +29,7 @@ from ytch.model import count_parameters
 
 from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
+from avp_vit.glimpse import Viewpoint, extract_glimpse
 
 matplotlib.use("Agg")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -80,41 +81,6 @@ class Config:
         return self.glimpse_grid_size * PATCH_SIZE
 
 
-class Viewpoint:
-    """A viewpoint for glimpse extraction."""
-
-    centers: Tensor  # [B, 2] in [-1, 1]
-    scales: Tensor  # [B] where 1 = full scene
-    name: str
-
-    def __init__(self, centers: Tensor, scales: Tensor, name: str = "") -> None:
-        self.centers = centers
-        self.scales = scales
-        self.name = name
-
-    @staticmethod
-    def full_scene(B: int, device: torch.device) -> "Viewpoint":
-        """Full scene viewpoint: center=(0,0), scale=1."""
-        return Viewpoint(
-            centers=torch.zeros(B, 2, device=device),
-            scales=torch.ones(B, device=device),
-            name="full",
-        )
-
-    @staticmethod
-    def quadrant(B: int, device: torch.device, qx: int, qy: int) -> "Viewpoint":
-        """Quadrant viewpoint: qx,qy in {0,1} -> center, scale=0.5."""
-        cx = -0.5 + qx  # 0 -> -0.5, 1 -> 0.5
-        cy = -0.5 + qy
-        name = ["TL", "TR", "BL", "BR"][qy * 2 + qx]
-        centers = torch.tensor([[cx, cy]], device=device).expand(B, -1)
-        return Viewpoint(
-            centers=centers,
-            scales=torch.full((B,), 0.5, device=device),
-            name=name,
-        )
-
-
 def make_viewpoints(B: int, device: torch.device) -> list[Viewpoint]:
     """Full scene + 4 quadrants in random order."""
     quadrants = [(0, 0), (1, 0), (0, 1), (1, 1)]
@@ -122,38 +88,6 @@ def make_viewpoints(B: int, device: torch.device) -> list[Viewpoint]:
     return [Viewpoint.full_scene(B, device)] + [
         Viewpoint.quadrant(B, device, quadrants[i][0], quadrants[i][1]) for i in perm
     ]
-
-
-def extract_glimpse(img: Tensor, viewpoint: Viewpoint, size: int) -> Tensor:
-    """Extract glimpse crop from image using grid_sample.
-
-    Coordinates match glimpse_positions() for RoPE consistency:
-    - center=(0,0), scale=1 → full image
-    - center=(0.5,0.5), scale=0.5 → bottom-right quadrant
-
-    Args:
-        img: [B, C, H, W] scene image
-        viewpoint: Viewpoint with centers [B, 2] and scales [B]
-        size: output size (size x size)
-
-    Returns:
-        [B, C, size, size] bilinearly interpolated crop
-    """
-    B = img.shape[0]
-    device = img.device
-    centers, scales = viewpoint.centers, viewpoint.scales
-
-    # Create normalized grid matching glimpse_positions coordinate system
-    # glimpse_positions uses: (idx + 0.5) / grid_size * 2 - 1
-    grid_1d = (torch.arange(size, device=device, dtype=torch.float32) + 0.5) / size * 2 - 1
-    grid_y, grid_x = torch.meshgrid(grid_1d, grid_1d, indexing="ij")
-    grid = torch.stack([grid_x, grid_y], dim=-1)  # [size, size, 2]
-    grid = grid.unsqueeze(0).expand(B, -1, -1, -1)  # [B, size, size, 2]
-
-    # Transform: positions = centers + scales * offsets (matches glimpse_positions)
-    grid = centers.view(B, 1, 1, 2) + scales.view(B, 1, 1, 1) * grid
-
-    return nn.functional.grid_sample(img, grid, mode="bilinear", align_corners=False)
 
 
 def load_teacher(device: torch.device) -> DINOv3Backbone:
@@ -349,7 +283,10 @@ def run_multistep_inference(
     viewpoints: list[Viewpoint],
     glimpse_size: int,
 ) -> MultistepResult:
-    """Run multi-step inference, collecting intermediate scenes, locals, and MSEs."""
+    """Run multi-step inference, collecting intermediate scenes, locals, and MSEs.
+
+    Uses the same glimpse extraction path as training (via extract_glimpse + tokenize_glimpse).
+    """
     n_prefix = teacher.n_prefix_tokens
     with torch.inference_mode():
         teacher_patches = teacher_forward(teacher, teacher_img)
@@ -360,9 +297,10 @@ def run_multistep_inference(
         mses: list[float] = []
 
         for vp in viewpoints:
+            # Same code path as make_glimpse_fn uses for training
             glimpse_img = extract_glimpse(teacher_img, vp, glimpse_size)
-            glimpse_imgs.append(glimpse_img)
             tokens = tokenize_glimpse(teacher, glimpse_img)
+            glimpse_imgs.append(glimpse_img)
             local, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
             # Strip prefix tokens and apply teacher's output norm for fair comparison
             local_patches = teacher.output_norm(local[:, n_prefix:])
