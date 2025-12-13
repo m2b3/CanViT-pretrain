@@ -27,7 +27,6 @@ from ytch.model import count_parameters
 
 from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
-from avp_vit.rope import compute_rope, make_grid_positions
 
 matplotlib.use("Agg")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -63,13 +62,13 @@ class Config:
 
 @dataclass
 class TrainSample:
-    """A training sample with full-res teacher tokens and downscaled glimpse tokens."""
+    """A training sample with images (not tokens - tokenization happens in forward)."""
 
-    teacher_tokens: Tensor  # [1, n_prefix + scene_grid², D]
-    glimpse_tokens: Tensor  # [1, n_prefix + glimpse_grid², D]
-    centers: Tensor  # [1, 2]
-    scales: Tensor  # [1]
-    img: Image.Image | None = None  # for visualization
+    teacher_img: Tensor  # [B, 3, scene_size, scene_size]
+    glimpse_img: Tensor  # [B, 3, glimpse_size, glimpse_size]
+    centers: Tensor  # [B, 2]
+    scales: Tensor  # [B]
+    img_pil: Image.Image | None = None  # for visualization
 
 
 def load_teacher(device: torch.device) -> DINOv3Backbone:
@@ -90,94 +89,69 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
 
 
-def load_image_tokens(
-    teacher: DINOv3Backbone,
+def load_image_sample(
     url: str,
     scene_grid: int,
     glimpse_grid: int,
     device: torch.device,
 ) -> TrainSample:
-    """Load image and create both full-res and glimpse tokens."""
-    full_size = scene_grid * 16
+    """Load image and create teacher/glimpse image tensors."""
+    scene_size = scene_grid * 16
     glimpse_size = glimpse_grid * 16
 
     img_pil = (
         Image.open(urllib.request.urlopen(url))
         .convert("RGB")
-        .resize((full_size, full_size))
+        .resize((scene_size, scene_size))
     )
     glimpse_pil = img_pil.resize((glimpse_size, glimpse_size), Image.BILINEAR)
 
-    full_x = (
+    teacher_img = (
         TF.normalize(TF.to_tensor(img_pil), mean=IMAGENET_MEAN, std=IMAGENET_STD)
         .unsqueeze(0)
         .to(device)
     )
-    glimpse_x = (
+    glimpse_img = (
         TF.normalize(TF.to_tensor(glimpse_pil), mean=IMAGENET_MEAN, std=IMAGENET_STD)
         .unsqueeze(0)
         .to(device)
     )
 
-    teacher_tokens, (h, _) = teacher._backbone.prepare_tokens_with_masks(
-        full_x, masks=None
-    )
-    assert h == scene_grid, f"Teacher grid {h} != scene {scene_grid}"
-
-    glimpse_tokens, (gh, _) = teacher._backbone.prepare_tokens_with_masks(
-        glimpse_x, masks=None
-    )
-    assert gh == glimpse_grid, f"Glimpse grid {gh} != glimpse {glimpse_grid}"
-
     return TrainSample(
-        teacher_tokens=teacher_tokens.detach(),
-        glimpse_tokens=glimpse_tokens.detach(),
+        teacher_img=teacher_img,
+        glimpse_img=glimpse_img,
         centers=torch.zeros(1, 2, device=device),
         scales=torch.ones(1, device=device),
-        img=img_pil,
+        img_pil=img_pil,
     )
 
 
-def random_sample(teacher: DINOv3Backbone, cfg: Config) -> TrainSample:
-    """Create random images and tokenize them properly."""
+def random_sample(cfg: Config) -> TrainSample:
+    """Create random image tensors."""
     B = cfg.batch_size
     scene_size = cfg.scene_grid_size * 16
     glimpse_size = cfg.glimpse_grid_size * 16
 
-    # Random images (not tokens!)
-    scene_imgs = torch.randn(B, 3, scene_size, scene_size, device=cfg.device)
-    glimpse_imgs = torch.randn(B, 3, glimpse_size, glimpse_size, device=cfg.device)
-
-    # Tokenize through proper pipeline
-    with torch.no_grad():
-        teacher_tokens, (h, _) = teacher._backbone.prepare_tokens_with_masks(scene_imgs, masks=None)
-        assert h == cfg.scene_grid_size
-        glimpse_tokens, (gh, _) = teacher._backbone.prepare_tokens_with_masks(glimpse_imgs, masks=None)
-        assert gh == cfg.glimpse_grid_size
-
     return TrainSample(
-        teacher_tokens=teacher_tokens.detach(),
-        glimpse_tokens=glimpse_tokens.detach(),
+        teacher_img=torch.randn(B, 3, scene_size, scene_size, device=cfg.device),
+        glimpse_img=torch.randn(B, 3, glimpse_size, glimpse_size, device=cfg.device),
         centers=torch.zeros(B, 2, device=cfg.device),
         scales=torch.ones(B, device=cfg.device),
-        img=None,
+        img_pil=None,
     )
 
 
-def backbone_forward(
-    backbone: DINOv3Backbone, tokens: Tensor, H: int, W: int
-) -> Tensor:
-    """Returns patch features [B, H*W, D]."""
-    pos = (
-        make_grid_positions(H, W, tokens.device)
-        .unsqueeze(0)
-        .expand(tokens.shape[0], -1, -1)
-    )
-    rope = compute_rope(pos.to(backbone.rope_dtype), backbone.rope_periods)
-    x = tokens
-    for i in range(backbone.n_blocks):
-        x = backbone.forward_block(i, x, rope)
-    return x[:, backbone.n_prefix_tokens :, :]
+def teacher_forward(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
+    """Teacher forward: img -> patch features [B, H*W, D]."""
+    with torch.no_grad():
+        out = teacher._backbone.forward_features(img)
+    return out["x_norm_patchtokens"]
+
+
+def tokenize_glimpse(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
+    """Tokenize glimpse image for AVP input."""
+    tokens, _ = teacher._backbone.prepare_tokens_with_masks(img, masks=None)
+    return tokens
 
 
 def init_scene_tokens(
@@ -194,9 +168,7 @@ def init_scene_tokens(
     for i in range(0, cfg.n_init_samples, batch_size):
         B = min(batch_size, cfg.n_init_samples - i)
         imgs = torch.randn(B, 3, scene_size, scene_size, device=cfg.device)
-        with torch.no_grad():
-            tokens, _ = teacher._backbone.prepare_tokens_with_masks(imgs, masks=None)
-            patches = backbone_forward(teacher, tokens, cfg.scene_grid_size, cfg.scene_grid_size)
+        patches = teacher_forward(teacher, imgs)
         all_patches.append(patches)
 
     all_patches = torch.cat(all_patches, dim=0)  # [N, S, D]
@@ -213,18 +185,18 @@ def train_step(
     sample: TrainSample,
     cfg: Config,
 ) -> Tensor:
-    """Train step: teacher gets full-res, AVP gets glimpse, compare scene to teacher patches."""
-    B = sample.teacher_tokens.shape[0]
+    """Train step: teacher processes full-res img, AVP processes glimpse img."""
+    B = sample.teacher_img.shape[0]
     S = cfg.scene_grid_size**2
     D = teacher.embed_dim
 
-    with torch.no_grad():
-        teacher_patches = backbone_forward(
-            teacher, sample.teacher_tokens, cfg.scene_grid_size, cfg.scene_grid_size
-        )
+    # Teacher: standard forward on full-res image
+    teacher_patches = teacher_forward(teacher, sample.teacher_img)
     assert_shape(teacher_patches, (B, S, D))
 
-    _, scene = avp(sample.glimpse_tokens, sample.centers, sample.scales)
+    # AVP: tokenize glimpse, then forward with custom positions
+    glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
+    _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
     assert_shape(scene, (B, S, D))
 
     return nn.functional.mse_loss(scene, teacher_patches)
@@ -258,11 +230,11 @@ def log_train_pca(
     teacher_rgb = pca_rgb(pca, teacher_0, S, S)
     scene_rgb = pca_rgb(pca, scene_0, S, S)
 
-    n_plots = 3 if sample.img is not None else 2
+    n_plots = 3 if sample.img_pil is not None else 2
     fig, axes = plt.subplots(1, n_plots, figsize=(4 * n_plots, 4))
     i = 0
-    if sample.img is not None:
-        axes[i].imshow(sample.img)
+    if sample.img_pil is not None:
+        axes[i].imshow(sample.img_pil)
         axes[i].set_title("Input")
         axes[i].axis("off")
         i += 1
@@ -290,14 +262,15 @@ def eval_and_log(
     cfg: Config,
 ) -> float:
     """Eval on sample, log PCA plots to Comet."""
-    B = sample.teacher_tokens.shape[0]
+    B = sample.teacher_img.shape[0]
     S = cfg.scene_grid_size
     D = teacher.embed_dim
 
     with torch.inference_mode():
-        teacher_patches = backbone_forward(teacher, sample.teacher_tokens, S, S)
+        teacher_patches = teacher_forward(teacher, sample.teacher_img)
         assert_shape(teacher_patches, (B, S * S, D))
-        _, scene = avp(sample.glimpse_tokens, sample.centers, sample.scales)
+        glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
+        _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
         assert_shape(scene, (B, S * S, D))
         val_loss = nn.functional.mse_loss(scene, teacher_patches).item()
 
@@ -307,11 +280,11 @@ def eval_and_log(
     teacher_pca = pca_rgb(pca, teacher_0, S, S)
     scene_pca = pca_rgb(pca, scene_0, S, S)
 
-    n_plots = 3 if sample.img is not None else 2
+    n_plots = 3 if sample.img_pil is not None else 2
     fig, axes = plt.subplots(1, n_plots, figsize=(4 * n_plots, 4))
     i = 0
-    if sample.img is not None:
-        axes[i].imshow(sample.img)
+    if sample.img_pil is not None:
+        axes[i].imshow(sample.img_pil)
         axes[i].set_title("Input")
         axes[i].axis("off")
         i += 1
@@ -359,14 +332,14 @@ def main() -> None:
     train_samples: list[TrainSample] = []
     if cfg.use_real_image:
         for url in TRAIN_IMAGE_URLS:
-            sample = load_image_tokens(
-                teacher, url, cfg.scene_grid_size, cfg.glimpse_grid_size, cfg.device
+            sample = load_image_sample(
+                url, cfg.scene_grid_size, cfg.glimpse_grid_size, cfg.device
             )
             train_samples.append(sample)
 
     # Load val sample
-    val_sample = load_image_tokens(
-        teacher, VAL_IMAGE_URL, cfg.scene_grid_size, cfg.glimpse_grid_size, cfg.device
+    val_sample = load_image_sample(
+        VAL_IMAGE_URL, cfg.scene_grid_size, cfg.glimpse_grid_size, cfg.device
     )
 
     # Trainable params
@@ -396,7 +369,7 @@ def main() -> None:
         if cfg.use_real_image:
             sample = train_samples[step % len(train_samples)]
         else:
-            sample = random_sample(teacher, cfg)
+            sample = random_sample(cfg)
 
         optimizer.zero_grad()
         loss = train_step(avp, teacher, sample, cfg)
@@ -420,13 +393,9 @@ def main() -> None:
 
         if step > 0 and step % cfg.viz_every == 0:
             with torch.inference_mode():
-                teacher_patches = backbone_forward(
-                    teacher,
-                    sample.teacher_tokens,
-                    cfg.scene_grid_size,
-                    cfg.scene_grid_size,
-                )
-                _, scene = avp(sample.glimpse_tokens, sample.centers, sample.scales)
+                teacher_patches = teacher_forward(teacher, sample.teacher_img)
+                glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
+                _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
             log_train_pca(exp, step, sample, teacher_patches, scene, cfg)
 
         if step > 0 and step % cfg.val_every == 0:
