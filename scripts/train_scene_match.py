@@ -35,7 +35,6 @@ log = logging.getLogger(__name__)
 CKPT_PATH = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
-PATCH_SIZE = 16
 
 
 @dataclass
@@ -72,14 +71,6 @@ class Config:
     n_trials: int = 1
     # Runtime
     device: torch.device = field(default_factory=get_sensible_device)
-
-    @property
-    def scene_size(self) -> int:
-        return self.scene_grid_size * PATCH_SIZE
-
-    @property
-    def glimpse_size(self) -> int:
-        return self.glimpse_grid_size * PATCH_SIZE
 
 
 def random_viewpoint(
@@ -123,10 +114,10 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
 
 
-def make_train_loader(cfg: Config) -> DataLoader[tuple[Tensor, Tensor]]:
+def make_train_loader(cfg: Config, scene_size: int) -> DataLoader[tuple[Tensor, Tensor]]:
     transform = transforms.Compose(
         [
-            transforms.RandomResizedCrop(cfg.scene_size, scale=(0.4, 1.0)),
+            transforms.RandomResizedCrop(scene_size, scale=(0.4, 1.0)),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
@@ -143,11 +134,11 @@ def make_train_loader(cfg: Config) -> DataLoader[tuple[Tensor, Tensor]]:
     )
 
 
-def make_val_loader(cfg: Config) -> DataLoader[tuple[Tensor, Tensor]]:
+def make_val_loader(cfg: Config, scene_size: int) -> DataLoader[tuple[Tensor, Tensor]]:
     transform = transforms.Compose(
         [
-            transforms.Resize(cfg.scene_size),
-            transforms.CenterCrop(cfg.scene_size),
+            transforms.Resize(scene_size),
+            transforms.CenterCrop(scene_size),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ]
@@ -406,9 +397,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     teacher = load_teacher(cfg.device)
     avp = create_avp(teacher, cfg)
+    scene_size = teacher.patch_size * cfg.scene_grid_size
 
-    train_loader = make_train_loader(cfg)
-    val_iter = ValIter(make_val_loader(cfg))
+    train_loader = make_train_loader(cfg, scene_size)
+    val_iter = ValIter(make_val_loader(cfg, scene_size))
     train_iter = iter(train_loader)
 
     trainable = [p for p in avp.parameters() if p.requires_grad]
