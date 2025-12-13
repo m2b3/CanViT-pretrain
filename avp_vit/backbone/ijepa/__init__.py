@@ -87,6 +87,7 @@ class IJEPABackbone(ViTBackbone, nn.Module):
         x: Tensor = self._backbone.patch_embed(images)
         N = x.shape[1]
         H = W = int(N**0.5)
+        assert H * W == N, f"expected square grid, got {N} patches"
         pos_embed: Tensor = self._backbone.interpolate_pos_encoding(x, self._backbone.pos_embed)
         x = x + pos_embed
         return x, H, W
