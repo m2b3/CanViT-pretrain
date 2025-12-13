@@ -3,6 +3,7 @@
 import copy
 import io
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,22 +69,80 @@ class Config:
         return self.glimpse_grid_size * PATCH_SIZE
 
 
-class TrainSample:
-    """A training sample. Glimpse is always derived from scene via downsampling."""
+class Viewpoint:
+    """A viewpoint for glimpse extraction."""
 
-    teacher_img: Tensor  # [B, 3, scene_size, scene_size]
-    glimpse_img: Tensor  # [B, 3, glimpse_size, glimpse_size]
-    centers: Tensor  # [B, 2]
-    scales: Tensor  # [B]
+    centers: Tensor  # [B, 2] in [-1, 1]
+    scales: Tensor  # [B] where 1 = full scene
+    name: str
 
-    def __init__(self, scene: Tensor, glimpse_size: int, device: torch.device) -> None:
-        self.teacher_img = scene.to(device)
-        self.glimpse_img = nn.functional.interpolate(
-            self.teacher_img, (glimpse_size, glimpse_size), mode="bilinear"
+    def __init__(self, centers: Tensor, scales: Tensor, name: str = "") -> None:
+        self.centers = centers
+        self.scales = scales
+        self.name = name
+
+    @staticmethod
+    def full_scene(B: int, device: torch.device) -> "Viewpoint":
+        """Full scene viewpoint: center=(0,0), scale=1."""
+        return Viewpoint(
+            centers=torch.zeros(B, 2, device=device),
+            scales=torch.ones(B, device=device),
+            name="full",
         )
-        B = scene.shape[0]
-        self.centers = torch.zeros(B, 2, device=device)
-        self.scales = torch.ones(B, device=device)
+
+    @staticmethod
+    def quadrant(B: int, device: torch.device, qx: int, qy: int) -> "Viewpoint":
+        """Quadrant viewpoint: qx,qy in {0,1} -> center, scale=0.5."""
+        cx = -0.5 + qx  # 0 -> -0.5, 1 -> 0.5
+        cy = -0.5 + qy
+        name = ["TL", "TR", "BL", "BR"][qy * 2 + qx]
+        centers = torch.tensor([[cx, cy]], device=device).expand(B, -1)
+        return Viewpoint(
+            centers=centers,
+            scales=torch.full((B,), 0.5, device=device),
+            name=name,
+        )
+
+
+def make_viewpoints(B: int, device: torch.device) -> list[Viewpoint]:
+    """Full scene + 4 quadrants in random order."""
+    quadrants = [(0, 0), (1, 0), (0, 1), (1, 1)]
+    perm = torch.randperm(4).tolist()
+    return [Viewpoint.full_scene(B, device)] + [
+        Viewpoint.quadrant(B, device, quadrants[i][0], quadrants[i][1]) for i in perm
+    ]
+
+
+def extract_glimpse(img: Tensor, viewpoint: Viewpoint, size: int) -> Tensor:
+    """Extract glimpse crop from image using grid_sample.
+
+    Coordinates match glimpse_positions() for RoPE consistency:
+    - center=(0,0), scale=1 → full image
+    - center=(0.5,0.5), scale=0.5 → bottom-right quadrant
+
+    Args:
+        img: [B, C, H, W] scene image
+        viewpoint: Viewpoint with centers [B, 2] and scales [B]
+        size: output size (size x size)
+
+    Returns:
+        [B, C, size, size] bilinearly interpolated crop
+    """
+    B = img.shape[0]
+    device = img.device
+    centers, scales = viewpoint.centers, viewpoint.scales
+
+    # Create normalized grid matching glimpse_positions coordinate system
+    # glimpse_positions uses: (idx + 0.5) / grid_size * 2 - 1
+    grid_1d = (torch.arange(size, device=device, dtype=torch.float32) + 0.5) / size * 2 - 1
+    grid_y, grid_x = torch.meshgrid(grid_1d, grid_1d, indexing="ij")
+    grid = torch.stack([grid_x, grid_y], dim=-1)  # [size, size, 2]
+    grid = grid.unsqueeze(0).expand(B, -1, -1, -1)  # [B, size, size, 2]
+
+    # Transform: positions = centers + scales * offsets (matches glimpse_positions)
+    grid = centers.view(B, 1, 1, 2) + scales.view(B, 1, 1, 1) * grid
+
+    return nn.functional.grid_sample(img, grid, mode="bilinear", align_corners=False)
 
 
 def load_teacher(device: torch.device) -> DINOv3Backbone:
@@ -183,31 +242,47 @@ def tokenize_glimpse(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
     return tokens
 
 
+def make_glimpse_fn(
+    teacher: DINOv3Backbone,
+    teacher_img: Tensor,
+    viewpoints: list[Viewpoint],
+    glimpse_size: int,
+) -> "Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]]":
+    """Create glimpse function for fixed viewpoints (ignores scene)."""
+
+    def glimpse_fn(
+        step_idx: int, scene: Tensor | None
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        vp = viewpoints[step_idx]
+        glimpse_img = extract_glimpse(teacher_img, vp, glimpse_size)
+        tokens = tokenize_glimpse(teacher, glimpse_img)
+        return tokens, vp.centers, vp.scales
+
+    return glimpse_fn
+
+
 def train_step(
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    sample: TrainSample,
+    teacher_img: Tensor,
+    viewpoints: list[Viewpoint],
     cfg: Config,
 ) -> Tensor:
-    """Train step: teacher processes full-res img, AVP processes glimpse img."""
-    B = sample.teacher_img.shape[0]
+    """Multi-step training: average MSE across viewpoints."""
+    B = teacher_img.shape[0]
     S = cfg.scene_grid_size**2
     D = teacher.embed_dim
 
-    teacher_patches = teacher_forward(teacher, sample.teacher_img)
+    teacher_patches = teacher_forward(teacher, teacher_img)
     assert_shape(teacher_patches, (B, S, D))
 
-    glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
-    _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
-    assert_shape(scene, (B, S, D))
+    glimpse_fn = make_glimpse_fn(teacher, teacher_img, viewpoints, cfg.glimpse_size)
 
-    return nn.functional.mse_loss(scene, teacher_patches)
+    def loss_fn(scene_proj: Tensor) -> Tensor:
+        return nn.functional.mse_loss(scene_proj, teacher_patches)
 
-
-def normalize_local(avp: AVPViT, local: Tensor) -> Tensor:
-    """Normalize local stream and strip prefix tokens -> [B, G*G, D]."""
-    local_norm = avp.backbone.norm(local)
-    return local_norm[:, avp.backbone.n_prefix_tokens :]
+    _, avg_loss = avp.forward_sequence(glimpse_fn, len(viewpoints), loss_fn=loss_fn)
+    return avg_loss
 
 
 def fit_pca(features: Tensor) -> PCA:
@@ -224,7 +299,6 @@ def pca_rgb(pca: PCA, features: Tensor, H: int, W: int) -> Tensor:
 def upsample_latents(latents: Tensor, src_size: int, dst_size: int) -> Tensor:
     """Bilinearly upsample latents from [src_size², D] to [dst_size², D]."""
     D = latents.shape[-1]
-    # [N, D] -> [1, D, H, W] -> interpolate -> [1, D, H', W'] -> [N', D]
     spatial = latents.view(src_size, src_size, D).permute(2, 0, 1).unsqueeze(0)
     upsampled = nn.functional.interpolate(
         spatial, size=(dst_size, dst_size), mode="bilinear", align_corners=False
@@ -242,45 +316,64 @@ def tensor_to_img(t: Tensor) -> Tensor:
 def log_train_pca(
     exp: comet_ml.Experiment,
     step: int,
-    sample: TrainSample,
+    avp: AVPViT,
     teacher: DINOv3Backbone,
-    teacher_patches: Tensor,
-    local_patches: Tensor,
-    scene: Tensor,
+    teacher_img: Tensor,
+    viewpoints: list[Viewpoint],
     cfg: Config,
 ) -> None:
-    """Log train PCA viz to Comet (random sample from batch)."""
+    """Log multi-row train PCA viz to Comet."""
     S = cfg.scene_grid_size
-    G = cfg.glimpse_grid_size
-    idx = int(torch.randint(teacher_patches.shape[0], (1,)).item())
-    teacher_i, local_i, scene_i = teacher_patches[idx], local_patches[idx], scene[idx]
+    B = teacher_img.shape[0]
+    n_views = len(viewpoints)
 
-    # Glimpse teacher: run teacher on low-res, upsample latents
-    glimpse_teacher_i = teacher_forward(teacher, sample.glimpse_img)[idx]
-    glimpse_teacher_up = upsample_latents(glimpse_teacher_i, G, S)
+    with torch.inference_mode():
+        teacher_patches = teacher_forward(teacher, teacher_img)
+        scene: Tensor | None = None
+        scenes: list[Tensor] = []
+        glimpse_imgs: list[Tensor] = []
+        mses: list[float] = []
 
+        for vp in viewpoints:
+            glimpse_img = extract_glimpse(teacher_img, vp, cfg.glimpse_size)
+            glimpse_imgs.append(glimpse_img)
+            tokens = tokenize_glimpse(teacher, glimpse_img)
+            _, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
+            scene_proj = avp.output_proj(scene)
+            scenes.append(scene_proj)
+            mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
+            mses.append(mse)
+
+    idx = int(torch.randint(B, (1,)).item())
+    teacher_i = teacher_patches[idx]
     pca = fit_pca(teacher_i)
-    teacher_rgb = pca_rgb(pca, teacher_i, S, S)
-    glimpse_teacher_rgb = pca_rgb(pca, glimpse_teacher_up, S, S)
-    local_rgb = pca_rgb(pca, local_i, G, G)
-    scene_rgb = pca_rgb(pca, scene_i, S, S)
+    teacher_pca = pca_rgb(pca, teacher_i, S, S)
 
-    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
-    axes[0].imshow(tensor_to_img(sample.teacher_img[idx]).numpy())
-    axes[0].set_title("Input")
-    axes[0].axis("off")
-    axes[1].imshow(teacher_rgb.numpy())
-    axes[1].set_title("Teacher (HR)")
-    axes[1].axis("off")
-    axes[2].imshow(glimpse_teacher_rgb.numpy())
-    axes[2].set_title("Teacher (LR↑)")
-    axes[2].axis("off")
-    axes[3].imshow(local_rgb.numpy())
-    axes[3].set_title("Local")
-    axes[3].axis("off")
-    axes[4].imshow(scene_rgb.numpy())
-    axes[4].set_title("Scene")
-    axes[4].axis("off")
+    fig, axes = plt.subplots(n_views, 4, figsize=(16, 4 * n_views))
+
+    for row, vp in enumerate(viewpoints):
+        glimpse_i = glimpse_imgs[row][idx]
+        scene_i = scenes[row][idx]
+        scene_pca = pca_rgb(pca, scene_i, S, S)
+        error_map = (scene_i - teacher_i).pow(2).mean(dim=-1).view(S, S).cpu()
+
+        axes[row, 0].imshow(tensor_to_img(glimpse_i).numpy())
+        axes[row, 0].set_title(f"Glimpse ({vp.name})")
+        axes[row, 0].axis("off")
+
+        axes[row, 1].imshow(teacher_pca.numpy())
+        axes[row, 1].set_title("Teacher (HR)")
+        axes[row, 1].axis("off")
+
+        axes[row, 2].imshow(scene_pca.numpy())
+        axes[row, 2].set_title(f"Scene t={row}")
+        axes[row, 2].axis("off")
+
+        im = axes[row, 3].imshow(error_map.numpy(), cmap="hot")
+        axes[row, 3].set_title(f"MSE={mses[row]:.2f}")
+        axes[row, 3].axis("off")
+        fig.colorbar(im, ax=axes[row, 3], fraction=0.046, pad=0.04)
+
     plt.tight_layout()
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
@@ -297,58 +390,79 @@ def eval_and_log(
     val_iter: "ValIter",
     cfg: Config,
 ) -> float:
-    """Eval on one random val batch, log PCA plots to Comet."""
+    """Eval on one random val batch, log multi-row PCA plots to Comet."""
     S = cfg.scene_grid_size
-    G = cfg.glimpse_grid_size
 
     imgs = val_iter.next_batch()
-    sample = TrainSample(imgs, cfg.glimpse_size, cfg.device)
+    teacher_img = imgs.to(cfg.device)
+    B = teacher_img.shape[0]
+    viewpoints = make_viewpoints(B, cfg.device)
+    n_views = len(viewpoints)
 
     with torch.inference_mode():
-        teacher_patches = teacher_forward(teacher, sample.teacher_img)
-        glimpse_teacher = teacher_forward(teacher, sample.glimpse_img)
-        glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
-        local, scene = avp(glimpse_tokens, sample.centers, sample.scales)
-        val_loss = nn.functional.mse_loss(scene, teacher_patches).item()
+        teacher_patches = teacher_forward(teacher, teacher_img)
+
+        # Loop through viewpoints to collect intermediate scenes
+        scene: Tensor | None = None
+        scenes: list[Tensor] = []
+        glimpse_imgs: list[Tensor] = []
+        mses: list[float] = []
+
+        for vp in viewpoints:
+            glimpse_img = extract_glimpse(teacher_img, vp, cfg.glimpse_size)
+            glimpse_imgs.append(glimpse_img)
+            tokens = tokenize_glimpse(teacher, glimpse_img)
+            _, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
+            scene_proj = avp.output_proj(scene)
+            scenes.append(scene_proj)
+            mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
+            mses.append(mse)
+
+        val_loss = mses[-1]  # Final MSE
 
     # PCA viz from random sample in batch
-    idx = int(torch.randint(sample.teacher_img.shape[0], (1,)).item())
+    idx = int(torch.randint(B, (1,)).item())
     teacher_i = teacher_patches[idx]
-    glimpse_teacher_i = glimpse_teacher[idx]
-    local_i = normalize_local(avp, local)[idx]
-    scene_i = scene[idx]
-
-    glimpse_teacher_up = upsample_latents(glimpse_teacher_i, G, S)
-
     pca = fit_pca(teacher_i)
     teacher_pca = pca_rgb(pca, teacher_i, S, S)
-    glimpse_teacher_pca = pca_rgb(pca, glimpse_teacher_up, S, S)
-    local_pca = pca_rgb(pca, local_i, G, G)
-    scene_pca = pca_rgb(pca, scene_i, S, S)
 
-    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
-    axes[0].imshow(tensor_to_img(sample.teacher_img[idx]).numpy())
-    axes[0].set_title("Input")
-    axes[0].axis("off")
-    axes[1].imshow(teacher_pca.numpy())
-    axes[1].set_title("Teacher (HR)")
-    axes[1].axis("off")
-    axes[2].imshow(glimpse_teacher_pca.numpy())
-    axes[2].set_title("Teacher (LR↑)")
-    axes[2].axis("off")
-    axes[3].imshow(local_pca.numpy())
-    axes[3].set_title("Local")
-    axes[3].axis("off")
-    axes[4].imshow(scene_pca.numpy())
-    axes[4].set_title("Scene")
-    axes[4].axis("off")
+    # Create multi-row figure: one row per viewpoint
+    # Columns: Glimpse | Scene PCA | Error Map
+    fig, axes = plt.subplots(n_views, 4, figsize=(16, 4 * n_views))
+
+    for row, vp in enumerate(viewpoints):
+        glimpse_i = glimpse_imgs[row][idx]
+        scene_i = scenes[row][idx]
+        scene_pca = pca_rgb(pca, scene_i, S, S)
+        error_map = (scene_i - teacher_i).pow(2).mean(dim=-1).view(S, S).cpu()
+
+        axes[row, 0].imshow(tensor_to_img(glimpse_i).numpy())
+        axes[row, 0].set_title(f"Glimpse ({vp.name})")
+        axes[row, 0].axis("off")
+
+        axes[row, 1].imshow(teacher_pca.numpy())
+        axes[row, 1].set_title("Teacher (HR)")
+        axes[row, 1].axis("off")
+
+        axes[row, 2].imshow(scene_pca.numpy())
+        axes[row, 2].set_title(f"Scene t={row}")
+        axes[row, 2].axis("off")
+
+        im = axes[row, 3].imshow(error_map.numpy(), cmap="hot")
+        axes[row, 3].set_title(f"MSE={mses[row]:.2f}")
+        axes[row, 3].axis("off")
+        fig.colorbar(im, ax=axes[row, 3], fraction=0.046, pad=0.04)
+
     plt.tight_layout()
-
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
     exp.log_image(buf, name="val/pca", step=step)
     plt.close(fig)
+
+    # Log MSE evolution
+    for t, mse in enumerate(mses):
+        exp.log_metric(f"val/mse_t{t}", mse, step=step)
 
     exp.log_metric("val/loss", val_loss, step=step)
     return val_loss
@@ -437,10 +551,11 @@ def main() -> None:
             train_iter = iter(train_loader)
             imgs, _ = next(train_iter)
 
-        sample = TrainSample(imgs, cfg.glimpse_size, cfg.device)
+        teacher_img = imgs.to(cfg.device)
+        viewpoints = make_viewpoints(teacher_img.shape[0], cfg.device)
 
         optimizer.zero_grad()
-        loss = train_step(avp, teacher, sample, cfg)
+        loss = train_step(avp, teacher, teacher_img, viewpoints, cfg)
         loss.backward()
         grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
         optimizer.step()
@@ -470,12 +585,7 @@ def main() -> None:
             )
 
         if step > 0 and step % cfg.viz_every == 0:
-            with torch.inference_mode():
-                teacher_patches = teacher_forward(teacher, sample.teacher_img)
-                glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
-                local, scene = avp(glimpse_tokens, sample.centers, sample.scales)
-                local_patches = normalize_local(avp, local)
-            log_train_pca(exp, step, sample, teacher, teacher_patches, local_patches, scene, cfg)
+            log_train_pca(exp, step, avp, teacher, teacher_img, viewpoints, cfg)
 
         if step > 0 and step % cfg.val_every == 0:
             val_loss = eval_and_log(exp, step, avp, teacher, val_iter, cfg)

@@ -135,7 +135,7 @@ def main() -> None:
     print("=" * 60)
     print("FLOPs Calculator for AVP-ViT")
     print("=" * 60)
-    print(f"ViT-S/16 config:")
+    print("ViT-S/16 config:")
     print(f"  embed_dim={cfg.embed_dim}, num_heads={cfg.num_heads}, n_blocks={cfg.n_blocks}")
     print(f"  patch_size={cfg.patch_size}, n_prefix_tokens={cfg.n_prefix_tokens}")
     print()

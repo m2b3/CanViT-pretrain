@@ -218,3 +218,51 @@ def test_output_proj_is_always_module():
 
     assert isinstance(avp_no.output_proj, torch.nn.Identity)
     assert isinstance(avp_yes.output_proj, torch.nn.Linear)
+
+
+def test_forward_sequence_with_callback():
+    """forward_sequence accepts glimpse_fn callback and n_steps."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
+    backbone = MockBackbone(embed_dim, 4, 2)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    local = torch.randn(B, 1 + 9, embed_dim)
+    centers = torch.zeros(B, 2)
+    scales = torch.ones(B)
+
+    def glimpse_fn(step_idx: int, scene: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
+        return local, centers, scales
+
+    scene = avp.forward_sequence(glimpse_fn, n_steps=3)
+
+    assert isinstance(scene, Tensor)
+    assert scene.shape == (B, 16, embed_dim)
+
+
+def test_forward_sequence_with_loss_fn():
+    """forward_sequence accumulates loss when loss_fn provided."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
+    backbone = MockBackbone(embed_dim, 4, 2)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    local = torch.randn(B, 1 + 9, embed_dim)
+    centers = torch.zeros(B, 2)
+    scales = torch.ones(B)
+    target = torch.randn(B, 16, embed_dim)
+
+    def glimpse_fn(step_idx: int, scene: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
+        return local, centers, scales
+
+    def loss_fn(scene_proj: Tensor) -> Tensor:
+        return torch.nn.functional.mse_loss(scene_proj, target)
+
+    result = avp.forward_sequence(glimpse_fn, n_steps=3, loss_fn=loss_fn)
+
+    assert isinstance(result, tuple)
+    scene, avg_loss = result
+    assert scene.shape == (B, 16, embed_dim)
+    assert avg_loss.shape == ()  # scalar

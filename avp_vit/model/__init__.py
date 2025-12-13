@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import final, override
 
@@ -143,3 +144,40 @@ class AVPViT(nn.Module):
         """Single step with output_proj. Use forward_step for multi-step loops."""
         local, scene = self.forward_step(local, centers, scales, scene)
         return local, self.output_proj(scene)
+
+    def forward_sequence(
+        self,
+        glimpse_fn: Callable[[int, Tensor | None], tuple[Tensor, Tensor, Tensor]],
+        n_steps: int,
+        *,
+        loss_fn: Callable[[Tensor], Tensor] | None = None,
+    ) -> Tensor | tuple[Tensor, Tensor]:
+        """Process sequence of glimpses with recurrent scene.
+
+        Args:
+            glimpse_fn: Called at each step with (step_idx, scene) -> (tokens, centers, scales).
+                        scene is None for first step. For fixed viewpoints, ignore scene.
+                        For policy-based, use scene to decide where to look.
+            n_steps: Number of steps to run.
+            loss_fn: If provided, called with output_proj(scene) at each step.
+                     The loss is accumulated (memory-efficient, no stored intermediates).
+
+        Returns:
+            If loss_fn: (final_scene, avg_loss)
+            Otherwise: final_scene
+        """
+        scene: Tensor | None = None
+        loss_sum: Tensor | None = None
+
+        for step_idx in range(n_steps):
+            tokens, centers, scales = glimpse_fn(step_idx, scene)
+            _, scene = self.forward_step(tokens, centers, scales, scene)
+            scene_proj = self.output_proj(scene)
+            if loss_fn is not None:
+                step_loss = loss_fn(scene_proj)
+                loss_sum = step_loss if loss_sum is None else loss_sum + step_loss
+
+        if loss_fn is not None:
+            assert loss_sum is not None
+            return scene_proj, loss_sum / n_steps
+        return scene_proj
