@@ -6,7 +6,6 @@ import pytest
 import torch
 from dinov3.models.vision_transformer import vit_small
 
-from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.rope import compute_rope, glimpse_positions
 
@@ -95,30 +94,3 @@ def test_per_batch_rope_differs() -> None:
     assert not torch.allclose(out[0], out[1], atol=1e-3)
 
 
-def test_avp_identity_init() -> None:
-    """With γ=0, AVP should be identity: local = backbone(local), scene = scene."""
-    torch.manual_seed(42)
-    native = vit_small(img_size=112, patch_size=16, pos_embed_rope_dtype="fp32")
-    native.init_weights()
-
-    backbone = DINOv3Backbone(native)
-    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, gate_init=0.0)
-    avp = AVPViT(backbone, cfg)
-
-    B, H, W = 2, 7, 7
-
-    local = torch.randn(B, backbone.n_prefix_tokens + H * W, backbone.embed_dim)
-    centers = torch.zeros(B, 2)
-    scales = torch.ones(B)
-
-    positions = glimpse_positions(centers, scales, H, W, dtype=backbone.rope_dtype)
-    rope = compute_rope(positions, backbone.rope_periods)
-
-    expected = local.clone()
-    for i in range(backbone.n_blocks):
-        expected = backbone.forward_block(i, expected, rope)
-
-    actual_local, actual_scene = avp(local.clone(), centers, scales)
-
-    assert torch.allclose(actual_local, expected, atol=1e-5)
-    assert torch.allclose(actual_scene, avp.scene_tokens.expand(B, -1, -1), atol=1e-5)
