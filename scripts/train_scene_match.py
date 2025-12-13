@@ -43,7 +43,7 @@ class Config:
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     # Model
-    scene_grid_size: int = 14
+    scene_grid_size: int = 32
     glimpse_grid_size: int = 7
     gate_init: float = 1e-5
     use_output_proj: bool = True
@@ -54,21 +54,21 @@ class Config:
     min_viewpoint_scale: float = 0.3
     max_viewpoint_scale: float = 1.0
     # Training
-    n_steps: int = 50000
+    n_steps: int = 2000
     batch_size: int = 32
     num_workers: int = 8
     ref_lr: float = 1e-5
-    weight_decay: float = 1e-4
+    weight_decay: float = 1e-5
     warmup_ratio: float = 0.1
     grad_clip: float = 1.0
     # Logging
     log_every: int = 20
-    viz_every: int = 200
+    viz_every: int = 100
     val_every: int = 200
     ckpt_every: int = 1000
     ckpt_dir: Path = Path("checkpoints")
     # Optuna
-    n_trials: int = 1
+    n_trials: int = 100
     # Runtime
     device: torch.device = field(default_factory=get_sensible_device)
 
@@ -80,7 +80,9 @@ def random_viewpoint(
     scales = torch.rand(B, device=device) * (max_scale - min_scale) + min_scale
     # Center must satisfy |c| <= 1 - s to keep glimpse in [-1, 1]
     max_offset = (1 - scales).unsqueeze(1)  # [B, 1]
-    centers = (torch.rand(B, 2, device=device) * 2 - 1) * max_offset  # [B, 2] in [-max_offset, max_offset]
+    centers = (
+        torch.rand(B, 2, device=device) * 2 - 1
+    ) * max_offset  # [B, 2] in [-max_offset, max_offset]
     return Viewpoint(name="random", centers=centers, scales=scales)
 
 
@@ -88,7 +90,11 @@ def make_viewpoints(B: int, cfg: Config) -> list[Viewpoint]:
     """Full scene + n_random random viewpoints."""
     vps = [Viewpoint.full_scene(B, cfg.device)]
     for _ in range(cfg.n_random_viewpoints):
-        vps.append(random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale))
+        vps.append(
+            random_viewpoint(
+                B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale
+            )
+        )
     return vps
 
 
@@ -114,7 +120,9 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
 
 
-def make_train_loader(cfg: Config, scene_size: int) -> DataLoader[tuple[Tensor, Tensor]]:
+def make_train_loader(
+    cfg: Config, scene_size: int
+) -> DataLoader[tuple[Tensor, Tensor]]:
     transform = transforms.Compose(
         [
             transforms.RandomResizedCrop(scene_size, scale=(0.4, 1.0)),
@@ -327,9 +335,7 @@ def log_train_pca(
 ) -> None:
     """Log multi-row train PCA viz to Comet."""
     result = run_multistep_inference(avp, teacher, images, viewpoints)
-    fig = plot_multistep_pca(
-        result, images, cfg.scene_grid_size, cfg.glimpse_grid_size
-    )
+    fig = plot_multistep_pca(result, images, cfg.scene_grid_size, cfg.glimpse_grid_size)
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
@@ -352,9 +358,7 @@ def eval_and_log(
 
     result = run_multistep_inference(avp, teacher, images, viewpoints)
 
-    fig = plot_multistep_pca(
-        result, images, cfg.scene_grid_size, cfg.glimpse_grid_size
-    )
+    fig = plot_multistep_pca(result, images, cfg.scene_grid_size, cfg.glimpse_grid_size)
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
@@ -476,7 +480,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 {"train/loss": ema_loss, "train/grad_norm": grad_norm, "train/lr": lr},
                 step=step,
             )
-            pbar.set_postfix_str(f"loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
+            pbar.set_postfix_str(
+                f"loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}"
+            )
 
         if step > 0 and step % cfg.viz_every == 0:
             log_train_pca(exp, step, avp, teacher, teacher_img, viewpoints, cfg)
