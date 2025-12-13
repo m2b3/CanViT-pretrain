@@ -2,6 +2,7 @@
 name = "avp-vit"
 version = "0.1.0"
 description = "Active Visual Pondering for Vision Transformers"
+authors = [{ name = "Yohaï-Eliel BERREBY", email = "me@yberreby.com" }]
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
