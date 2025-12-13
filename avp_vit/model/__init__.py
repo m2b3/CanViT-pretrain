@@ -174,11 +174,8 @@ class AVPViT(nn.Module):
             pol = pol_token.expand(B, -1, -1)  # [B, 1, D]
             local = torch.cat([pol, local], dim=1)  # [B, 1+N, D]
 
-        # Compute positions: POL uses viewpoint center, patches use glimpse_positions
+        # Compute positions for patch tokens only (POL/CLS/registers get no RoPE)
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
-        if pol_token is not None:
-            pol_pos = centers.unsqueeze(1).to(rope_dtype)  # [B, 1, 2]
-            local_pos = torch.cat([pol_pos, local_pos], dim=1)  # [B, 1+H*W, 2]
 
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
 
