@@ -1,6 +1,6 @@
 """DINOv3 backbone wrapper for AVP."""
 
-from typing import override
+from typing import cast, override
 
 import torch
 from dinov3.models.vision_transformer import DinoVisionTransformer
@@ -82,5 +82,6 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
 
     @override
     def prepare_tokens(self, images: Tensor) -> tuple[Tensor, int, int]:
-        x, (H, W) = self._backbone.prepare_tokens_with_masks(images, masks=None)
+        x, hw = self._backbone.prepare_tokens_with_masks(images, masks=None)
+        H, W = cast(tuple[int, int], hw)
         return x, H, W

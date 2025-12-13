@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import comet_ml
 import matplotlib
@@ -178,7 +179,7 @@ def init_scene_tokens(avp: AVPViT, embed_dim: int) -> None:
 def teacher_forward(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
     """Teacher forward: img -> patch features [B, H*W, D]."""
     with torch.no_grad():
-        out = teacher._backbone.forward_features(img)
+        out = cast(dict[str, Any], teacher._backbone.forward_features(img))
     return out["x_norm_patchtokens"]
 
 

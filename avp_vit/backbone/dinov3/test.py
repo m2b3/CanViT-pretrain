@@ -1,7 +1,10 @@
 """Tests for DINOv3Backbone - must match native forward exactly."""
 
+from typing import Any, cast
+
 import torch
 from dinov3.models.vision_transformer import vit_small
+from torch import Tensor
 
 from avp_vit.rope import compute_rope, glimpse_positions
 
@@ -21,8 +24,8 @@ def test_forward_matches_native():
     img = torch.randn(B, 3, 112, 112)
 
     with torch.no_grad():
-        native_out = native.forward_features(img)
-    native_tokens = native_out["x_prenorm"]
+        native_out = cast(dict[str, Any], native.forward_features(img))
+    native_tokens: Tensor = native_out["x_prenorm"]
 
     x, H, W = backbone.prepare_tokens(img)
     centers = torch.zeros(B, 2)

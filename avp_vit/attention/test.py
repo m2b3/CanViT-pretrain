@@ -31,5 +31,7 @@ def test_write_v_identity_init():
     """V projection starts as identity so writes copy glimpse content directly."""
     D = 64
     attn = RoPEWriteCrossAttention(D, num_heads=4)
-    assert torch.allclose(attn.v_transform.weight, torch.eye(D))
-    assert torch.allclose(attn.v_transform.bias, torch.zeros(D))
+    v = attn.v_transform
+    assert isinstance(v, torch.nn.Linear)
+    assert torch.allclose(v.weight, torch.eye(D))
+    assert torch.allclose(v.bias, torch.zeros(D))

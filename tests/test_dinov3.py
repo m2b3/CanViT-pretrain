@@ -1,10 +1,12 @@
 """Integration tests with DINOv3 backbone."""
 
 import math
+from typing import Any, cast
 
 import pytest
 import torch
 from dinov3.models.vision_transformer import vit_small
+from torch import Tensor
 
 from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.rope import compute_rope, glimpse_positions
@@ -19,7 +21,9 @@ def test_rope_matches_dinov3(rope_dtype: str) -> None:
 
     rope_embed = native.rope_embed
     dtype = rope_embed.dtype
-    device = rope_embed.periods.device
+    assert dtype is not None
+    periods = cast(Tensor, rope_embed.periods)
+    device = periods.device
 
     coords_h = torch.arange(0.5, H, device=device, dtype=dtype) / H
     coords_w = torch.arange(0.5, W, device=device, dtype=dtype) / W
@@ -27,14 +31,14 @@ def test_rope_matches_dinov3(rope_dtype: str) -> None:
     coords = coords.flatten(0, 1)
     coords = 2.0 * coords - 1.0
 
-    angles_dino = 2 * math.pi * coords[:, :, None] / rope_embed.periods[None, None, :]
+    angles_dino = 2 * math.pi * coords[:, :, None] / periods[None, None, :]
     angles_dino = angles_dino.flatten(1, 2).tile((2,))
     sin_dino, cos_dino = torch.sin(angles_dino), torch.cos(angles_dino)
 
     centers = torch.zeros(1, 2, device=device)
     scales = torch.ones(1, device=device)
     our_pos = glimpse_positions(centers, scales, H, W, dtype=dtype)
-    our_sin, our_cos = compute_rope(our_pos, rope_embed.periods)
+    our_sin, our_cos = compute_rope(our_pos, periods)
 
     assert torch.allclose(our_pos[0], coords)
     assert torch.allclose(our_sin[0, 0], sin_dino)
@@ -54,8 +58,8 @@ def test_rope_matches_backbone_forward(rope_dtype: str) -> None:
     img = torch.randn(B, 3, 112, 112)
 
     with torch.no_grad():
-        native_out = native.forward_features(img)
-    native_tokens = native_out["x_prenorm"]
+        native_out = cast(dict[str, Any], native.forward_features(img))
+    native_tokens: Tensor = native_out["x_prenorm"]
 
     x, H, W = backbone.prepare_tokens(img)
     centers = torch.zeros(B, 2)

@@ -173,18 +173,21 @@ class AVPViT(nn.Module):
         assert n_steps > 0, "n_steps must be positive"
         scene: Tensor | None = None
         loss_sum: Tensor | None = None
+        final_proj: Tensor | None = None
 
         for step_idx in range(n_steps):
             tokens, centers, scales = glimpse_fn(step_idx, scene)
             _, scene = self.forward_step(tokens, centers, scales, scene)
+            assert scene is not None
             if loss_fn is not None:
-                scene_proj = self.output_proj(scene)
-                step_loss = loss_fn(scene_proj)
+                proj = self.output_proj(scene)
+                assert isinstance(proj, Tensor)
+                final_proj = proj
+                step_loss = loss_fn(proj)
                 loss_sum = step_loss if loss_sum is None else loss_sum + step_loss
 
-        assert scene is not None
+        assert scene is not None  # n_steps > 0 guarantees at least one iteration
         if loss_fn is not None:
-            # scene_proj from last iteration is the final projection
-            assert loss_sum is not None
-            return scene_proj, loss_sum / n_steps
+            assert final_proj is not None and loss_sum is not None
+            return final_proj, loss_sum / n_steps
         return self.output_proj(scene)
