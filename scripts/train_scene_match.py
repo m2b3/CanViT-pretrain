@@ -59,9 +59,7 @@ class Config:
     n_policy_viewpoints: int = (
         8  # Number of policy-selected viewpoints (after first imposed)
     )
-    policy_noise_std: float = (
-        0.2  # Gaussian noise std on pol_out during training (DDPG-style)
-    )
+    policy_random_prob: float = 0.3  # Probability of random viewpoint instead of policy
     n_random_viewpoints: int = (
         2  # For non-policy mode: random viewpoints after full scene
     )
@@ -219,35 +217,37 @@ def train_step_policy(
     first_vp: Viewpoint,
     n_policy_steps: int,
     pol_scale: float,
-    noise_std: float = 0.0,
+    random_prob: float,
+    min_scale: float,
+    max_scale: float,
 ) -> Tensor:
     """Train with policy-selected viewpoints.
 
-    First viewpoint is imposed, subsequent viewpoints selected by policy.
-    If noise_std > 0, adds Gaussian noise to pol_out before tanh (DDPG-style exploration).
+    First viewpoint is imposed, subsequent viewpoints selected by policy or random.
+    At each step, with prob random_prob we use a random viewpoint instead of policy.
     """
+    B = images.shape[0]
+    device = images.device
     with torch.no_grad():
         target = teacher.forward_norm_patches(images)
     n_total = 1 + n_policy_steps
 
     scene: Tensor | None = None
     vp = first_vp
-    loss_sum = torch.tensor(0.0, device=images.device)
+    loss_sum = torch.tensor(0.0, device=device)
 
     for i in range(n_total):
         out = avp.forward_step(images, vp, scene)
         scene = out.scene
         loss_sum = loss_sum + nn.functional.mse_loss(avp.output_proj(scene), target)
 
-        # Generate next viewpoint from policy (except on last step)
+        # Generate next viewpoint (except on last step)
         if i < n_total - 1:
-            assert out.pol_out is not None, (
-                "Policy must be enabled for train_step_policy"
-            )
-            pol_out = out.pol_out
-            if noise_std > 0:
-                pol_out = pol_out + torch.randn_like(pol_out) * noise_std
-            vp = avp.policy_to_viewpoint(pol_out, pol_scale)
+            if torch.rand(1).item() < random_prob:
+                vp = random_viewpoint(B, device, min_scale, max_scale)
+            else:
+                assert out.pol_out is not None
+                vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
 
     return loss_sum / n_total
 
@@ -416,12 +416,8 @@ def run_multistep_inference_policy(
     first_vp: Viewpoint,
     n_policy_steps: int,
     pol_scale: float,
-    noise_std: float = 0.0,
 ) -> MultistepResult:
-    """Run multi-step inference with policy-selected viewpoints.
-
-    If noise_std > 0, adds Gaussian noise to pol_out before tanh.
-    """
+    """Run multi-step inference with deterministic policy-selected viewpoints."""
     n_prefix = teacher.n_prefix_tokens
     n_total = 1 + n_policy_steps
 
@@ -450,10 +446,7 @@ def run_multistep_inference_policy(
             # Generate next viewpoint from policy (except on last step)
             if i < n_total - 1:
                 assert out.pol_out is not None
-                pol_out = out.pol_out
-                if noise_std > 0:
-                    pol_out = pol_out + torch.randn_like(pol_out) * noise_std
-                vp = avp.policy_to_viewpoint(pol_out, pol_scale)
+                vp = avp.policy_to_viewpoint(out.pol_out, pol_scale)
 
     return MultistepResult(
         teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints
@@ -619,7 +612,6 @@ def log_train_pca(
             first_vp,
             cfg.n_policy_viewpoints,
             policy_scale(cfg),
-            cfg.policy_noise_std,
         )
     else:
         viewpoints = make_viewpoints(B, cfg)
@@ -791,7 +783,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 first_vp,
                 cfg.n_policy_viewpoints,
                 policy_scale(cfg),
-                cfg.policy_noise_std,
+                cfg.policy_random_prob,
+                cfg.min_viewpoint_scale,
+                cfg.max_viewpoint_scale,
             )
         else:
             viewpoints = make_viewpoints(B, cfg)
