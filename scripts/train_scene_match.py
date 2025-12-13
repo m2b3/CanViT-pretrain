@@ -46,12 +46,13 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 class Config:
     scene_grid_size: int = 8
     glimpse_grid_size: int = 7
+    gate_init: float = 1e-4
     freeze_inner_backbone: bool = False
     n_steps: int = 5000
     batch_size: int = 8
     use_real_image: bool = False
     ref_lr: float = 1e-4
-    warmup_ratio: float = 0.1
+    warmup_ratio: float = 0.5
     grad_clip: float = 1.0
     log_every: int = 10
     viz_every: int = 20
@@ -84,7 +85,9 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     for p in backbone_copy.parameters():
         p.requires_grad = not cfg.freeze_inner_backbone
     avp_cfg = AVPConfig(
-        scene_grid_size=cfg.scene_grid_size, glimpse_grid_size=cfg.glimpse_grid_size
+        scene_grid_size=cfg.scene_grid_size,
+        glimpse_grid_size=cfg.glimpse_grid_size,
+        gate_init=cfg.gate_init,
     )
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
 
@@ -126,15 +129,49 @@ def load_image_sample(
     )
 
 
+def spectrum_noise(B: int, H: int, W: int, device: torch.device) -> Tensor:
+    """Spectrum noise from Baradad et al. (NeurIPS'21). Returns [B, 3, H, W], mean=0, std=1."""
+    noise = torch.randn((B, 3, H, W), device=device)
+
+    # Frequency grids
+    fy = torch.fft.fftfreq(H, device=device).abs().view(1, 1, H, 1)
+    fx = torch.fft.fftfreq(W, device=device).abs().view(1, 1, 1, W)
+
+    # Per-image exponents a,b ~ U(0.5, 3.5)
+    a = 0.5 + 3.0 * torch.rand((B, 1, 1, 1), device=device)
+    b = 0.5 + 3.0 * torch.rand((B, 1, 1, 1), device=device)
+
+    # Anisotropic filter: 1/(|fx|^a + |fy|^b)
+    denom = fx.pow(a) + fy.pow(b)
+    denom[..., 0, 0] = 1.0
+    filt = 1.0 / denom
+    filt[..., 0, 0] = 0.0
+
+    spec = torch.fft.fft2(noise)
+    out = torch.fft.ifft2(spec * filt).real
+
+    # Random orthogonal color mixing (batched QR on CPU, tiny 3x3)
+    M = torch.randn((B, 3, 3))
+    Q, R = torch.linalg.qr(M)
+    Q = Q * torch.sign(torch.diagonal(R, dim1=1, dim2=2)).unsqueeze(-1)
+    Q = Q.to(device)
+    out = torch.einsum("bij,bjhw->bihw", Q, out)
+
+    # Normalize to mean=0, std=1
+    out = out - out.mean(dim=(-2, -1), keepdim=True)
+    out = out / (out.std(dim=(-2, -1), keepdim=True) + 1e-8)
+    return out
+
+
 def random_sample(cfg: Config) -> TrainSample:
-    """Create random image tensors."""
+    """Create random spectrum noise image tensors."""
     B = cfg.batch_size
     scene_size = cfg.scene_grid_size * 16
     glimpse_size = cfg.glimpse_grid_size * 16
 
     return TrainSample(
-        teacher_img=torch.randn(B, 3, scene_size, scene_size, device=cfg.device),
-        glimpse_img=torch.randn(B, 3, glimpse_size, glimpse_size, device=cfg.device),
+        teacher_img=spectrum_noise(B, scene_size, scene_size, cfg.device),
+        glimpse_img=spectrum_noise(B, glimpse_size, glimpse_size, cfg.device),
         centers=torch.zeros(B, 2, device=cfg.device),
         scales=torch.ones(B, device=cfg.device),
         img_pil=None,
@@ -154,9 +191,7 @@ def tokenize_glimpse(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
     return tokens
 
 
-def init_scene_tokens(
-    avp: AVPViT, teacher: DINOv3Backbone, cfg: Config
-) -> None:
+def init_scene_tokens(avp: AVPViT, teacher: DINOv3Backbone, cfg: Config) -> None:
     """Initialize scene_tokens to average latents from random images."""
     S = cfg.scene_grid_size**2
     D = teacher.embed_dim
@@ -167,7 +202,7 @@ def init_scene_tokens(
     batch_size = min(cfg.n_init_samples, 16)
     for i in range(0, cfg.n_init_samples, batch_size):
         B = min(batch_size, cfg.n_init_samples - i)
-        imgs = torch.randn(B, 3, scene_size, scene_size, device=cfg.device)
+        imgs = spectrum_noise(B, scene_size, scene_size, cfg.device)
         patches = teacher_forward(teacher, imgs)
         all_patches.append(patches)
 
@@ -202,6 +237,12 @@ def train_step(
     return nn.functional.mse_loss(scene, teacher_patches)
 
 
+def normalize_local(avp: AVPViT, local: Tensor) -> Tensor:
+    """Normalize local stream and strip prefix tokens -> [B, G*G, D]."""
+    local_norm = avp.backbone._backbone.norm(local)
+    return local_norm[:, avp.backbone.n_prefix_tokens :]
+
+
 def fit_pca(features: Tensor) -> PCA:
     """Fit PCA. Expects [N, D] input."""
     pca = PCA(n_components=3, whiten=True)
@@ -215,36 +256,44 @@ def pca_rgb(pca: PCA, features: Tensor, H: int, W: int) -> Tensor:
     return torch.sigmoid(torch.from_numpy(proj).view(H, W, 3) * 2.0)
 
 
+def tensor_to_img(t: Tensor) -> Tensor:
+    """Convert [3, H, W] tensor to displayable [H, W, 3] in [0, 1]."""
+    t = t.detach().cpu().float()
+    t = (t - t.min()) / (t.max() - t.min() + 1e-8)
+    return t.permute(1, 2, 0)
+
+
 def log_train_pca(
     exp: comet_ml.Experiment,
     step: int,
     sample: TrainSample,
     teacher_patches: Tensor,
+    local_patches: Tensor,
     scene: Tensor,
     cfg: Config,
 ) -> None:
     """Log train PCA viz to Comet (first sample only)."""
     S = cfg.scene_grid_size
-    teacher_0, scene_0 = teacher_patches[0], scene[0]  # [S*S, D]
+    G = cfg.glimpse_grid_size
+    teacher_0, local_0, scene_0 = teacher_patches[0], local_patches[0], scene[0]
     pca = fit_pca(teacher_0)
     teacher_rgb = pca_rgb(pca, teacher_0, S, S)
+    local_rgb = pca_rgb(pca, local_0, G, G)
     scene_rgb = pca_rgb(pca, scene_0, S, S)
 
-    n_plots = 3 if sample.img_pil is not None else 2
-    fig, axes = plt.subplots(1, n_plots, figsize=(4 * n_plots, 4))
-    i = 0
-    if sample.img_pil is not None:
-        axes[i].imshow(sample.img_pil)
-        axes[i].set_title("Input")
-        axes[i].axis("off")
-        i += 1
-    axes[i].imshow(teacher_rgb.numpy())
-    axes[i].set_title("Teacher PCA")
-    axes[i].axis("off")
-    i += 1
-    axes[i].imshow(scene_rgb.numpy())
-    axes[i].set_title("Scene PCA")
-    axes[i].axis("off")
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    axes[0].imshow(tensor_to_img(sample.teacher_img[0]).numpy())
+    axes[0].set_title("Input")
+    axes[0].axis("off")
+    axes[1].imshow(teacher_rgb.numpy())
+    axes[1].set_title("Teacher")
+    axes[1].axis("off")
+    axes[2].imshow(local_rgb.numpy())
+    axes[2].set_title("Local")
+    axes[2].axis("off")
+    axes[3].imshow(scene_rgb.numpy())
+    axes[3].set_title("Scene")
+    axes[3].axis("off")
     plt.tight_layout()
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
@@ -264,23 +313,27 @@ def eval_and_log(
     """Eval on sample, log PCA plots to Comet."""
     B = sample.teacher_img.shape[0]
     S = cfg.scene_grid_size
+    G = cfg.glimpse_grid_size
     D = teacher.embed_dim
 
     with torch.inference_mode():
         teacher_patches = teacher_forward(teacher, sample.teacher_img)
         assert_shape(teacher_patches, (B, S * S, D))
         glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
-        _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
+        local, scene = avp(glimpse_tokens, sample.centers, sample.scales)
+        local_patches = normalize_local(avp, local)
+        assert_shape(local_patches, (B, G * G, D))
         assert_shape(scene, (B, S * S, D))
         val_loss = nn.functional.mse_loss(scene, teacher_patches).item()
 
     # PCA viz (first sample only)
-    teacher_0, scene_0 = teacher_patches[0], scene[0]  # [S*S, D]
+    teacher_0, local_0, scene_0 = teacher_patches[0], local_patches[0], scene[0]
     pca = fit_pca(teacher_0)
     teacher_pca = pca_rgb(pca, teacher_0, S, S)
+    local_pca = pca_rgb(pca, local_0, G, G)
     scene_pca = pca_rgb(pca, scene_0, S, S)
 
-    n_plots = 3 if sample.img_pil is not None else 2
+    n_plots = 4 if sample.img_pil is not None else 3
     fig, axes = plt.subplots(1, n_plots, figsize=(4 * n_plots, 4))
     i = 0
     if sample.img_pil is not None:
@@ -289,11 +342,15 @@ def eval_and_log(
         axes[i].axis("off")
         i += 1
     axes[i].imshow(teacher_pca.numpy())
-    axes[i].set_title("Teacher PCA")
+    axes[i].set_title("Teacher")
+    axes[i].axis("off")
+    i += 1
+    axes[i].imshow(local_pca.numpy())
+    axes[i].set_title("Local")
     axes[i].axis("off")
     i += 1
     axes[i].imshow(scene_pca.numpy())
-    axes[i].set_title("Scene PCA")
+    axes[i].set_title("Scene")
     axes[i].axis("off")
     plt.tight_layout()
 
@@ -388,15 +445,16 @@ def main() -> None:
                 step=step,
             )
             pbar.set_postfix(
-                loss=f"{ema_loss:.4f}", grad=f"{grad_norm:.2f}", lr=f"{lr:.2e}"
+                loss=f"{ema_loss:.2e}", grad=f"{grad_norm:.2e}", lr=f"{lr:.2e}"
             )
 
         if step > 0 and step % cfg.viz_every == 0:
             with torch.inference_mode():
                 teacher_patches = teacher_forward(teacher, sample.teacher_img)
                 glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
-                _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
-            log_train_pca(exp, step, sample, teacher_patches, scene, cfg)
+                local, scene = avp(glimpse_tokens, sample.centers, sample.scales)
+                local_patches = normalize_local(avp, local)
+            log_train_pca(exp, step, sample, teacher_patches, local_patches, scene, cfg)
 
         if step > 0 and step % cfg.val_every == 0:
             eval_and_log(exp, step, avp, teacher, val_sample, cfg)
