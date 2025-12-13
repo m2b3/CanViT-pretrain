@@ -16,7 +16,6 @@ class MockBackbone(ViTBackbone, nn.Module):
     _n_blocks: int
     _n_register_tokens: int
     _rope_periods: Tensor
-    _norm: nn.LayerNorm
 
     def __init__(
         self, embed_dim: int, num_heads: int, n_blocks: int, n_register_tokens: int = 0
@@ -26,7 +25,6 @@ class MockBackbone(ViTBackbone, nn.Module):
         self._num_heads = num_heads
         self._n_blocks = n_blocks
         self._n_register_tokens = n_register_tokens
-        self._norm = nn.LayerNorm(embed_dim)
         head_dim = embed_dim // num_heads
         self.register_buffer("_rope_periods", make_rope_periods(head_dim))
 
@@ -34,11 +32,6 @@ class MockBackbone(ViTBackbone, nn.Module):
     @override
     def embed_dim(self) -> int:
         return self._embed_dim
-
-    @property
-    @override
-    def norm(self) -> nn.LayerNorm:
-        return self._norm
 
     @property
     @override

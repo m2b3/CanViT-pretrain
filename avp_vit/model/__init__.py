@@ -116,7 +116,7 @@ class AVPViT(nn.Module):
         periods = self.backbone.rope_periods
         n_reg = self.n_scene_registers
 
-        scene = self._init_scene(B, scene)
+        scene_t = self._init_scene(B, scene)
 
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
@@ -126,15 +126,15 @@ class AVPViT(nn.Module):
 
         for i in range(self.backbone.n_blocks):
             local = local + self.read_gate[i] * self.read_attn[i](
-                local, scene, local_rope, scene_rope
+                local, scene_t, local_rope, scene_rope
             )
             local = self.backbone.forward_block(i, local, local_rope)
-            scene = scene + self.write_gate[i] * self.write_attn[i](
-                scene, local, scene_rope, local_rope
+            scene_t = scene_t + self.write_gate[i] * self.write_attn[i](
+                scene_t, local, scene_rope, local_rope
             )
 
         # Strip registers, return grid tokens only
-        return local, scene[:, n_reg:]
+        return local, scene_t[:, n_reg:]
 
     @override
     def forward(
@@ -169,17 +169,21 @@ class AVPViT(nn.Module):
             If loss_fn: (final_scene, avg_loss)
             Otherwise: final_scene
         """
+        assert n_steps > 0, "n_steps must be positive"
         scene: Tensor | None = None
         loss_sum: Tensor | None = None
 
         for step_idx in range(n_steps):
             tokens, centers, scales = glimpse_fn(step_idx, scene)
             _, scene = self.forward_step(tokens, centers, scales, scene)
-            scene_proj = self.output_proj(scene)
+            proj = self.output_proj(scene)
             if loss_fn is not None:
-                step_loss = loss_fn(scene_proj)
+                step_loss = loss_fn(proj)
                 loss_sum = step_loss if loss_sum is None else loss_sum + step_loss
 
+        # scene is guaranteed to be Tensor after at least one iteration
+        assert scene is not None
+        scene_proj = self.output_proj(scene)
         if loss_fn is not None:
             assert loss_sum is not None
             return scene_proj, loss_sum / n_steps

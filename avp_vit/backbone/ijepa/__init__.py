@@ -40,13 +40,6 @@ class IJEPABackbone(ViTBackbone, nn.Module):
 
     @property
     @override
-    def norm(self) -> nn.LayerNorm:
-        norm = self._backbone.norm
-        assert isinstance(norm, nn.LayerNorm)
-        return norm
-
-    @property
-    @override
     def num_heads(self) -> int:
         return self._backbone.num_heads
 
