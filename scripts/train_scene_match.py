@@ -10,6 +10,8 @@ from pathlib import Path
 import comet_ml
 import matplotlib
 import matplotlib.pyplot as plt
+import optuna
+from dataclasses import replace
 from matplotlib.figure import Figure
 import torch
 import torch.nn as nn
@@ -40,14 +42,17 @@ PATCH_SIZE = 16
 
 @dataclass
 class Config:
+    # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
+    # Model
     scene_grid_size: int = 64
     glimpse_grid_size: int = 7
     gate_init: float = 1e-4
     use_output_proj: bool = True
     use_scene_registers: bool = True
     freeze_inner_backbone: bool = False
+    # Training
     n_steps: int = 50000
     batch_size: int = 32
     num_workers: int = 8
@@ -55,11 +60,15 @@ class Config:
     weight_decay: float = 1e-3
     warmup_ratio: float = 0.04
     grad_clip: float = 1.0
+    # Logging
     log_every: int = 20
     viz_every: int = 200
     val_every: int = 200
     ckpt_every: int = 1000
     ckpt_dir: Path = Path("checkpoints")
+    # Optuna
+    n_trials: int = 1
+    # Runtime
     device: torch.device = field(default_factory=get_sensible_device)
 
     @property
@@ -311,6 +320,7 @@ class MultistepResult:
 
     teacher_patches: Tensor  # [B, S², D]
     scenes: list[Tensor]  # [n_views] of [B, S², D]
+    locals: list[Tensor]  # [n_views] of [B, G², D] (glimpse patches only, no prefix)
     glimpse_imgs: list[Tensor]  # [n_views] of [B, 3, H, W]
     mses: list[float]  # [n_views]
     viewpoints: list[Viewpoint]
@@ -319,12 +329,14 @@ class MultistepResult:
         self,
         teacher_patches: Tensor,
         scenes: list[Tensor],
+        locals: list[Tensor],
         glimpse_imgs: list[Tensor],
         mses: list[float],
         viewpoints: list[Viewpoint],
     ) -> None:
         self.teacher_patches = teacher_patches
         self.scenes = scenes
+        self.locals = locals
         self.glimpse_imgs = glimpse_imgs
         self.mses = mses
         self.viewpoints = viewpoints
@@ -337,11 +349,13 @@ def run_multistep_inference(
     viewpoints: list[Viewpoint],
     glimpse_size: int,
 ) -> MultistepResult:
-    """Run multi-step inference, collecting intermediate scenes and MSEs."""
+    """Run multi-step inference, collecting intermediate scenes, locals, and MSEs."""
+    n_prefix = teacher.n_prefix_tokens
     with torch.inference_mode():
         teacher_patches = teacher_forward(teacher, teacher_img)
         scene: Tensor | None = None
         scenes: list[Tensor] = []
+        locals_list: list[Tensor] = []
         glimpse_imgs: list[Tensor] = []
         mses: list[float] = []
 
@@ -349,20 +363,29 @@ def run_multistep_inference(
             glimpse_img = extract_glimpse(teacher_img, vp, glimpse_size)
             glimpse_imgs.append(glimpse_img)
             tokens = tokenize_glimpse(teacher, glimpse_img)
-            _, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
+            local, scene = avp.forward_step(tokens, vp.centers, vp.scales, scene)
+            # Strip prefix tokens to get glimpse patch features only
+            local_patches = local[:, n_prefix:]
+            locals_list.append(local_patches)
             scene_proj = avp.output_proj(scene)
             scenes.append(scene_proj)
             mse = nn.functional.mse_loss(scene_proj, teacher_patches).item()
             mses.append(mse)
 
-    return MultistepResult(teacher_patches, scenes, glimpse_imgs, mses, viewpoints)
+    return MultistepResult(teacher_patches, scenes, locals_list, glimpse_imgs, mses, viewpoints)
 
 
 def plot_multistep_pca(
-    result: MultistepResult, teacher_img: Tensor, scene_grid_size: int
+    result: MultistepResult, teacher_img: Tensor, scene_grid_size: int, glimpse_grid_size: int
 ) -> Figure:
-    """Create multi-row PCA visualization figure."""
+    """Create multi-row PCA visualization figure.
+
+    Columns: Glimpse | Teacher | Scene | Local | Delta | Error
+    - Local: 7x7 processed glimpse features using same PCA as scene
+    - Delta: spatial change in scene from previous timestep (blank for t=0)
+    """
     S = scene_grid_size
+    G = glimpse_grid_size
     B = teacher_img.shape[0]
     n_views = len(result.viewpoints)
 
@@ -371,13 +394,22 @@ def plot_multistep_pca(
     pca = fit_pca(teacher_i)
     teacher_pca = pca_rgb(pca, teacher_i, S, S)
 
-    fig, axes = plt.subplots(n_views, 4, figsize=(16, 4 * n_views))
+    fig, axes = plt.subplots(n_views, 6, figsize=(24, 4 * n_views))
 
     for row, vp in enumerate(result.viewpoints):
         glimpse_i = result.glimpse_imgs[row][idx]
         scene_i = result.scenes[row][idx]
+        local_i = result.locals[row][idx]
         scene_pca = pca_rgb(pca, scene_i, S, S)
+        local_pca = pca_rgb(pca, local_i, G, G)
         error_map = (scene_i - teacher_i).pow(2).mean(dim=-1).view(S, S).cpu()
+
+        # Delta: change from previous scene (L2 norm of difference per patch)
+        if row > 0:
+            prev_scene_i = result.scenes[row - 1][idx]
+            delta_map = (scene_i - prev_scene_i).pow(2).mean(dim=-1).view(S, S).cpu()
+        else:
+            delta_map = torch.zeros(S, S)
 
         axes[row, 0].imshow(tensor_to_img(glimpse_i).numpy())
         axes[row, 0].set_title(f"Glimpse ({vp.name})")
@@ -391,10 +423,19 @@ def plot_multistep_pca(
         axes[row, 2].set_title(f"Scene t={row}")
         axes[row, 2].axis("off")
 
-        im = axes[row, 3].imshow(error_map.numpy(), cmap="hot")
-        axes[row, 3].set_title(f"MSE={result.mses[row]:.2f}")
+        axes[row, 3].imshow(local_pca.numpy())
+        axes[row, 3].set_title(f"Local t={row}")
         axes[row, 3].axis("off")
-        fig.colorbar(im, ax=axes[row, 3], fraction=0.046, pad=0.04)
+
+        im_delta = axes[row, 4].imshow(delta_map.numpy(), cmap="viridis")
+        axes[row, 4].set_title("Δ Scene" if row > 0 else "Δ (n/a)")
+        axes[row, 4].axis("off")
+        fig.colorbar(im_delta, ax=axes[row, 4], fraction=0.046, pad=0.04)
+
+        im_err = axes[row, 5].imshow(error_map.numpy(), cmap="hot")
+        axes[row, 5].set_title(f"MSE={result.mses[row]:.2f}")
+        axes[row, 5].axis("off")
+        fig.colorbar(im_err, ax=axes[row, 5], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     return fig
@@ -411,7 +452,7 @@ def log_train_pca(
 ) -> None:
     """Log multi-row train PCA viz to Comet."""
     result = run_multistep_inference(avp, teacher, teacher_img, viewpoints, cfg.glimpse_size)
-    fig = plot_multistep_pca(result, teacher_img, cfg.scene_grid_size)
+    fig = plot_multistep_pca(result, teacher_img, cfg.scene_grid_size, cfg.glimpse_grid_size)
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
@@ -434,7 +475,7 @@ def eval_and_log(
 
     result = run_multistep_inference(avp, teacher, teacher_img, viewpoints, cfg.glimpse_size)
 
-    fig = plot_multistep_pca(result, teacher_img, cfg.scene_grid_size)
+    fig = plot_multistep_pca(result, teacher_img, cfg.scene_grid_size, cfg.glimpse_grid_size)
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
@@ -462,13 +503,8 @@ def save_checkpoint(
     exp.log_metric("ckpt/val_loss", val_loss, step=step)
 
 
-def main() -> None:
-    import tyro
-
-    torch.set_float32_matmul_precision("high")
-    cfg = tyro.cli(Config)
-    log.info(f"Config: {cfg}")
-
+def train(cfg: Config, trial: optuna.Trial) -> float:
+    """Train AVP model and return best val_loss for HP optimization."""
     exp = comet_ml.Experiment(
         project_name="avp-vit-scene-match", auto_metric_logging=False
     )
@@ -478,6 +514,7 @@ def main() -> None:
             for k, v in cfg.__dict__.items()
         }
     )
+    exp.log_parameters({"trial_number": trial.number})
 
     teacher = load_teacher(cfg.device)
     avp = create_avp(teacher, cfg)
@@ -549,7 +586,6 @@ def main() -> None:
         )
 
         if step % cfg.log_every == 0:
-            # Sync only when logging
             ema_loss = ema_loss_t.item()
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
@@ -575,14 +611,43 @@ def main() -> None:
                 best_val_loss = val_loss
                 if step % cfg.ckpt_every == 0:
                     save_checkpoint(avp, ckpt_path, exp, step, val_loss)
+            # Report intermediate for pruning
+            trial.report(val_loss, step)
+            if trial.should_prune():
+                exp.end()
+                raise optuna.TrialPruned()
 
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_iter, cfg)
     if val_loss < best_val_loss:
+        best_val_loss = val_loss
         save_checkpoint(avp, ckpt_path, exp, cfg.n_steps, val_loss)
     log.info(
         f"Final: train_ema={ema_loss_t.item():.4f}, val={val_loss:.4f}, best={best_val_loss:.4f}"
     )
     exp.end()
+    return best_val_loss
+
+
+def main() -> None:
+    import tyro
+
+    torch.set_float32_matmul_precision("high")
+    cfg = tyro.cli(Config)
+    log.info(f"Config: {cfg}")
+
+    def objective(trial: optuna.Trial) -> float:
+        # Suggest HPs - when enqueued, returns the enqueued value
+        ref_lr = trial.suggest_float("ref_lr", 1e-6, 1e-2, log=True)
+        train_cfg = replace(cfg, ref_lr=ref_lr)
+        return train(train_cfg, trial)
+
+    study = optuna.create_study(direction="minimize")
+    # Enqueue defaults so first trial (n_trials=1) uses CLI config
+    study.enqueue_trial({"ref_lr": cfg.ref_lr})
+    study.optimize(objective, n_trials=cfg.n_trials)
+
+    log.info(f"Best trial: {study.best_trial.params}")
+    log.info(f"Best val_loss: {study.best_value:.4f}")
 
 
 if __name__ == "__main__":
