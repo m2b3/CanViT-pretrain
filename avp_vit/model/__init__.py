@@ -33,7 +33,7 @@ class AVPViT(nn.Module):
     write_attn: nn.ModuleList
     read_gate: nn.ParameterList
     write_gate: nn.ParameterList
-    output_proj: nn.Linear | None
+    output_proj: nn.Module
 
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
@@ -83,40 +83,43 @@ class AVPViT(nn.Module):
         self.scene_positions = pos
 
         if cfg.use_output_proj:
-            self.output_proj = nn.Linear(embed_dim, embed_dim)
-            nn.init.eye_(self.output_proj.weight)
-            nn.init.zeros_(self.output_proj.bias)
+            proj = nn.Linear(embed_dim, embed_dim)
+            nn.init.eye_(proj.weight)
+            nn.init.zeros_(proj.bias)
+            self.output_proj = proj
         else:
-            self.output_proj = None
+            self.output_proj = nn.Identity()
 
-    @override
-    def forward(
+    def _init_scene(self, B: int, scene: Tensor | None) -> Tensor:
+        """Initialize scene: use provided or expand scene_tokens, prepend registers."""
+        if scene is None:
+            scene = self.scene_tokens.expand(B, -1, -1)
+        if self.scene_registers is not None:
+            scene = torch.cat([self.scene_registers.expand(B, -1, -1), scene], dim=1)
+        return scene
+
+    def forward_step(
         self,
         local: Tensor,
         centers: Tensor,
         scales: Tensor,
-        return_layers: bool = False,
-    ) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, list[Tensor]]:
+        scene: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Single step without output_proj. For multi-step, pass scene from previous step."""
         B = local.shape[0]
         H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
         periods = self.backbone.rope_periods
         n_reg = self.n_scene_registers
 
-        # Scene = [registers, grid_tokens]. Registers don't get RoPE (prefix mechanism).
-        scene_grid = self.scene_tokens.expand(B, -1, -1)
-        if self.scene_registers is not None:
-            scene = torch.cat([self.scene_registers.expand(B, -1, -1), scene_grid], dim=1)
-        else:
-            scene = scene_grid
+        scene = self._init_scene(B, scene)
 
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
 
         local_rope = compute_rope(local_pos, periods)
-        scene_rope = compute_rope(scene_pos, periods)  # Only grid positions, not registers
+        scene_rope = compute_rope(scene_pos, periods)
 
-        scene_layers: list[Tensor] = []
         for i in range(self.backbone.n_blocks):
             local = local + self.read_gate[i] * self.read_attn[i](
                 local, scene, local_rope, scene_rope
@@ -125,15 +128,18 @@ class AVPViT(nn.Module):
             scene = scene + self.write_gate[i] * self.write_attn[i](
                 scene, local, scene_rope, local_rope
             )
-            if return_layers:
-                scene_layers.append(scene[:, n_reg:])  # Strip registers for layer outputs
 
-        # Strip registers, keep only grid tokens for output
-        scene_out = scene[:, n_reg:]
+        # Strip registers, return grid tokens only
+        return local, scene[:, n_reg:]
 
-        if self.output_proj is not None:
-            scene_out = self.output_proj(scene_out)
-
-        if return_layers:
-            return local, scene_out, scene_layers
-        return local, scene_out
+    @override
+    def forward(
+        self,
+        local: Tensor,
+        centers: Tensor,
+        scales: Tensor,
+        scene: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Single step with output_proj. Use forward_step for multi-step loops."""
+        local, scene = self.forward_step(local, centers, scales, scene)
+        return local, self.output_proj(scene)

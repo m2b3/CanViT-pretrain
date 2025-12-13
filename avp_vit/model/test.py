@@ -146,20 +146,75 @@ def test_scene_registers_output_shape_unchanged():
     assert out_scene.shape == (B, 16, embed_dim)  # 4x4 grid, no registers
 
 
-def test_scene_registers_with_return_layers():
-    """Layer outputs should also exclude registers."""
-    embed_dim, num_heads, n_blocks = 64, 4, 2
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_scene_registers=True)
-    backbone = MockBackbone(embed_dim, num_heads, n_blocks, n_register_tokens=4)
+def test_forward_step_no_output_proj():
+    """forward_step returns scene before output_proj."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=0.0, use_output_proj=True)
+    backbone = MockBackbone(embed_dim, 4, 2)
     avp = AVPViT(backbone, cfg)
 
     B = 2
     local = torch.randn(B, 1 + 9, embed_dim)
-    centers = torch.rand(B, 2)
-    scales = torch.rand(B)
+    centers = torch.zeros(B, 2)
+    scales = torch.ones(B)
 
-    out_local, out_scene, layers = avp(local, centers, scales, return_layers=True)
+    with torch.no_grad():
+        _, scene_step = avp.forward_step(local, centers, scales)
+        _, scene_fwd = avp(local, centers, scales)
 
-    assert len(layers) == n_blocks
-    for layer in layers:
-        assert layer.shape == (B, 16, embed_dim)  # Grid only, no registers
+    # At init: forward_step returns scene_tokens, forward applies output_proj (identity)
+    assert torch.allclose(scene_step, scene_fwd)
+
+
+def test_scene_input_accepted():
+    """forward_step accepts scene from previous step."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
+    backbone = MockBackbone(embed_dim, 4, 2)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    local = torch.randn(B, 1 + 9, embed_dim)
+    centers = torch.zeros(B, 2)
+    scales = torch.ones(B)
+    custom_scene = torch.randn(B, 16, embed_dim)
+
+    _, scene_out = avp.forward_step(local, centers, scales, scene=custom_scene)
+
+    assert scene_out.shape == (B, 16, embed_dim)
+
+
+def test_multi_step_passthrough_at_init():
+    """At init (gates=0), multi-step returns same scene as single step."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=0.0)
+    backbone = MockBackbone(embed_dim, 4, 2)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    local = torch.randn(B, 1 + 9, embed_dim)
+    centers = torch.zeros(B, 2)
+    scales = torch.ones(B)
+
+    with torch.no_grad():
+        # Single step
+        _, scene_1 = avp.forward_step(local, centers, scales)
+
+        # Multi-step: pass scene from step 1 to step 2
+        _, scene_2 = avp.forward_step(local, centers, scales, scene=scene_1)
+
+    # At init with gates=0, scene is unchanged, so scene_1 == scene_2
+    assert torch.allclose(scene_1, scene_2)
+
+
+def test_output_proj_is_always_module():
+    """output_proj is always nn.Module (Identity or Linear), never None."""
+    cfg_no_proj = AVPConfig(scene_grid_size=4, use_output_proj=False)
+    cfg_with_proj = AVPConfig(scene_grid_size=4, use_output_proj=True)
+    backbone = MockBackbone(64, 4, 2)
+
+    avp_no = AVPViT(backbone, cfg_no_proj)
+    avp_yes = AVPViT(backbone, cfg_with_proj)
+
+    assert isinstance(avp_no.output_proj, torch.nn.Identity)
+    assert isinstance(avp_yes.output_proj, torch.nn.Linear)

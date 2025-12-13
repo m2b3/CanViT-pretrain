@@ -140,11 +140,27 @@ def make_val_loader(cfg: Config) -> DataLoader[tuple[Tensor, Tensor]]:
     return DataLoader(
         dataset,
         batch_size=cfg.batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=cfg.num_workers,
         pin_memory=True,
         drop_last=True,
     )
+
+
+class ValIter:
+    """Iterator over val loader that auto-restarts on exhaustion."""
+
+    def __init__(self, loader: DataLoader[tuple[Tensor, Tensor]]) -> None:
+        self._loader = loader
+        self._iter = iter(loader)
+
+    def next_batch(self) -> Tensor:
+        try:
+            imgs, _ = next(self._iter)
+        except StopIteration:
+            self._iter = iter(self._loader)
+            imgs, _ = next(self._iter)
+        return imgs
 
 
 def init_scene_tokens(avp: AVPViT, embed_dim: int) -> None:
@@ -278,66 +294,40 @@ def eval_and_log(
     step: int,
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    val_loader: DataLoader[tuple[Tensor, Tensor]],
+    val_iter: "ValIter",
     cfg: Config,
 ) -> float:
-    """Eval on val set, log PCA plots to Comet."""
+    """Eval on one random val batch, log PCA plots to Comet."""
     S = cfg.scene_grid_size
     G = cfg.glimpse_grid_size
 
-    total_loss = 0.0
-    n_batches = 0
-    first_sample: TrainSample | None = None
-    first_teacher: Tensor | None = None
-    first_glimpse_teacher: Tensor | None = None
-    first_local: Tensor | None = None
-    first_scene: Tensor | None = None
+    imgs = val_iter.next_batch()
+    sample = TrainSample(imgs, cfg.glimpse_size, cfg.device)
 
     with torch.inference_mode():
-        for imgs, _ in val_loader:
-            sample = TrainSample(imgs, cfg.glimpse_size, cfg.device)
-            teacher_patches = teacher_forward(teacher, sample.teacher_img)
-            glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
-            local, scene = avp(glimpse_tokens, sample.centers, sample.scales)
-            loss = nn.functional.mse_loss(scene, teacher_patches)
-            total_loss += loss.item()
-            n_batches += 1
+        teacher_patches = teacher_forward(teacher, sample.teacher_img)
+        glimpse_teacher = teacher_forward(teacher, sample.glimpse_img)
+        glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
+        local, scene = avp(glimpse_tokens, sample.centers, sample.scales)
+        val_loss = nn.functional.mse_loss(scene, teacher_patches).item()
 
-            if first_sample is None:
-                first_sample = sample
-                first_teacher = teacher_patches
-                first_glimpse_teacher = teacher_forward(teacher, sample.glimpse_img)
-                first_local = normalize_local(avp, local)
-                first_scene = scene
+    # PCA viz from random sample in batch
+    idx = int(torch.randint(sample.teacher_img.shape[0], (1,)).item())
+    teacher_i = teacher_patches[idx]
+    glimpse_teacher_i = glimpse_teacher[idx]
+    local_i = normalize_local(avp, local)[idx]
+    scene_i = scene[idx]
 
-            if n_batches >= 10:
-                break
+    glimpse_teacher_up = upsample_latents(glimpse_teacher_i, G, S)
 
-    val_loss = total_loss / n_batches
-
-    # PCA viz from first batch
-    assert first_sample is not None
-    assert first_teacher is not None
-    assert first_glimpse_teacher is not None
-    assert first_local is not None
-    assert first_scene is not None
-
-    teacher_0 = first_teacher[0]
-    glimpse_teacher_0 = first_glimpse_teacher[0]
-    local_0 = first_local[0]
-    scene_0 = first_scene[0]
-
-    # Upsample glimpse teacher latents to match HR teacher
-    glimpse_teacher_up = upsample_latents(glimpse_teacher_0, G, S)
-
-    pca = fit_pca(teacher_0)
-    teacher_pca = pca_rgb(pca, teacher_0, S, S)
+    pca = fit_pca(teacher_i)
+    teacher_pca = pca_rgb(pca, teacher_i, S, S)
     glimpse_teacher_pca = pca_rgb(pca, glimpse_teacher_up, S, S)
-    local_pca = pca_rgb(pca, local_0, G, G)
-    scene_pca = pca_rgb(pca, scene_0, S, S)
+    local_pca = pca_rgb(pca, local_i, G, G)
+    scene_pca = pca_rgb(pca, scene_i, S, S)
 
     fig, axes = plt.subplots(1, 5, figsize=(20, 4))
-    axes[0].imshow(tensor_to_img(first_sample.teacher_img[0]).numpy())
+    axes[0].imshow(tensor_to_img(sample.teacher_img[idx]).numpy())
     axes[0].set_title("Input")
     axes[0].axis("off")
     axes[1].imshow(teacher_pca.numpy())
@@ -398,14 +388,14 @@ def main() -> None:
     init_scene_tokens(avp, teacher.embed_dim)
 
     train_loader = make_train_loader(cfg)
-    val_loader = make_val_loader(cfg)
+    val_iter = ValIter(make_val_loader(cfg))
     train_iter = iter(train_loader)
 
     trainable = [p for p in avp.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
     n_teacher = count_parameters(teacher)
     n_train = len(train_loader.dataset)  # type: ignore[arg-type]
-    n_val = len(val_loader.dataset)  # type: ignore[arg-type]
+    n_val = len(val_iter._loader.dataset)  # type: ignore[arg-type]
     log.info(f"Trainable: {n_trainable:,}, Teacher: {n_teacher:,}")
     log.info(f"Train: {n_train:,}, Val: {n_val:,}")
     exp.log_parameters(
@@ -433,7 +423,7 @@ def main() -> None:
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
     best_val_loss = float("inf")
 
-    val_loss = eval_and_log(exp, 0, avp, teacher, val_loader, cfg)
+    val_loss = eval_and_log(exp, 0, avp, teacher, val_iter, cfg)
     save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
     best_val_loss = val_loss
 
@@ -488,13 +478,13 @@ def main() -> None:
             log_train_pca(exp, step, sample, teacher, teacher_patches, local_patches, scene, cfg)
 
         if step > 0 and step % cfg.val_every == 0:
-            val_loss = eval_and_log(exp, step, avp, teacher, val_loader, cfg)
+            val_loss = eval_and_log(exp, step, avp, teacher, val_iter, cfg)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 if step % cfg.ckpt_every == 0:
                     save_checkpoint(avp, ckpt_path, exp, step, val_loss)
 
-    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_loader, cfg)
+    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_iter, cfg)
     if val_loss < best_val_loss:
         save_checkpoint(avp, ckpt_path, exp, cfg.n_steps, val_loss)
     log.info(
