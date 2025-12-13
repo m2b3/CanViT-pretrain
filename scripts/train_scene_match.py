@@ -513,6 +513,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         optimizer.zero_grad()
         loss = train_step(avp, teacher, teacher_img, viewpoints, cfg)
+        if not torch.isfinite(loss):
+            log.warning(f"NaN/Inf loss at step {step}, pruning trial")
+            exp.end()
+            raise optuna.TrialPruned()
         loss.backward()
         grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
         optimizer.step()
