@@ -44,7 +44,6 @@ class Config:
     glimpse_grid_size: int = 7
     gate_init: float = 1e-4
     use_output_proj: bool = True
-    use_output_norm: bool = False
     freeze_inner_backbone: bool = True
     n_steps: int = 50000
     batch_size: int = 256
@@ -104,7 +103,6 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
         glimpse_grid_size=cfg.glimpse_grid_size,
         gate_init=cfg.gate_init,
         use_output_proj=cfg.use_output_proj,
-        use_output_norm=cfg.use_output_norm,
     )
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
 

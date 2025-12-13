@@ -16,7 +16,6 @@ class AVPConfig:
     glimpse_grid_size: int = 7
     gate_init: float = 0.0
     use_output_proj: bool = False
-    use_output_norm: bool = False
 
 
 @final
@@ -32,7 +31,6 @@ class AVPViT(nn.Module):
     read_gate: nn.ParameterList
     write_gate: nn.ParameterList
     output_proj: nn.Linear | None
-    output_norm: nn.LayerNorm | None
 
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
@@ -80,14 +78,6 @@ class AVPViT(nn.Module):
         else:
             self.output_proj = None
 
-        if cfg.use_output_norm:
-            self.output_norm = nn.LayerNorm(embed_dim)
-            with torch.no_grad():
-                self.output_norm.weight.copy_(backbone.norm.weight)
-                self.output_norm.bias.copy_(backbone.norm.bias)
-        else:
-            self.output_norm = None
-
     @override
     def forward(
         self,
@@ -123,8 +113,6 @@ class AVPViT(nn.Module):
 
         if self.output_proj is not None:
             scene = self.output_proj(scene)
-        if self.output_norm is not None:
-            scene = self.output_norm(scene)
 
         if return_layers:
             return local, scene, scene_layers
