@@ -10,12 +10,12 @@ from pathlib import Path
 import comet_ml
 import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 import optuna
 import torch
 import torch.nn as nn
 from dinov3.hub.backbones import dinov3_vits16
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 from sklearn.decomposition import PCA
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -51,12 +51,20 @@ class Config:
     use_output_proj: bool = True
     use_scene_registers: bool = True
     freeze_inner_backbone: bool = False
-    gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries to save VRAM
+    gradient_checkpointing: bool = (
+        True  # Checkpoint at timestep boundaries to save VRAM
+    )
     # Viewpoints
     use_policy: bool = True  # Use learned policy for viewpoint selection
-    n_policy_viewpoints: int = 2  # Number of policy-selected viewpoints (after first imposed)
-    policy_noise_std: float = 0.05  # Gaussian noise std on pol_out during training (DDPG-style)
-    n_random_viewpoints: int = 2  # For non-policy mode: random viewpoints after full scene
+    n_policy_viewpoints: int = (
+        8  # Number of policy-selected viewpoints (after first imposed)
+    )
+    policy_noise_std: float = (
+        0.2  # Gaussian noise std on pol_out during training (DDPG-style)
+    )
+    n_random_viewpoints: int = (
+        2  # For non-policy mode: random viewpoints after full scene
+    )
     # For imposed first viewpoint:
     min_viewpoint_scale: float = 0.3
     max_viewpoint_scale: float = 1.0
@@ -233,7 +241,9 @@ def train_step_policy(
 
         # Generate next viewpoint from policy (except on last step)
         if i < n_total - 1:
-            assert out.pol_out is not None, "Policy must be enabled for train_step_policy"
+            assert out.pol_out is not None, (
+                "Policy must be enabled for train_step_policy"
+            )
             pol_out = out.pol_out
             if noise_std > 0:
                 pol_out = pol_out + torch.randn_like(pol_out) * noise_std
@@ -300,13 +310,24 @@ def plot_viewpoint_trajectory(
         hw, hh = s * W / 2, s * H / 2
 
         rect = Rectangle(
-            (px_cx - hw, px_cy - hh), 2 * hw, 2 * hh,
-            linewidth=2, edgecolor=colors[i], facecolor="none",
+            (px_cx - hw, px_cy - hh),
+            2 * hw,
+            2 * hh,
+            linewidth=2,
+            edgecolor=colors[i],
+            facecolor="none",
             label=f"t={i} ({vp.name}, s={s:.2f})",
         )
         axes[0].add_patch(rect)
         axes[0].plot(px_cx, px_cy, "o", color=colors[i], markersize=6)
-        axes[0].text(px_cx + 3, px_cy - 3, str(i), color=colors[i], fontsize=10, fontweight="bold")
+        axes[0].text(
+            px_cx + 3,
+            px_cy - 3,
+            str(i),
+            color=colors[i],
+            fontsize=10,
+            fontweight="bold",
+        )
     axes[0].set_title(f"Trajectory (sample {batch_idx})")
     axes[0].legend(loc="upper right", fontsize=8)
     axes[0].axis("off")
@@ -325,7 +346,9 @@ def plot_viewpoint_trajectory(
     for i, vp in enumerate(viewpoints):
         centers = vp.centers.cpu().numpy()
         cx_all, cy_all = centers[:, 1], centers[:, 0]
-        ax.scatter(cx_all, cy_all, c=[colors[i]], s=40, alpha=0.6, label=f"t={i}", zorder=2)
+        ax.scatter(
+            cx_all, cy_all, c=[colors[i]], s=40, alpha=0.6, label=f"t={i}", zorder=2
+        )
     ax.set_xlim(-1.1, 1.1)
     ax.set_ylim(-1.1, 1.1)
     ax.set_aspect("equal")
@@ -515,12 +538,19 @@ def plot_multistep_pca(
             px_cx, px_cy, hw, hh = vp_coords[t]
             alpha = 1.0 if t == row else 0.4
             rect = Rectangle(
-                (px_cx - hw, px_cy - hh), 2 * hw, 2 * hh,
-                linewidth=2, edgecolor=colors[t], facecolor="none", alpha=alpha
+                (px_cx - hw, px_cy - hh),
+                2 * hw,
+                2 * hh,
+                linewidth=2,
+                edgecolor=colors[t],
+                facecolor="none",
+                alpha=alpha,
             )
             ax.add_patch(rect)
             ax.plot(px_cx, px_cy, "o", color=colors[t], markersize=5, alpha=alpha)
-            ax.text(px_cx + 3, px_cy - 3, str(t), color=colors[t], fontsize=8, alpha=alpha)
+            ax.text(
+                px_cx + 3, px_cy - 3, str(t), color=colors[t], fontsize=8, alpha=alpha
+            )
         # Draw path lines
         for t in range(1, row + 1):
             x0, y0 = vp_coords[t - 1][:2]
@@ -557,7 +587,9 @@ def plot_multistep_pca(
 
         # Col 6: Error
         sample_mse = error_maps[row].mean().item()
-        im_err = axes[row, 6].imshow(error_maps[row].numpy(), cmap="hot", vmin=0, vmax=error_vmax)
+        im_err = axes[row, 6].imshow(
+            error_maps[row].numpy(), cmap="hot", vmin=0, vmax=error_vmax
+        )
         axes[row, 6].set_title(f"Err ({sample_mse:.3f})")
         axes[row, 6].axis("off")
         fig.colorbar(im_err, ax=axes[row, 6], fraction=0.046, pad=0.04)
@@ -577,12 +609,24 @@ def log_train_pca(
     """Log multi-row train PCA viz to Comet."""
     B = images.shape[0]
     if cfg.use_policy:
-        first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
-        result = run_multistep_inference_policy(avp, teacher, images, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg), cfg.policy_noise_std)
+        first_vp = random_viewpoint(
+            B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale
+        )
+        result = run_multistep_inference_policy(
+            avp,
+            teacher,
+            images,
+            first_vp,
+            cfg.n_policy_viewpoints,
+            policy_scale(cfg),
+            cfg.policy_noise_std,
+        )
     else:
         viewpoints = make_viewpoints(B, cfg)
         result = run_multistep_inference(avp, teacher, images, viewpoints)
-    fig = plot_multistep_pca(result, images[0], cfg.scene_grid_size, cfg.glimpse_grid_size, sample_idx=0)
+    fig = plot_multistep_pca(
+        result, images[0], cfg.scene_grid_size, cfg.glimpse_grid_size, sample_idx=0
+    )
     with io.BytesIO() as buf:
         plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
         buf.seek(0)
@@ -605,13 +649,23 @@ def eval_and_log(
     sample_idx = 0  # Consistent sample for all visualizations
 
     if cfg.use_policy:
-        first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
-        result = run_multistep_inference_policy(avp, teacher, images, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg))  # No noise for eval
+        first_vp = random_viewpoint(
+            B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale
+        )
+        result = run_multistep_inference_policy(
+            avp, teacher, images, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg)
+        )  # No noise for eval
     else:
         viewpoints = make_viewpoints(B, cfg)
         result = run_multistep_inference(avp, teacher, images, viewpoints)
 
-    fig = plot_multistep_pca(result, images[sample_idx], cfg.scene_grid_size, cfg.glimpse_grid_size, sample_idx=sample_idx)
+    fig = plot_multistep_pca(
+        result,
+        images[sample_idx],
+        cfg.scene_grid_size,
+        cfg.glimpse_grid_size,
+        sample_idx=sample_idx,
+    )
     with io.BytesIO() as buf:
         plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
         buf.seek(0)
@@ -619,7 +673,9 @@ def eval_and_log(
     plt.close(fig)
 
     # Log viewpoint trajectory (same sample as PCA)
-    fig_traj = plot_viewpoint_trajectory(images[sample_idx], result.viewpoints, batch_idx=sample_idx)
+    fig_traj = plot_viewpoint_trajectory(
+        images[sample_idx], result.viewpoints, batch_idx=sample_idx
+    )
     with io.BytesIO() as buf:
         plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
         buf.seek(0)
@@ -725,8 +781,18 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         optimizer.zero_grad()
         if cfg.use_policy:
-            first_vp = random_viewpoint(B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
-            loss = train_step_policy(avp, teacher, teacher_img, first_vp, cfg.n_policy_viewpoints, policy_scale(cfg), cfg.policy_noise_std)
+            first_vp = random_viewpoint(
+                B, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale
+            )
+            loss = train_step_policy(
+                avp,
+                teacher,
+                teacher_img,
+                first_vp,
+                cfg.n_policy_viewpoints,
+                policy_scale(cfg),
+                cfg.policy_noise_std,
+            )
         else:
             viewpoints = make_viewpoints(B, cfg)
             loss = train_step_fixed(avp, teacher, teacher_img, viewpoints)
