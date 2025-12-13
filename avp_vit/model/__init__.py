@@ -40,7 +40,7 @@ class AVPViT(nn.Module):
         n_blocks = backbone.n_blocks
 
         self.scene_tokens = nn.Parameter(
-            torch.zeros(1, cfg.scene_grid_size**2, embed_dim)
+            torch.randn(1, cfg.scene_grid_size**2, embed_dim)
         )
 
         self.read_attn = nn.ModuleList(
