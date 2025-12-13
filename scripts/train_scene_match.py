@@ -3,7 +3,6 @@
 import copy
 import io
 import logging
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,12 +11,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torchvision.transforms.functional as TF
-import tyro
 from dinov3.hub.backbones import dinov3_vits16
-from PIL import Image
 from sklearn.decomposition import PCA
 from torch import Tensor
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
 from ytch.correctness import assert_shape
@@ -32,32 +31,32 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
 CKPT_PATH = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
-TRAIN_IMAGE_URL = "https://dl.fbaipublicfiles.com/dinov3/notebooks/pca/test_image.jpg"
-VAL_IMAGE_URL = "https://dl.fbaipublicfiles.com/dinov2/images/example.jpg"
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 PATCH_SIZE = 16
 
 
 @dataclass
 class Config:
+    train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
+    val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     scene_grid_size: int = 16
     glimpse_grid_size: int = 7
     gate_init: float = 1e-4
-    use_output_proj: bool = True
+    use_output_proj: bool = False
     freeze_inner_backbone: bool = True
-    n_steps: int = 5000
-    batch_size: int = 8
-    mix_real_noise: bool = True
+    layer_loss: bool = True
+    n_steps: int = 50000
+    batch_size: int = 256
+    num_workers: int = 8
     ref_lr: float = 1e-5
-    weight_decay: float = 0.1
-    warmup_ratio: float = 0.5
+    weight_decay: float = 1e-3
+    warmup_ratio: float = 0.02
     grad_clip: float = 1.0
     log_every: int = 20
-    viz_every: int = 50
-    val_every: int = 50
+    viz_every: int = 200
+    val_every: int = 200
     ckpt_every: int = 1000
-    n_init_samples: int = 64
     ckpt_dir: Path = Path("checkpoints")
     device: torch.device = field(default_factory=get_sensible_device)
 
@@ -77,23 +76,15 @@ class TrainSample:
     glimpse_img: Tensor  # [B, 3, glimpse_size, glimpse_size]
     centers: Tensor  # [B, 2]
     scales: Tensor  # [B]
-    img_pil: Image.Image | None
 
-    def __init__(
-        self,
-        scene: Tensor,
-        glimpse_size: int,
-        centers: Tensor,
-        scales: Tensor,
-        img_pil: Image.Image | None = None,
-    ) -> None:
-        self.teacher_img = scene
-        self.glimpse_img = torch.nn.functional.interpolate(
-            scene, (glimpse_size, glimpse_size), mode="bilinear"
+    def __init__(self, scene: Tensor, glimpse_size: int, device: torch.device) -> None:
+        self.teacher_img = scene.to(device)
+        self.glimpse_img = nn.functional.interpolate(
+            self.teacher_img, (glimpse_size, glimpse_size), mode="bilinear"
         )
-        self.centers = centers
-        self.scales = scales
-        self.img_pil = img_pil
+        B = scene.shape[0]
+        self.centers = torch.zeros(B, 2, device=device)
+        self.scales = torch.ones(B, device=device)
 
 
 def load_teacher(device: torch.device) -> DINOv3Backbone:
@@ -117,105 +108,47 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
 
 
-def load_image_sample(url: str, cfg: Config) -> TrainSample:
-    """Load image and create teacher/glimpse image tensors."""
-    img_pil = (
-        Image.open(urllib.request.urlopen(url))
-        .convert("RGB")
-        .resize((cfg.scene_size, cfg.scene_size))
-    )
-    scene = (
-        TF.normalize(TF.to_tensor(img_pil), mean=IMAGENET_MEAN, std=IMAGENET_STD)
-        .unsqueeze(0)
-        .to(cfg.device)
-    )
-    return TrainSample(
-        scene=scene,
-        glimpse_size=cfg.glimpse_size,
-        centers=torch.zeros(1, 2, device=cfg.device),
-        scales=torch.ones(1, device=cfg.device),
-        img_pil=img_pil,
+def make_train_loader(cfg: Config) -> DataLoader[tuple[Tensor, Tensor]]:
+    transform = transforms.Compose([
+        transforms.RandomResizedCrop(cfg.scene_size, scale=(0.4, 1.0)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
+    dataset = ImageFolder(str(cfg.train_dir), transform=transform)
+    return DataLoader(
+        dataset,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        drop_last=True,
     )
 
 
-def spectrum_noise(B: int, H: int, W: int, device: torch.device) -> Tensor:
-    """Spectrum noise from Baradad et al. (NeurIPS'21). Returns [B, 3, H, W], mean=0, std=1."""
-    noise = torch.randn((B, 3, H, W), device=device)
-
-    # Frequency grids
-    fy = torch.fft.fftfreq(H, device=device).abs().view(1, 1, H, 1)
-    fx = torch.fft.fftfreq(W, device=device).abs().view(1, 1, 1, W)
-
-    # Per-image exponents a,b ~ U(0.5, 3.5)
-    a = 0.5 + 3.0 * torch.rand((B, 1, 1, 1), device=device)
-    b = 0.5 + 3.0 * torch.rand((B, 1, 1, 1), device=device)
-
-    # Anisotropic filter: 1/(|fx|^a + |fy|^b)
-    denom = fx.pow(a) + fy.pow(b)
-    denom[..., 0, 0] = 1.0
-    filt = 1.0 / denom
-    filt[..., 0, 0] = 0.0
-
-    spec = torch.fft.fft2(noise)
-    out = torch.fft.ifft2(spec * filt).real
-
-    # Random orthogonal color mixing (batched QR on CPU, tiny 3x3)
-    M = torch.randn((B, 3, 3))
-    Q, R = torch.linalg.qr(M)
-    Q = Q * torch.sign(torch.diagonal(R, dim1=1, dim2=2)).unsqueeze(-1)
-    Q = Q.to(device)
-    out = torch.einsum("bij,bjhw->bihw", Q, out)
-
-    # Normalize to mean=0, std=1
-    out = out - out.mean(dim=(-2, -1), keepdim=True)
-    out = out / (out.std(dim=(-2, -1), keepdim=True) + 1e-8)
-    return out
-
-
-def load_base_image(url: str, device: torch.device) -> Tensor:
-    """Load image as normalized tensor [1, 3, H, W] at original size."""
-    img = Image.open(urllib.request.urlopen(url)).convert("RGB")
-    t = TF.normalize(TF.to_tensor(img), mean=IMAGENET_MEAN, std=IMAGENET_STD)
-    return t.unsqueeze(0).to(device)
-
-
-def mixed_sample(base_img: Tensor, cfg: Config) -> TrainSample:
-    """Create batch with 50% augmented real + 50% spectrum noise."""
-    from torchvision.transforms import v2
-
-    B = cfg.batch_size
-    B_real = B // 2
-    B_noise = B - B_real
-
-    batch = base_img.expand(B_real, -1, -1, -1)
-    aug = v2.Compose(
-        [
-            v2.RandomResizedCrop(
-                (cfg.scene_size, cfg.scene_size), scale=(0.8, 1.0), antialias=True
-            ),
-            v2.RandomHorizontalFlip(),
-        ]
-    )
-    real_scene = aug(batch)
-    noise_scene = spectrum_noise(B_noise, cfg.scene_size, cfg.scene_size, cfg.device)
-    scene = torch.cat([real_scene, noise_scene], dim=0)
-
-    return TrainSample(
-        scene=scene,
-        glimpse_size=cfg.glimpse_size,
-        centers=torch.zeros(B, 2, device=cfg.device),
-        scales=torch.ones(B, device=cfg.device),
+def make_val_loader(cfg: Config) -> DataLoader[tuple[Tensor, Tensor]]:
+    transform = transforms.Compose([
+        transforms.Resize(cfg.scene_size),
+        transforms.CenterCrop(cfg.scene_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ])
+    dataset = ImageFolder(str(cfg.val_dir), transform=transform)
+    return DataLoader(
+        dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        drop_last=True,
     )
 
 
-def random_sample(cfg: Config) -> TrainSample:
-    """Create random spectrum noise image tensors."""
-    return TrainSample(
-        scene=spectrum_noise(cfg.batch_size, cfg.scene_size, cfg.scene_size, cfg.device),
-        glimpse_size=cfg.glimpse_size,
-        centers=torch.zeros(cfg.batch_size, 2, device=cfg.device),
-        scales=torch.ones(cfg.batch_size, device=cfg.device),
-    )
+def init_scene_tokens(avp: AVPViT, embed_dim: int) -> None:
+    """Initialize scene_tokens to randn / sqrt(embed_dim)."""
+    with torch.no_grad():
+        avp.scene_tokens.data.normal_(0, 1.0 / (embed_dim**0.5))
+    log.info(f"scene_tokens initialized to randn / sqrt({embed_dim})")
 
 
 def teacher_forward(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
@@ -225,32 +158,22 @@ def teacher_forward(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
     return out["x_norm_patchtokens"]
 
 
+def teacher_forward_layers(teacher: DINOv3Backbone, img: Tensor) -> list[Tensor]:
+    """Teacher forward returning patch tokens after each block (pre-norm)."""
+    with torch.no_grad():
+        x, _ = teacher._backbone.prepare_tokens_with_masks(img, masks=None)
+        n_prefix = teacher.n_prefix_tokens
+        states = []
+        for blk in teacher._backbone.blocks:
+            x = blk(x)
+            states.append(x[:, n_prefix:])  # patch tokens only, [B, S, D]
+    return states
+
+
 def tokenize_glimpse(teacher: DINOv3Backbone, img: Tensor) -> Tensor:
     """Tokenize glimpse image for AVP input."""
     tokens, _ = teacher._backbone.prepare_tokens_with_masks(img, masks=None)
     return tokens
-
-
-def init_scene_tokens(avp: AVPViT, teacher: DINOv3Backbone, cfg: Config) -> None:
-    """Initialize scene_tokens to average latents from random images."""
-    S = cfg.scene_grid_size**2
-    D = teacher.embed_dim
-
-    log.info(f"Initializing scene_tokens from {cfg.n_init_samples} random images...")
-    all_patches = []
-    batch_size = min(cfg.n_init_samples, 16)
-    for i in range(0, cfg.n_init_samples, batch_size):
-        B = min(batch_size, cfg.n_init_samples - i)
-        imgs = spectrum_noise(B, cfg.scene_size, cfg.scene_size, cfg.device)
-        patches = teacher_forward(teacher, imgs)
-        all_patches.append(patches)
-
-    all_patches = torch.cat(all_patches, dim=0)  # [N, S, D]
-    avg_patches = all_patches.mean(dim=0, keepdim=True)  # [1, S, D]
-    assert_shape(avg_patches, (1, S, D))
-
-    avp.scene_tokens.data.copy_(avg_patches)
-    log.info(f"scene_tokens initialized to mean of {cfg.n_init_samples} samples")
 
 
 def train_step(
@@ -264,16 +187,24 @@ def train_step(
     S = cfg.scene_grid_size**2
     D = teacher.embed_dim
 
-    # Teacher: standard forward on full-res image
-    teacher_patches = teacher_forward(teacher, sample.teacher_img)
-    assert_shape(teacher_patches, (B, S, D))
-
-    # AVP: tokenize glimpse, then forward with custom positions
     glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
-    _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
-    assert_shape(scene, (B, S, D))
 
-    return nn.functional.mse_loss(scene, teacher_patches)
+    if cfg.layer_loss:
+        teacher_layers = teacher_forward_layers(teacher, sample.teacher_img)
+        _, _, scene_layers = avp(
+            glimpse_tokens, sample.centers, sample.scales, return_layers=True
+        )
+        assert len(teacher_layers) == len(scene_layers)
+        loss = sum(
+            nn.functional.mse_loss(s, t) for s, t in zip(scene_layers, teacher_layers)
+        )
+        return loss / len(scene_layers)
+    else:
+        teacher_patches = teacher_forward(teacher, sample.teacher_img)
+        assert_shape(teacher_patches, (B, S, D))
+        _, scene = avp(glimpse_tokens, sample.centers, sample.scales)
+        assert_shape(scene, (B, S, D))
+        return nn.functional.mse_loss(scene, teacher_patches)
 
 
 def normalize_local(avp: AVPViT, local: Tensor) -> Tensor:
@@ -283,14 +214,12 @@ def normalize_local(avp: AVPViT, local: Tensor) -> Tensor:
 
 
 def fit_pca(features: Tensor) -> PCA:
-    """Fit PCA. Expects [N, D] input."""
     pca = PCA(n_components=3, whiten=True)
     pca.fit(features.float().cpu().numpy())
     return pca
 
 
 def pca_rgb(pca: PCA, features: Tensor, H: int, W: int) -> Tensor:
-    """Apply PCA. Expects [N, D] input."""
     proj = pca.transform(features.float().cpu().numpy())
     return torch.sigmoid(torch.from_numpy(proj).view(H, W, 3) * 2.0)
 
@@ -347,51 +276,66 @@ def eval_and_log(
     step: int,
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    sample: TrainSample,
+    val_loader: DataLoader[tuple[Tensor, Tensor]],
     cfg: Config,
 ) -> float:
-    """Eval on sample, log PCA plots to Comet."""
-    B = sample.teacher_img.shape[0]
+    """Eval on val set, log PCA plots to Comet."""
     S = cfg.scene_grid_size
     G = cfg.glimpse_grid_size
-    D = teacher.embed_dim
+
+    total_loss = 0.0
+    n_batches = 0
+    first_sample: TrainSample | None = None
+    first_teacher: Tensor | None = None
+    first_local: Tensor | None = None
+    first_scene: Tensor | None = None
 
     with torch.inference_mode():
-        teacher_patches = teacher_forward(teacher, sample.teacher_img)
-        assert_shape(teacher_patches, (B, S * S, D))
-        glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
-        local, scene = avp(glimpse_tokens, sample.centers, sample.scales)
-        local_patches = normalize_local(avp, local)
-        assert_shape(local_patches, (B, G * G, D))
-        assert_shape(scene, (B, S * S, D))
-        val_loss = nn.functional.mse_loss(scene, teacher_patches).item()
+        for imgs, _ in val_loader:
+            sample = TrainSample(imgs, cfg.glimpse_size, cfg.device)
+            teacher_patches = teacher_forward(teacher, sample.teacher_img)
+            glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
+            local, scene = avp(glimpse_tokens, sample.centers, sample.scales)
+            loss = nn.functional.mse_loss(scene, teacher_patches)
+            total_loss += loss.item()
+            n_batches += 1
 
-    # PCA viz (first sample only)
-    teacher_0, local_0, scene_0 = teacher_patches[0], local_patches[0], scene[0]
+            if first_sample is None:
+                first_sample = sample
+                first_teacher = teacher_patches
+                first_local = normalize_local(avp, local)
+                first_scene = scene
+
+            if n_batches >= 10:
+                break
+
+    val_loss = total_loss / n_batches
+
+    # PCA viz from first batch
+    assert first_sample is not None
+    assert first_teacher is not None
+    assert first_local is not None
+    assert first_scene is not None
+
+    teacher_0, local_0, scene_0 = first_teacher[0], first_local[0], first_scene[0]
     pca = fit_pca(teacher_0)
     teacher_pca = pca_rgb(pca, teacher_0, S, S)
     local_pca = pca_rgb(pca, local_0, G, G)
     scene_pca = pca_rgb(pca, scene_0, S, S)
 
-    n_plots = 4 if sample.img_pil is not None else 3
-    fig, axes = plt.subplots(1, n_plots, figsize=(4 * n_plots, 4))
-    i = 0
-    if sample.img_pil is not None:
-        axes[i].imshow(sample.img_pil)
-        axes[i].set_title("Input")
-        axes[i].axis("off")
-        i += 1
-    axes[i].imshow(teacher_pca.numpy())
-    axes[i].set_title("Teacher")
-    axes[i].axis("off")
-    i += 1
-    axes[i].imshow(local_pca.numpy())
-    axes[i].set_title("Local")
-    axes[i].axis("off")
-    i += 1
-    axes[i].imshow(scene_pca.numpy())
-    axes[i].set_title("Scene")
-    axes[i].axis("off")
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    axes[0].imshow(tensor_to_img(first_sample.teacher_img[0]).numpy())
+    axes[0].set_title("Input")
+    axes[0].axis("off")
+    axes[1].imshow(teacher_pca.numpy())
+    axes[1].set_title("Teacher")
+    axes[1].axis("off")
+    axes[2].imshow(local_pca.numpy())
+    axes[2].set_title("Local")
+    axes[2].axis("off")
+    axes[3].imshow(scene_pca.numpy())
+    axes[3].set_title("Scene")
+    axes[3].axis("off")
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -407,7 +351,6 @@ def eval_and_log(
 def save_checkpoint(
     avp: AVPViT, ckpt_path: Path, exp: comet_ml.Experiment, step: int, val_loss: float
 ) -> None:
-    """Save model checkpoint, log to Comet."""
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(avp.state_dict(), ckpt_path)
     size_mb = ckpt_path.stat().st_size / (1024 * 1024)
@@ -416,6 +359,8 @@ def save_checkpoint(
 
 
 def main() -> None:
+    import tyro
+
     torch.set_float32_matmul_precision("high")
     cfg = tyro.cli(Config)
     log.info(f"Config: {cfg}")
@@ -425,36 +370,33 @@ def main() -> None:
     )
     exp.log_parameters(
         {
-            k: str(v) if isinstance(v, torch.device) else v
+            k: str(v) if isinstance(v, (torch.device, Path)) else v
             for k, v in cfg.__dict__.items()
         }
     )
 
-    # Load models
     teacher = load_teacher(cfg.device)
     avp = create_avp(teacher, cfg)
+    init_scene_tokens(avp, teacher.embed_dim)
 
-    # Initialize scene_tokens to average latents
-    init_scene_tokens(avp, teacher, cfg)
+    train_loader = make_train_loader(cfg)
+    val_loader = make_val_loader(cfg)
+    train_iter = iter(train_loader)
 
-    # Load base image for mixed training
-    base_img: Tensor | None = None
-    if cfg.mix_real_noise:
-        base_img = load_base_image(TRAIN_IMAGE_URL, cfg.device)
-        log.info(f"Loaded base image: {base_img.shape}")
-
-    # Load val sample
-    val_sample = load_image_sample(VAL_IMAGE_URL, cfg)
-
-    # Trainable params (backbone already has requires_grad set in create_avp)
     trainable = [p for p in avp.parameters() if p.requires_grad]
-
     n_trainable = sum(p.numel() for p in trainable)
     n_teacher = count_parameters(teacher)
+    n_train = len(train_loader.dataset)  # type: ignore[arg-type]
+    n_val = len(val_loader.dataset)  # type: ignore[arg-type]
     log.info(f"Trainable: {n_trainable:,}, Teacher: {n_teacher:,}")
-    exp.log_parameters({"trainable_params": n_trainable, "teacher_params": n_teacher})
+    log.info(f"Train: {n_train:,}, Val: {n_val:,}")
+    exp.log_parameters({
+        "trainable_params": n_trainable,
+        "teacher_params": n_teacher,
+        "train_size": n_train,
+        "val_size": n_val,
+    })
 
-    # Optimizer + LR schedule (linear warmup -> cosine decay to 0)
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
     optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
     warmup_steps = int(cfg.n_steps * cfg.warmup_ratio)
@@ -468,35 +410,37 @@ def main() -> None:
         optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
     )
 
-    # Checkpointing setup
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
     best_val_loss = float("inf")
 
-    # Initial eval + checkpoint
-    val_loss = eval_and_log(exp, 0, avp, teacher, val_sample, cfg)
+    val_loss = eval_and_log(exp, 0, avp, teacher, val_loader, cfg)
     save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
     best_val_loss = val_loss
 
-    # Training
-    ema_loss, alpha = 0.0, 2 / (cfg.log_every + 1)
+    ema_loss_t = torch.tensor(0.0, device=cfg.device)
+    alpha = 2 / (cfg.log_every + 1)
     pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
     for step in pbar:
-        if cfg.mix_real_noise and base_img is not None:
-            sample = mixed_sample(base_img, cfg)
-        else:
-            sample = random_sample(cfg)
+        try:
+            imgs, _ = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            imgs, _ = next(train_iter)
+
+        sample = TrainSample(imgs, cfg.glimpse_size, cfg.device)
 
         optimizer.zero_grad()
         loss = train_step(avp, teacher, sample, cfg)
         loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip).item()
+        grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
         optimizer.step()
         scheduler.step()
-        ema_loss = (
-            alpha * loss.item() + (1 - alpha) * ema_loss if step > 0 else loss.item()
-        )
+        ema_loss_t = alpha * loss.detach() + (1 - alpha) * ema_loss_t if step > 0 else loss.detach()
 
         if step % cfg.log_every == 0:
+            # Sync only when logging
+            ema_loss = ema_loss_t.item()
+            grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
             sps = pbar.format_dict["rate"] * cfg.batch_size if pbar.format_dict["rate"] else 0
             exp.log_metrics(
@@ -516,17 +460,16 @@ def main() -> None:
             log_train_pca(exp, step, sample, teacher_patches, local_patches, scene, cfg)
 
         if step > 0 and step % cfg.val_every == 0:
-            val_loss = eval_and_log(exp, step, avp, teacher, val_sample, cfg)
+            val_loss = eval_and_log(exp, step, avp, teacher, val_loader, cfg)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 if step % cfg.ckpt_every == 0:
                     save_checkpoint(avp, ckpt_path, exp, step, val_loss)
 
-    # Final eval + checkpoint if best
-    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_sample, cfg)
+    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_loader, cfg)
     if val_loss < best_val_loss:
         save_checkpoint(avp, ckpt_path, exp, cfg.n_steps, val_loss)
-    log.info(f"Final: train_ema={ema_loss:.4f}, val={val_loss:.4f}, best={best_val_loss:.4f}")
+    log.info(f"Final: train_ema={ema_loss_t.item():.4f}, val={val_loss:.4f}, best={best_val_loss:.4f}")
     exp.end()
 
 

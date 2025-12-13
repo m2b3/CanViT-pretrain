@@ -91,7 +91,8 @@ class AVPViT(nn.Module):
         local: Tensor,
         centers: Tensor,
         scales: Tensor,
-    ) -> tuple[Tensor, Tensor]:
+        return_layers: bool = False,
+    ) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, list[Tensor]]:
         B = local.shape[0]
         H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
@@ -105,6 +106,7 @@ class AVPViT(nn.Module):
         local_rope = compute_rope(local_pos, periods)
         scene_rope = compute_rope(scene_pos, periods)
 
+        scene_layers: list[Tensor] = []
         for i in range(self.backbone.n_blocks):
             local = local + self.read_gate[i] * self.read_attn[i](
                 local, scene, local_rope, scene_rope
@@ -113,9 +115,13 @@ class AVPViT(nn.Module):
             scene = scene + self.write_gate[i] * self.write_attn[i](
                 scene, local, scene_rope, local_rope
             )
+            if return_layers:
+                scene_layers.append(scene)
 
         if self.output_proj is not None:
             assert self.output_norm is not None
             scene = self.output_norm(self.output_proj(scene))
 
+        if return_layers:
+            return local, scene, scene_layers
         return local, scene
