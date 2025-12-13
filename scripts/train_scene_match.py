@@ -205,6 +205,17 @@ def pca_rgb(pca: PCA, features: Tensor, H: int, W: int) -> Tensor:
     return torch.sigmoid(torch.from_numpy(proj).view(H, W, 3) * 2.0)
 
 
+def upsample_latents(latents: Tensor, src_size: int, dst_size: int) -> Tensor:
+    """Bilinearly upsample latents from [src_size², D] to [dst_size², D]."""
+    D = latents.shape[-1]
+    # [N, D] -> [1, D, H, W] -> interpolate -> [1, D, H', W'] -> [N', D]
+    spatial = latents.view(src_size, src_size, D).permute(2, 0, 1).unsqueeze(0)
+    upsampled = nn.functional.interpolate(
+        spatial, size=(dst_size, dst_size), mode="bilinear", align_corners=False
+    )
+    return upsampled.squeeze(0).permute(1, 2, 0).reshape(dst_size * dst_size, D)
+
+
 def tensor_to_img(t: Tensor) -> Tensor:
     """Convert [3, H, W] tensor to displayable [H, W, 3] in [0, 1]."""
     t = t.detach().cpu().float()
@@ -216,6 +227,7 @@ def log_train_pca(
     exp: comet_ml.Experiment,
     step: int,
     sample: TrainSample,
+    teacher: DINOv3Backbone,
     teacher_patches: Tensor,
     local_patches: Tensor,
     scene: Tensor,
@@ -224,26 +236,35 @@ def log_train_pca(
     """Log train PCA viz to Comet (random sample from batch)."""
     S = cfg.scene_grid_size
     G = cfg.glimpse_grid_size
-    idx = torch.randint(teacher_patches.shape[0], (1,)).item()
+    idx = int(torch.randint(teacher_patches.shape[0], (1,)).item())
     teacher_i, local_i, scene_i = teacher_patches[idx], local_patches[idx], scene[idx]
+
+    # Glimpse teacher: run teacher on low-res, upsample latents
+    glimpse_teacher_i = teacher_forward(teacher, sample.glimpse_img)[idx]
+    glimpse_teacher_up = upsample_latents(glimpse_teacher_i, G, S)
+
     pca = fit_pca(teacher_i)
     teacher_rgb = pca_rgb(pca, teacher_i, S, S)
+    glimpse_teacher_rgb = pca_rgb(pca, glimpse_teacher_up, S, S)
     local_rgb = pca_rgb(pca, local_i, G, G)
     scene_rgb = pca_rgb(pca, scene_i, S, S)
 
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
     axes[0].imshow(tensor_to_img(sample.teacher_img[idx]).numpy())
     axes[0].set_title("Input")
     axes[0].axis("off")
     axes[1].imshow(teacher_rgb.numpy())
-    axes[1].set_title("Teacher")
+    axes[1].set_title("Teacher (HR)")
     axes[1].axis("off")
-    axes[2].imshow(local_rgb.numpy())
-    axes[2].set_title("Local")
+    axes[2].imshow(glimpse_teacher_rgb.numpy())
+    axes[2].set_title("Teacher (LR↑)")
     axes[2].axis("off")
-    axes[3].imshow(scene_rgb.numpy())
-    axes[3].set_title("Scene")
+    axes[3].imshow(local_rgb.numpy())
+    axes[3].set_title("Local")
     axes[3].axis("off")
+    axes[4].imshow(scene_rgb.numpy())
+    axes[4].set_title("Scene")
+    axes[4].axis("off")
     plt.tight_layout()
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
@@ -268,6 +289,7 @@ def eval_and_log(
     n_batches = 0
     first_sample: TrainSample | None = None
     first_teacher: Tensor | None = None
+    first_glimpse_teacher: Tensor | None = None
     first_local: Tensor | None = None
     first_scene: Tensor | None = None
 
@@ -284,6 +306,7 @@ def eval_and_log(
             if first_sample is None:
                 first_sample = sample
                 first_teacher = teacher_patches
+                first_glimpse_teacher = teacher_forward(teacher, sample.glimpse_img)
                 first_local = normalize_local(avp, local)
                 first_scene = scene
 
@@ -295,28 +318,40 @@ def eval_and_log(
     # PCA viz from first batch
     assert first_sample is not None
     assert first_teacher is not None
+    assert first_glimpse_teacher is not None
     assert first_local is not None
     assert first_scene is not None
 
-    teacher_0, local_0, scene_0 = first_teacher[0], first_local[0], first_scene[0]
+    teacher_0 = first_teacher[0]
+    glimpse_teacher_0 = first_glimpse_teacher[0]
+    local_0 = first_local[0]
+    scene_0 = first_scene[0]
+
+    # Upsample glimpse teacher latents to match HR teacher
+    glimpse_teacher_up = upsample_latents(glimpse_teacher_0, G, S)
+
     pca = fit_pca(teacher_0)
     teacher_pca = pca_rgb(pca, teacher_0, S, S)
+    glimpse_teacher_pca = pca_rgb(pca, glimpse_teacher_up, S, S)
     local_pca = pca_rgb(pca, local_0, G, G)
     scene_pca = pca_rgb(pca, scene_0, S, S)
 
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
     axes[0].imshow(tensor_to_img(first_sample.teacher_img[0]).numpy())
     axes[0].set_title("Input")
     axes[0].axis("off")
     axes[1].imshow(teacher_pca.numpy())
-    axes[1].set_title("Teacher")
+    axes[1].set_title("Teacher (HR)")
     axes[1].axis("off")
-    axes[2].imshow(local_pca.numpy())
-    axes[2].set_title("Local")
+    axes[2].imshow(glimpse_teacher_pca.numpy())
+    axes[2].set_title("Teacher (LR↑)")
     axes[2].axis("off")
-    axes[3].imshow(scene_pca.numpy())
-    axes[3].set_title("Scene")
+    axes[3].imshow(local_pca.numpy())
+    axes[3].set_title("Local")
     axes[3].axis("off")
+    axes[4].imshow(scene_pca.numpy())
+    axes[4].set_title("Scene")
+    axes[4].axis("off")
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -450,7 +485,7 @@ def main() -> None:
                 glimpse_tokens = tokenize_glimpse(teacher, sample.glimpse_img)
                 local, scene = avp(glimpse_tokens, sample.centers, sample.scales)
                 local_patches = normalize_local(avp, local)
-            log_train_pca(exp, step, sample, teacher_patches, local_patches, scene, cfg)
+            log_train_pca(exp, step, sample, teacher, teacher_patches, local_patches, scene, cfg)
 
         if step > 0 and step % cfg.val_every == 0:
             val_loss = eval_and_log(exp, step, avp, teacher, val_loader, cfg)
