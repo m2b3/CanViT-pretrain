@@ -208,7 +208,7 @@ def test_policy_disabled_by_default():
     assert avp.pol_token is None
     assert avp.pol_gate is None
     assert avp.pol_norm is None
-    assert avp.pol_proj is None
+    assert avp.pol_mlp is None
 
 
 def test_policy_enabled():
@@ -227,8 +227,8 @@ def test_policy_enabled():
         assert (g == 0).all()
     assert avp.pol_norm is not None
     assert isinstance(avp.pol_norm, torch.nn.LayerNorm)
-    assert avp.pol_proj is not None
-    assert isinstance(avp.pol_proj, torch.nn.Linear)
+    assert avp.pol_mlp is not None
+    assert isinstance(avp.pol_mlp, torch.nn.Sequential)
 
 
 def test_policy_forward_step_returns_step_output():

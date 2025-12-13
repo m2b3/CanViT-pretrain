@@ -55,7 +55,7 @@ class AVPViT(nn.Module):
     pol_token: nn.Parameter | None
     pol_gate: nn.ParameterList | None
     pol_norm: nn.Module | None
-    pol_proj: nn.Module | None
+    pol_mlp: nn.Module | None
 
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
@@ -117,7 +117,7 @@ class AVPViT(nn.Module):
         else:
             self.output_proj = nn.Identity()
 
-        # Policy: learnable POL token + bypass gate + LayerNorm + projection to (y, x)
+        # Policy: learnable POL token + bypass gate + LayerNorm + MLP to (y, x)
         if cfg.use_policy:
             self.pol_token = nn.Parameter(
                 torch.randn(1, 1, embed_dim) / (embed_dim**0.5)
@@ -127,14 +127,20 @@ class AVPViT(nn.Module):
                 [nn.Parameter(torch.zeros(embed_dim)) for _ in range(n_blocks)]
             )
             self.pol_norm = nn.LayerNorm(embed_dim)
-            self.pol_proj = nn.Linear(embed_dim, 2)
-            nn.init.uniform_(self.pol_proj.weight, -cfg.policy_init_scale, cfg.policy_init_scale)
-            nn.init.zeros_(self.pol_proj.bias)
+            # Small MLP: hidden -> SiLU -> output
+            pol_hidden = embed_dim // 4
+            pol_fc1 = nn.Linear(embed_dim, pol_hidden)
+            nn.init.orthogonal_(pol_fc1.weight, gain=2**0.5)
+            nn.init.zeros_(pol_fc1.bias)
+            pol_fc2 = nn.Linear(pol_hidden, 2)
+            nn.init.uniform_(pol_fc2.weight, -cfg.policy_init_scale, cfg.policy_init_scale)
+            nn.init.zeros_(pol_fc2.bias)
+            self.pol_mlp = nn.Sequential(pol_fc1, nn.SiLU(), pol_fc2)
         else:
             self.pol_token = None
             self.pol_gate = None
             self.pol_norm = None
-            self.pol_proj = None
+            self.pol_mlp = None
 
     def _init_scene(self, B: int, scene: Tensor | None) -> Tensor:
         """Initialize scene: use provided or expand scene_tokens, prepend registers."""
@@ -196,8 +202,8 @@ class AVPViT(nn.Module):
         # Extract POL token and decode policy output
         pol_out: Tensor | None = None
         if pol_token is not None:
-            assert self.pol_norm is not None and self.pol_proj is not None
-            pol_out = self.pol_proj(self.pol_norm(local[:, 0, :]))  # [B, 2]
+            assert self.pol_norm is not None and self.pol_mlp is not None
+            pol_out = self.pol_mlp(self.pol_norm(local[:, 0, :]))  # [B, 2]
             local = local[:, 1:, :]  # Strip POL from local
 
         # Strip registers, return grid tokens only
@@ -255,7 +261,7 @@ class AVPViT(nn.Module):
         """Convert raw policy output to bounded Viewpoint.
 
         Args:
-            pol_out: [B, 2] raw output from pol_proj
+            pol_out: [B, 2] raw output from pol_mlp
             scale: fixed scale for policy viewpoints
 
         Returns:
