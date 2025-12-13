@@ -13,3 +13,8 @@ dependencies = [
 
 [tool.uv.sources]
 dinov3 = { path = "dinov3", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
