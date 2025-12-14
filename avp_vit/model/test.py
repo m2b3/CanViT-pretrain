@@ -200,40 +200,9 @@ def test_glimpse_size_from_backbone():
     assert avp.glimpse_size == 7 * PATCH_SIZE  # 112
 
 
-def test_policy_disabled_by_default():
-    cfg = AVPConfig(scene_grid_size=4)
-    backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
-    avp = AVPViT(backbone, cfg)
-
-    assert avp.pol_token is None
-    assert avp.pol_gate is None
-    assert avp.pol_norm is None
-    assert avp.pol_mlp is None
-
-
-def test_policy_enabled():
+def test_forward_step_returns_step_output():
     embed_dim = 64
-    n_blocks = 2
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_policy=True)
-    backbone = MockBackbone(embed_dim, 4, n_blocks, 0, PATCH_SIZE)
-    avp = AVPViT(backbone, cfg)
-
-    assert avp.pol_token is not None
-    assert avp.pol_token.shape == (1, 1, embed_dim)
-    assert avp.pol_gate is not None
-    assert len(avp.pol_gate) == n_blocks
-    for g in avp.pol_gate:
-        assert g.shape == (embed_dim,)
-        assert (g == 0).all()
-    assert avp.pol_norm is not None
-    assert isinstance(avp.pol_norm, torch.nn.LayerNorm)
-    assert avp.pol_mlp is not None
-    assert isinstance(avp.pol_mlp, torch.nn.Sequential)
-
-
-def test_policy_forward_step_returns_step_output():
-    embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_policy=True)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -246,76 +215,3 @@ def test_policy_forward_step_returns_step_output():
     assert isinstance(out, StepOutput)
     assert out.local.shape == (B, 10, embed_dim)  # CLS + 3x3 glimpse grid
     assert out.scene.shape == (B, 16, embed_dim)  # 4x4 scene grid
-    assert out.pol_out is not None
-    assert out.pol_out.shape == (B, 2)
-
-
-def test_policy_to_viewpoint():
-    embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_policy=True)
-    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
-    avp = AVPViT(backbone, cfg)
-
-    B = 4
-    pol_out = torch.randn(B, 2) * 10  # Large values to test tanh clamping
-    scale = 0.25
-
-    vp = avp.policy_to_viewpoint(pol_out, scale)
-
-    assert vp.centers.shape == (B, 2)
-    assert vp.scales.shape == (B,)
-    assert (vp.scales == scale).all()
-    # Centers should be bounded by max_offset = 1 - scale = 0.75
-    assert (vp.centers.abs() <= 0.75 + 1e-6).all()
-
-
-class PerturbingBackbone(MockBackbone):
-    """Backbone that adds large perturbation to test bypass gate."""
-
-    @override
-    def forward_block(
-        self, idx: int, x: Tensor, rope: tuple[Tensor, Tensor] | None
-    ) -> Tensor:
-        return x + 100.0  # Huge perturbation
-
-
-def test_pol_bypass_gate_preserves_token_at_init():
-    """At init (pol_gate=0), POL latent after backbone ≈ POL latent before."""
-    embed_dim = 64
-    n_blocks = 2
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_policy=True)
-    backbone = PerturbingBackbone(embed_dim, 4, n_blocks, 0, PATCH_SIZE)
-    avp = AVPViT(backbone, cfg)
-
-    assert avp.pol_token is not None
-    assert avp.pol_gate is not None
-
-    B = 2
-    images = torch.randn(B, 3, 64, 64)
-    vp = Viewpoint.full_scene(B, images.device)
-
-    # Capture POL latent by hooking into the norm input
-    pol_latents: list[Tensor] = []
-    assert avp.pol_norm is not None
-    orig_forward = avp.pol_norm.forward
-
-    def hook(x: Tensor) -> Tensor:
-        pol_latents.append(x.clone())
-        return orig_forward(x)
-
-    avp.pol_norm.forward = hook  # type: ignore[method-assign]
-
-    # With pol_gate=0: POL should be unchanged despite +100 perturbation
-    avp.forward_step(images, vp, None)
-    pol_with_bypass = pol_latents[-1]
-
-    # With pol_gate=1: POL should be massively perturbed
-    for g in avp.pol_gate:
-        g.data.fill_(1.0)
-    avp.forward_step(images, vp, None)
-    pol_without_bypass = pol_latents[-1]
-
-    # Bypass should keep POL close to init, no bypass should explode it
-    pol_init = avp.pol_token.expand(B, -1, -1).squeeze(1)
-    assert torch.allclose(pol_with_bypass, pol_init, atol=1e-5)
-    assert (pol_without_bypass - pol_init).abs().mean() > 50  # Massively different

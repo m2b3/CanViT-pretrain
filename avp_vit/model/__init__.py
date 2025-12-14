@@ -18,7 +18,6 @@ class StepOutput(NamedTuple):
     glimpse: Tensor  # [B, C, H, W] extracted glimpse image
     local: Tensor  # [B, N, D] local features (CLS + patches)
     scene: Tensor  # [B, G*G, D] updated scene representation
-    pol_out: Tensor | None  # [B, 2] raw policy output, or None if policy disabled
 
 
 @final
@@ -29,8 +28,6 @@ class AVPConfig:
     use_scene_registers: bool = False
     gate_init: float = 0.0
     use_output_proj: bool = False
-    use_policy: bool = False
-    policy_init_scale: float = 1e-3  # Uniform init range for policy head weights
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries to save VRAM
 
 
@@ -53,10 +50,6 @@ class AVPViT(nn.Module):
     read_gate: nn.ParameterList
     write_gate: nn.ParameterList
     output_proj: nn.Module
-    pol_token: nn.Parameter | None
-    pol_gate: nn.ParameterList | None
-    pol_norm: nn.Module | None
-    pol_mlp: nn.Module | None
 
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
@@ -118,31 +111,6 @@ class AVPViT(nn.Module):
         else:
             self.output_proj = nn.Identity()
 
-        # Policy: learnable POL token + bypass gate + LayerNorm + MLP to (y, x)
-        if cfg.use_policy:
-            self.pol_token = nn.Parameter(
-                torch.randn(1, 1, embed_dim) / (embed_dim**0.5)
-            )
-            # Bypass gate: at init, POL output = POL input (no backbone perturbation)
-            self.pol_gate = nn.ParameterList(
-                [nn.Parameter(torch.full((embed_dim,), cfg.gate_init)) for _ in range(n_blocks)]
-            )
-            self.pol_norm = nn.LayerNorm(embed_dim)
-            # Small MLP: hidden -> SiLU -> output
-            pol_hidden = embed_dim // 4
-            pol_fc1 = nn.Linear(embed_dim, pol_hidden)
-            nn.init.orthogonal_(pol_fc1.weight, gain=2**0.5)
-            nn.init.zeros_(pol_fc1.bias)
-            pol_fc2 = nn.Linear(pol_hidden, 2)
-            nn.init.uniform_(pol_fc2.weight, -cfg.policy_init_scale, cfg.policy_init_scale)
-            nn.init.zeros_(pol_fc2.bias)
-            self.pol_mlp = nn.Sequential(pol_fc1, nn.SiLU(), pol_fc2)
-        else:
-            self.pol_token = None
-            self.pol_gate = None
-            self.pol_norm = None
-            self.pol_mlp = None
-
     def _init_scene(self, B: int, scene: Tensor | None) -> Tensor:
         """Initialize scene: use provided or expand scene_tokens, prepend registers."""
         if scene is None:
@@ -167,46 +135,22 @@ class AVPViT(nn.Module):
         n_reg = self.n_scene_registers
 
         scene_t = self._init_scene(B, scene)
-
-        # Prepend POL token to local stream if policy enabled
-        pol_token = self.pol_token
-        if pol_token is not None:
-            pol = pol_token.expand(B, -1, -1)  # [B, 1, D]
-            local = torch.cat([pol, local], dim=1)  # [B, 1+N, D]
-
-        # Compute positions for patch tokens only (POL/CLS/registers get no RoPE)
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
-
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
-
         local_rope = compute_rope(local_pos, periods)
         scene_rope = compute_rope(scene_pos, periods)
 
-        pol_gate = self.pol_gate
         for i in range(self.backbone.n_blocks):
             local = local + self.read_gate[i] * self.read_attn[i](
                 local, scene_t, local_rope, scene_rope
             )
-            pol_in = local[:, 0:1, :] if pol_gate is not None else None
             local = self.backbone.forward_block(i, local, local_rope)
-            if pol_gate is not None:
-                assert pol_in is not None
-                # Bypass: interpolate between preserved POL and backbone output
-                pol = pol_in + pol_gate[i] * (local[:, 0:1, :] - pol_in)
-                local = torch.cat([pol, local[:, 1:, :]], dim=1)
             scene_t = scene_t + self.write_gate[i] * self.write_attn[i](
                 scene_t, local, scene_rope, local_rope
             )
 
-        # Extract POL token and decode policy output
-        pol_out: Tensor | None = None
-        if pol_token is not None:
-            assert self.pol_norm is not None and self.pol_mlp is not None
-            pol_out = self.pol_mlp(self.pol_norm(local[:, 0, :]))  # [B, 2]
-            local = local[:, 1:, :]  # Strip POL from local
-
         # Strip registers, return grid tokens only
-        return StepOutput(glimpse, local, scene_t[:, n_reg:], pol_out)
+        return StepOutput(glimpse, local, scene_t[:, n_reg:])
 
     def forward_step(
         self, images: Tensor, viewpoint: Viewpoint, scene: Tensor | None = None
@@ -245,10 +189,7 @@ class AVPViT(nn.Module):
         viewpoints: list[Viewpoint],
         loss_fn: Callable[[Tensor], Tensor],
     ) -> Tensor:
-        """Stream through fixed viewpoints, compute loss at each step, return average.
-
-        For policy-based viewpoints, use forward_step directly in a loop.
-        """
+        """Stream through viewpoints, compute loss at each step, return average."""
         scene: Tensor | None = None
         loss_sum = torch.tensor(0.0, device=images.device)
         for vp in viewpoints:
@@ -256,18 +197,3 @@ class AVPViT(nn.Module):
             scene = out.scene
             loss_sum = loss_sum + loss_fn(self.output_proj(scene))
         return loss_sum / len(viewpoints)
-
-    def policy_to_viewpoint(self, pol_out: Tensor, scale: float) -> Viewpoint:
-        """Convert raw policy output to bounded Viewpoint.
-
-        Args:
-            pol_out: [B, 2] raw output from pol_mlp
-            scale: fixed scale for policy viewpoints
-
-        Returns:
-            Viewpoint with centers clamped to valid bounds
-        """
-        max_offset = 1.0 - scale
-        centers = torch.tanh(pol_out) * max_offset  # [B, 2] in [-max_offset, max_offset]
-        scales = torch.full((pol_out.shape[0],), scale, device=pol_out.device)
-        return Viewpoint(name="policy", centers=centers, scales=scales)
