@@ -177,28 +177,39 @@ class AVPViT(nn.Module):
     def _process_glimpse(
         self,
         glimpse: Tensor,
-        local: Tensor,
+        local_fresh: Tensor,
         centers: Tensor,
         scales: Tensor,
         hidden: Tensor | None,
+        local_prev: Tensor | None,
     ) -> StepOutput:
         """Process one glimpse: read from hidden, forward through backbone, write to hidden.
 
         Args:
             glimpse: Extracted glimpse image [B, C, H, W]
-            local: Tokenized glimpse features [B, N, D]
+            local_fresh: Tokenized glimpse features [B, N, D]
             centers: Viewpoint centers [B, 2]
             scales: Viewpoint scales [B]
             hidden: Previous hidden state [B, G*G, D] or None for fresh start
+            local_prev: Previous local state [B, N, D] or None (when use_local_temporal)
 
         Returns:
             StepOutput with both hidden (for continuation) and scene (for loss/viz)
         """
-        B = local.shape[0]
+        B = local_fresh.shape[0]
         H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
         periods = self.backbone.rope_periods
         n_reg = self.n_scene_registers
+
+        # Temporal gating on local stream: local = fresh + gate * LN(prev)
+        if self.cfg.use_local_temporal:
+            assert local_prev is not None, "local_prev required when use_local_temporal=True"
+            assert self.local_temporal_gate is not None
+            assert self.local_temporal_norm is not None
+            local = local_fresh + self.local_temporal_gate * self.local_temporal_norm(local_prev)
+        else:
+            local = local_fresh
 
         hidden_t = self._init_hidden(B, hidden)
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
@@ -242,6 +253,8 @@ class AVPViT(nn.Module):
         # Assert square grid matches config (catch H/W mismatches early)
         G = self.cfg.glimpse_grid_size
         assert H == W == G, f"backbone returned {H}x{W} but config expects {G}x{G}"
+        # local_prev=None for now; will be passed properly in forward_step signature update
+        local_prev = None
         if self.cfg.gradient_checkpointing and self.training:
             return cast(StepOutput, checkpoint(
                 self._process_glimpse,
@@ -250,9 +263,10 @@ class AVPViT(nn.Module):
                 viewpoint.centers,
                 viewpoint.scales,
                 hidden,
+                local_prev,
                 use_reentrant=False,
             ))
-        return self._process_glimpse(glimpse, tokens, viewpoint.centers, viewpoint.scales, hidden)
+        return self._process_glimpse(glimpse, tokens, viewpoint.centers, viewpoint.scales, hidden, local_prev)
 
     # ==================== General Primitive ====================
 

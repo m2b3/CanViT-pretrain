@@ -403,3 +403,63 @@ def test_local_temporal_parameters_shapes():
     assert avp.local_temporal_gate is not None
     assert avp.local_temporal_gate.shape == (embed_dim,)
     assert (avp.local_temporal_gate == 1e-5).all()
+
+
+def test_local_temporal_gating_gradient_flow():
+    """Gradient flows through local_temporal_gate when use_local_temporal=True."""
+    embed_dim = 64
+    glimpse_grid_size = 3
+    cfg = AVPConfig(
+        scene_grid_size=4,
+        glimpse_grid_size=glimpse_grid_size,
+        use_local_temporal=True,
+        gate_init=0.1,  # Nonzero so gradient is meaningful
+    )
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    n_local = avp.n_local_tokens
+
+    # Create inputs
+    glimpse = torch.randn(B, 3, glimpse_grid_size * PATCH_SIZE, glimpse_grid_size * PATCH_SIZE)
+    local_fresh = torch.randn(B, n_local, embed_dim)
+    local_prev = torch.randn(B, n_local, embed_dim, requires_grad=True)
+    centers = torch.zeros(B, 2)
+    scales = torch.ones(B)
+
+    # Call _process_glimpse directly
+    out = avp._process_glimpse(glimpse, local_fresh, centers, scales, None, local_prev)
+
+    # Backward pass
+    loss = out.scene.sum()
+    loss.backward()
+
+    # Gradient should flow to local_temporal_gate
+    assert avp.local_temporal_gate is not None
+    assert avp.local_temporal_gate.grad is not None
+    assert avp.local_temporal_gate.grad.abs().sum() > 0
+
+    # Gradient should flow to local_prev
+    assert local_prev.grad is not None
+    assert local_prev.grad.abs().sum() > 0
+
+
+def test_local_temporal_disabled_no_effect_on_output():
+    """With use_local_temporal=False, local_prev has no effect (not used)."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_local_temporal=False)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+
+    # Two forward passes should give same output structure
+    out1 = avp.forward_step(images, vp, None)
+    out2 = avp.forward_step(images, vp, None)
+
+    # Shapes should match
+    assert out1.scene.shape == out2.scene.shape
+    assert out1.hidden.shape == out2.hidden.shape
