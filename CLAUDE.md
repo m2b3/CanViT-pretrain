@@ -1,3 +1,5 @@
+- Do what I ask. No more, no less.
+- Keep complexity low.
 - Verify, don't assume.
 - Measure twice, cut once.
 - You can use `uv run pypatree` to get an overview of the codebase.
@@ -5,3 +7,7 @@
 - DO use `avp_vit/mymodule/{__init__.py,test.py,my_nested_module/{__init__.py,test.py}}` structure
   - Directories over flat files for modules; nest freely.
 - assert > comment
+  - assert isinstance
+  - ybml.correctness.assert_shape
+  - assert xxx is not None
+- `uv run ipython -c` is your friend
