@@ -1,4 +1,4 @@
-"""Training state management with Bernoulli survival."""
+"""Training state management with fresh ratio survival."""
 
 from dataclasses import dataclass
 
@@ -8,15 +8,11 @@ from torch import Tensor
 
 @dataclass
 class TrainState:
-    """Persistent state for Bernoulli survival training.
+    """Persistent state for fresh-ratio survival training.
 
-    Bernoulli survival enables learning to generalize across arbitrary inference
-    lengths despite BPTT being restricted to short horizons. Each batch item has
-    probability `survival_prob` of being "carried over" between optimizer steps:
-    - Surviving items: same image/target, hidden state continues from previous step
-    - Non-surviving items: fresh image/target, hidden resets to learned spatial_init
-
-    This creates a geometric distribution of effective sequence lengths.
+    Each step, a fixed ratio of the batch is replaced with fresh samples.
+    Random permutation ensures stochastic lifetimes (geometric distribution)
+    while allowing us to load/compute teacher features for only fresh_count images.
 
     IMPORTANT - Naming convention (consistent with AVPViT):
     - hidden: Internal state for CONTINUATION between timesteps
@@ -26,13 +22,18 @@ class TrainState:
 
     images: Tensor  # [B, C, H, W]
     targets: Tensor  # [B, G*G, D]
-    hidden: Tensor | None  # [B, G*G, D] or None (first step) - for CONTINUATION
-    local_prev: Tensor | None  # [B, N, D] or None - for CONTINUATION when use_local_temporal
+    hidden: Tensor | None  # [B, n_tokens, D] or None (first step)
+    local_prev: Tensor | None  # [B, N, D] or None
 
     @staticmethod
-    def init(images: Tensor, targets: Tensor) -> "TrainState":
-        """Initialize state with fresh batch, no hidden history."""
-        return TrainState(images=images, targets=targets, hidden=None, local_prev=None)
+    def init(
+        images: Tensor,
+        targets: Tensor,
+        hidden_init: Tensor,
+        local_init: Tensor | None,
+    ) -> "TrainState":
+        """Initialize state with first full batch."""
+        return TrainState(images=images, targets=targets, hidden=hidden_init, local_prev=local_init)
 
     def step(
         self,
@@ -40,43 +41,41 @@ class TrainState:
         fresh_targets: Tensor,
         next_hidden: Tensor,
         next_local_prev: Tensor | None,
-        survival_prob: float,
         hidden_init: Tensor,
         local_init: Tensor | None,
     ) -> "TrainState":
-        """Update state with Bernoulli survival.
+        """Update state: permute, replace first K with fresh.
 
         Args:
-            fresh_images: New images from dataloader [B, C, H, W]
-            fresh_targets: Teacher patches for fresh images [B, G*G, D]
-            next_hidden: Hidden state from forward step [B, n_tokens, D] (for CONTINUATION)
-            next_local_prev: Local state from forward step [B, N, D] (when use_local_temporal)
-            survival_prob: Probability of keeping current item
-            hidden_init: Initialized hidden state [B, n_tokens, D] (from model._init_hidden)
-            local_init: Initialized local state [B, N, D] or None (when use_local_temporal)
+            fresh_images: New images [K, C, H, W] where K = fresh_count
+            fresh_targets: Teacher patches for fresh images [K, G*G, D]
+            next_hidden: Hidden state from forward step [B, n_tokens, D]
+            next_local_prev: Local state from forward step [B, N, D] or None
+            hidden_init: Initialized hidden for fresh samples [K, n_tokens, D]
+            local_init: Initialized local for fresh samples [K, N, D] or None
 
         Returns:
             Updated TrainState for next iteration.
         """
         B = self.images.shape[0]
+        K = fresh_images.shape[0]
         device = self.images.device
 
-        survive = torch.rand(B, device=device) < survival_prob
-        s_img = survive.view(B, 1, 1, 1)
-        s_feat = survive.view(B, 1, 1)
+        # Random permutation: which indices "die" is stochastic
+        perm = torch.randperm(B, device=device)
 
-        images = torch.where(s_img, self.images, fresh_images)
-        targets = torch.where(s_feat, self.targets, fresh_targets)
+        # Permute current state
+        images = self.images[perm]
+        targets = self.targets[perm]
+        hidden = next_hidden[perm].detach()
+        local_prev = next_local_prev[perm].detach() if next_local_prev is not None else None
 
-        # Survivors: detach to cut BPTT across optimizer steps
-        # Non-survivors: reset to hidden_init (gradients flow through hidden_init)
-        hidden = torch.where(s_feat, next_hidden.detach(), hidden_init)
-
-        # Same pattern for local_prev when use_local_temporal enabled
-        if next_local_prev is not None:
+        # Replace first K with fresh
+        images[:K] = fresh_images
+        targets[:K] = fresh_targets
+        hidden[:K] = hidden_init
+        if local_prev is not None:
             assert local_init is not None
-            local_prev = torch.where(s_feat, next_local_prev.detach(), local_init)
-        else:
-            local_prev = None
+            local_prev[:K] = local_init
 
         return TrainState(images=images, targets=targets, hidden=hidden, local_prev=local_prev)

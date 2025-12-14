@@ -58,7 +58,7 @@ class Config:
     ))
     freeze_inner_backbone: bool = False
     # Training
-    survival_prob: float = 0.5
+    fresh_ratio: float = 0.5  # Fraction of batch replaced each step
     n_viewpoints_per_step: int = 2  # Inner loop: viewpoints per optimizer step (>=2 for length generalization)
     n_steps: int = 200000
     batch_size: int = 64
@@ -247,11 +247,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     if cfg.compile:
         compile_avp(avp)
 
+    # Fresh ratio: only load/compute teacher for this many images per step
+    fresh_count = max(1, int(cfg.fresh_ratio * cfg.batch_size))
+    log.info(f"Fresh ratio: {cfg.fresh_ratio} -> {fresh_count}/{cfg.batch_size} fresh per step")
+
     log.info("Setting up data loaders...")
     train_loader = InfiniteLoader(make_loader(
         cfg.train_dir,
         train_transform(avp.scene_size, (cfg.crop_scale_min, 1.0)),
-        cfg.batch_size, cfg.num_workers, shuffle=True,
+        fresh_count, cfg.num_workers, shuffle=True,
     ))
     val_loader = InfiniteLoader(make_loader(
         cfg.val_dir,
@@ -272,12 +276,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
     log.info(f"Schedule: {warmup_steps:,} warmup steps, {cfg.n_steps:,} total steps")
 
-    # Bernoulli survival: geometric distribution of lifetimes
-    # E[optimizer steps per image] = 1 / (1 - survival_prob)
-    # E[glimpses per image] = n_viewpoints_per_step / (1 - survival_prob)
-    expected_steps = 1 / (1 - cfg.survival_prob)
+    # Fresh ratio survival: geometric distribution of lifetimes via random permutation
+    # E[optimizer steps per image] = B / fresh_count = 1 / fresh_ratio
+    # E[glimpses per image] = n_viewpoints_per_step / fresh_ratio
+    expected_steps = cfg.batch_size / fresh_count
     expected_glimpses = cfg.n_viewpoints_per_step * expected_steps
-    log.info(f"Bernoulli survival: prob={cfg.survival_prob}, expected {expected_steps:.1f} optimizer steps, {expected_glimpses:.1f} glimpses per image")
+    log.info(f"Fresh ratio survival: {fresh_count}/{cfg.batch_size} fresh/step, expected {expected_steps:.1f} steps, {expected_glimpses:.1f} glimpses per image")
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
     best_val_loss = float("inf")
@@ -292,11 +296,14 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     best_val_loss = val_loss
     ckpt_val_loss = val_loss
 
-    # Initialize training state
-    fresh_imgs = train_loader.next_batch().to(cfg.device)
+    # Initialize training state: accumulate batches from train_loader to fill batch_size
+    n_init_batches = (cfg.batch_size + fresh_count - 1) // fresh_count
+    init_imgs = torch.cat([train_loader.next_batch() for _ in range(n_init_batches)], dim=0)[:cfg.batch_size].to(cfg.device)
     with torch.no_grad():
-        fresh_targets = teacher.forward_norm_patches(fresh_imgs)
-    state = TrainState.init(fresh_imgs, fresh_targets)
+        init_targets = teacher.forward_norm_patches(init_imgs)
+    hidden_init_full = avp._init_hidden(cfg.batch_size, None)
+    local_init_full = avp.local_init.expand(cfg.batch_size, -1, -1) if avp.local_init is not None else None
+    state = TrainState.init(init_imgs, init_targets, hidden_init_full, local_init_full)
 
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
     alpha = 2 / (cfg.log_every + 1)
@@ -305,11 +312,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
 
     for step in pbar:
+        # Load only fresh_count images (the speedup!)
         fresh_imgs = train_loader.next_batch().to(cfg.device)
         with torch.no_grad():
             fresh_targets = teacher.forward_norm_patches(fresh_imgs)
 
-        # Inner loop: multiple viewpoints per optimizer step (for length generalization)
+        # Inner loop: multiple viewpoints per optimizer step
         viewpoints = [
             random_viewpoint(cfg.batch_size, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
             for _ in range(cfg.n_viewpoints_per_step)
@@ -355,14 +363,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 exp.end()
                 raise optuna.TrialPruned()
 
-        # Bernoulli survival at optimizer step boundary (AFTER visualization)
-        # Pass fully initialized hidden (with registers) not raw tokens
-        hidden_init = avp._init_hidden(cfg.batch_size, None)
-        local_init = avp.local_init.expand(cfg.batch_size, -1, -1) if avp.local_init is not None else None
-        state = state.step(
-            fresh_imgs, fresh_targets, final_hidden, final_local,
-            cfg.survival_prob, hidden_init, local_init,
-        )
+        # Fresh ratio survival: permute batch, replace first K with fresh
+        hidden_init = avp._init_hidden(fresh_count, None)
+        local_init = avp.local_init.expand(fresh_count, -1, -1) if avp.local_init is not None else None
+        state = state.step(fresh_imgs, fresh_targets, final_hidden, final_local, hidden_init, local_init)
 
     val_images = val_loader.next_batch().to(cfg.device)
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_images)
