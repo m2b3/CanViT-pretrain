@@ -271,6 +271,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
     log.info(f"Schedule: {warmup_steps:,} warmup steps, {cfg.n_steps:,} total steps")
 
+    # Bernoulli survival: geometric distribution of lifetimes
+    # E[optimizer steps per image] = 1 / (1 - survival_prob)
+    # E[glimpses per image] = n_viewpoints_per_step / (1 - survival_prob)
+    expected_steps = 1 / (1 - cfg.survival_prob)
+    expected_glimpses = cfg.n_viewpoints_per_step * expected_steps
+    log.info(f"Bernoulli survival: prob={cfg.survival_prob}, expected {expected_steps:.1f} optimizer steps, {expected_glimpses:.1f} glimpses per image")
+
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
     best_val_loss = float("inf")
     ckpt_val_loss = float("inf")  # val_loss at last checkpoint, save only when improved
