@@ -4,12 +4,11 @@ Uses introspection on actual model instances - no hardcoded formulas that can dr
 """
 
 from pathlib import Path
-from typing import NamedTuple, cast
+from typing import NamedTuple
 
 from torch import nn
 
 from avp_vit import AVPConfig, AVPViT
-from avp_vit.attention import RoPECrossAttention
 from avp_vit.backbone.dinov3 import DINOv3Backbone
 
 CKPT_PATH = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
@@ -51,12 +50,12 @@ def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone) -> AVPStepFLOPs:
     glimpse_embed = backbone.patch_embed_flops(glimpse_patches)
 
     read_attn = sum(
-        cast(RoPECrossAttention, model.read_attn[i]).flops(n_local, scene_patches)
+        model.read_attn[i].flops(n_local, scene_patches)  # type: ignore[union-attr]
         for i in range(backbone.n_blocks)
     )
     blocks = backbone.n_blocks * backbone.block_flops(n_local)
     write_attn = sum(
-        cast(RoPECrossAttention, model.write_attn[i]).flops(scene_patches, n_local)
+        model.write_attn[i].flops(scene_patches, n_local)  # type: ignore[union-attr]
         for i in range(backbone.n_blocks)
     )
 

@@ -52,3 +52,7 @@ class ConvexGatedAttention(nn.Module):
         gate_raw = self.gate_attn(x, kv, x_rope, kv_rope)
         gate = torch.sigmoid(self.gate_scale * gate_raw + self.gate_bias)
         return (1 - gate) * x + gate * proposal
+
+    def flops(self, n_q: int, n_kv: int) -> int:
+        """FLOPs for forward pass: proposal + gate attention."""
+        return self.proposal_attn.flops(n_q, n_kv) + self.gate_attn.flops(n_q, n_kv)

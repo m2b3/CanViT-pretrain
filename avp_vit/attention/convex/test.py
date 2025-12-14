@@ -118,3 +118,18 @@ def test_works_with_write_attention():
 
     out = cvx(x, kv, x_rope, kv_rope)
     assert out.shape == (B, N_x, D)
+
+
+def test_flops_is_sum_of_inner():
+    """ConvexGatedAttention.flops() = proposal.flops() + gate.flops()."""
+    D, heads = 64, 4
+    cfg = AttentionConfig()
+
+    proposal = RoPEReadCrossAttention(D, heads, cfg)
+    gate_attn = RoPEReadCrossAttention(D, heads, cfg)
+    cvx = ConvexGatedAttention(proposal, gate_attn, gate_init=0.5)
+
+    n_q, n_kv = 50, 256
+    expected = proposal.flops(n_q, n_kv) + gate_attn.flops(n_q, n_kv)
+    assert cvx.flops(n_q, n_kv) == expected
+    assert cvx.flops(n_q, n_kv) == 2 * proposal.flops(n_q, n_kv)  # Same arch → 2x
