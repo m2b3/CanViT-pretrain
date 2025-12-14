@@ -48,18 +48,22 @@ class Config:
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     ckpt_dir: Path = Path("checkpoints")
     # Model
-    avp: AVPConfig = field(default_factory=lambda: AVPConfig(
-        scene_grid_size=32,
-        glimpse_grid_size=7,
-        gate_init=1e-5,
-        use_output_proj=True,
-        use_scene_registers=True,
-        gradient_checkpointing=True,
-    ))
+    avp: AVPConfig = field(
+        default_factory=lambda: AVPConfig(
+            scene_grid_size=32,
+            glimpse_grid_size=7,
+            gate_init=1e-5,
+            use_output_proj=True,
+            use_scene_registers=True,
+            gradient_checkpointing=True,
+        )
+    )
     freeze_inner_backbone: bool = False
     # Training
-    fresh_ratio: float = 0.5  # Fraction of batch replaced each step
-    n_viewpoints_per_step: int = 2  # Inner loop: viewpoints per optimizer step (>=2 for length generalization)
+    fresh_ratio: float = 0.25  # Fraction of batch replaced each step
+    n_viewpoints_per_step: int = (
+        2  # Inner loop: viewpoints per optimizer step (>=2 for length generalization)
+    )
     n_steps: int = 200000
     batch_size: int = 64
     num_workers: int = 8
@@ -106,7 +110,9 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
 def compile_avp(avp: AVPViT) -> None:
     """Wrap DINOv3 blocks and cross-attention modules with torch.compile."""
     n_blocks = avp.backbone.n_blocks
-    log.info(f"Wrapping {n_blocks} DINOv3 blocks + {n_blocks} read/write attention pairs for compilation")
+    log.info(
+        f"Wrapping {n_blocks} DINOv3 blocks + {n_blocks} read/write attention pairs for compilation"
+    )
 
     assert isinstance(avp.backbone, DINOv3Backbone)
     blocks = avp.backbone._backbone.blocks
@@ -167,12 +173,18 @@ def viz_and_log(
         scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
         locals_avp = [
             avp_backbone.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
-            .squeeze(0).cpu().float().numpy()
+            .squeeze(0)
+            .cpu()
+            .float()
+            .numpy()
             for out in outputs
         ]
         locals_teacher = [
             teacher.forward_norm_patches(out.glimpse[sample_idx : sample_idx + 1])
-            .squeeze(0).cpu().float().numpy()
+            .squeeze(0)
+            .cpu()
+            .float()
+            .numpy()
             for out in outputs
         ]
         glimpses = [
@@ -183,8 +195,17 @@ def viz_and_log(
         names = [vp.name for vp in viewpoints]
 
     fig_pca = plot_multistep_pca(
-        full_img, teacher_np, scenes, locals_avp, locals_teacher, glimpses,
-        boxes, names, avp.cfg.scene_grid_size, avp.cfg.glimpse_grid_size, initial_np,
+        full_img,
+        teacher_np,
+        scenes,
+        locals_avp,
+        locals_teacher,
+        glimpses,
+        boxes,
+        names,
+        avp.cfg.scene_grid_size,
+        avp.cfg.glimpse_grid_size,
+        initial_np,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
@@ -218,7 +239,9 @@ def eval_and_log(
     return val_loss
 
 
-def save_checkpoint(avp: AVPViT, path: Path, exp: comet_ml.Experiment, step: int, val_loss: float) -> None:
+def save_checkpoint(
+    avp: AVPViT, path: Path, exp: comet_ml.Experiment, step: int, val_loss: float
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(avp.state_dict(), path)
     size_mb = path.stat().st_size / (1024 * 1024)
@@ -231,11 +254,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Starting trial {trial.number}")
     log.info(f"Device: {cfg.device}")
 
-    exp = comet_ml.Experiment(project_name="avp-vit-scene-match", auto_metric_logging=False)
-    exp.log_parameters({
-        k: str(v) if isinstance(v, (torch.device, Path)) else v
-        for k, v in cfg.__dict__.items()
-    })
+    exp = comet_ml.Experiment(
+        project_name="avp-vit-scene-match", auto_metric_logging=False
+    )
+    exp.log_parameters(
+        {
+            k: str(v) if isinstance(v, (torch.device, Path)) else v
+            for k, v in cfg.__dict__.items()
+        }
+    )
     exp.log_parameters({"trial_number": trial.number})
 
     log.info("Loading teacher...")
@@ -249,31 +276,45 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Fresh ratio: only load/compute teacher for this many images per step
     fresh_count = max(1, int(cfg.fresh_ratio * cfg.batch_size))
-    log.info(f"Fresh ratio: {cfg.fresh_ratio} -> {fresh_count}/{cfg.batch_size} fresh per step")
+    log.info(
+        f"Fresh ratio: {cfg.fresh_ratio} -> {fresh_count}/{cfg.batch_size} fresh per step"
+    )
 
     log.info("Setting up data loaders...")
-    train_loader = InfiniteLoader(make_loader(
-        cfg.train_dir,
-        train_transform(avp.scene_size, (cfg.crop_scale_min, 1.0)),
-        fresh_count, cfg.num_workers, shuffle=True,
-    ))
-    val_loader = InfiniteLoader(make_loader(
-        cfg.val_dir,
-        val_transform(avp.scene_size),
-        cfg.batch_size, cfg.num_workers, shuffle=True,
-    ))
+    train_loader = InfiniteLoader(
+        make_loader(
+            cfg.train_dir,
+            train_transform(avp.scene_size, (cfg.crop_scale_min, 1.0)),
+            fresh_count,
+            cfg.num_workers,
+            shuffle=True,
+        )
+    )
+    val_loader = InfiniteLoader(
+        make_loader(
+            cfg.val_dir,
+            val_transform(avp.scene_size),
+            cfg.batch_size,
+            cfg.num_workers,
+            shuffle=True,
+        )
+    )
 
     trainable = [p for p in avp.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
     n_total = count_parameters(avp)
-    log.info(f"AVP total: {n_total:,}, trainable: {n_trainable:,} ({100*n_trainable/n_total:.1f}%)")
+    log.info(
+        f"AVP total: {n_total:,}, trainable: {n_trainable:,} ({100 * n_trainable / n_total:.1f}%)"
+    )
     exp.log_parameters({"trainable_params": n_trainable, "total_params": n_total})
 
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
     optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
     warmup_steps = int(cfg.n_steps * cfg.warmup_ratio)
     scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, warmup_steps)
-    log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
+    log.info(
+        f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}"
+    )
     log.info(f"Schedule: {warmup_steps:,} warmup steps, {cfg.n_steps:,} total steps")
 
     # Fresh ratio survival: geometric distribution of lifetimes via random permutation
@@ -281,7 +322,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     # E[glimpses per image] = n_viewpoints_per_step / fresh_ratio
     expected_steps = cfg.batch_size / fresh_count
     expected_glimpses = cfg.n_viewpoints_per_step * expected_steps
-    log.info(f"Fresh ratio survival: {fresh_count}/{cfg.batch_size} fresh/step, expected {expected_steps:.1f} steps, {expected_glimpses:.1f} glimpses per image")
+    log.info(
+        f"Fresh ratio survival: {fresh_count}/{cfg.batch_size} fresh/step, expected {expected_steps:.1f} steps, {expected_glimpses:.1f} glimpses per image"
+    )
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
     best_val_loss = float("inf")
@@ -298,11 +341,17 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Initialize training state: accumulate batches from train_loader to fill batch_size
     n_init_batches = (cfg.batch_size + fresh_count - 1) // fresh_count
-    init_imgs = torch.cat([train_loader.next_batch() for _ in range(n_init_batches)], dim=0)[:cfg.batch_size].to(cfg.device)
+    init_imgs = torch.cat(
+        [train_loader.next_batch() for _ in range(n_init_batches)], dim=0
+    )[: cfg.batch_size].to(cfg.device)
     with torch.no_grad():
         init_targets = teacher.forward_norm_patches(init_imgs)
     hidden_init_full = avp._init_hidden(cfg.batch_size, None)
-    local_init_full = avp.local_init.expand(cfg.batch_size, -1, -1) if avp.local_init is not None else None
+    local_init_full = (
+        avp.local_init.expand(cfg.batch_size, -1, -1)
+        if avp.local_init is not None
+        else None
+    )
     state = TrainState.init(init_imgs, init_targets, hidden_init_full, local_init_full)
 
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
@@ -319,7 +368,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # Inner loop: multiple viewpoints per optimizer step
         viewpoints = [
-            random_viewpoint(cfg.batch_size, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
+            random_viewpoint(
+                cfg.batch_size,
+                cfg.device,
+                cfg.min_viewpoint_scale,
+                cfg.max_viewpoint_scale,
+            )
             for _ in range(cfg.n_viewpoints_per_step)
         ]
         loss, final_hidden, final_local = avp.forward_loss(
@@ -337,18 +391,37 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         optimizer.step()
         scheduler.step()
 
-        ema_loss_t = alpha * loss.detach() + (1 - alpha) * ema_loss_t if step > 0 else loss.detach()
+        ema_loss_t = (
+            alpha * loss.detach() + (1 - alpha) * ema_loss_t
+            if step > 0
+            else loss.detach()
+        )
 
         if step % cfg.log_every == 0:
             ema_loss = ema_loss_t.item()
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
-            exp.log_metrics({"train/loss": ema_loss, "train/grad_norm": grad_norm, "train/lr": lr}, step=step)
-            pbar.set_postfix_str(f"loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
+            exp.log_metrics(
+                {"train/loss": ema_loss, "train/grad_norm": grad_norm, "train/lr": lr},
+                step=step,
+            )
+            pbar.set_postfix_str(
+                f"loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}"
+            )
 
         if step > 0 and step % cfg.val_every == 0:
             # Training viz: actual state, viewpoints, targets (BEFORE state update)
-            viz_and_log(exp, step, "train", avp, teacher, state.images, viewpoints, state.targets, state.hidden)
+            viz_and_log(
+                exp,
+                step,
+                "train",
+                avp,
+                teacher,
+                state.images,
+                viewpoints,
+                state.targets,
+                state.hidden,
+            )
 
             # Validation viz: fresh batch, fixed viewpoints
             val_images = val_loader.next_batch().to(cfg.device)
@@ -365,8 +438,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # Fresh ratio survival: permute batch, replace first K with fresh
         hidden_init = avp._init_hidden(fresh_count, None)
-        local_init = avp.local_init.expand(fresh_count, -1, -1) if avp.local_init is not None else None
-        state = state.step(fresh_imgs, fresh_targets, final_hidden, final_local, hidden_init, local_init)
+        local_init = (
+            avp.local_init.expand(fresh_count, -1, -1)
+            if avp.local_init is not None
+            else None
+        )
+        state = state.step(
+            fresh_imgs,
+            fresh_targets,
+            final_hidden,
+            final_local,
+            hidden_init,
+            local_init,
+        )
 
     val_images = val_loader.next_batch().to(cfg.device)
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_images)
@@ -374,7 +458,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         best_val_loss = val_loss
     if best_val_loss < ckpt_val_loss:
         save_checkpoint(avp, ckpt_path, exp, cfg.n_steps, best_val_loss)
-    log.info(f"Final: train_ema={ema_loss_t.item():.4f}, val={val_loss:.4f}, best={best_val_loss:.4f}")
+    log.info(
+        f"Final: train_ema={ema_loss_t.item():.4f}, val={val_loss:.4f}, best={best_val_loss:.4f}"
+    )
     exp.end()
     return best_val_loss
 
