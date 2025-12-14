@@ -147,7 +147,7 @@ def viz_and_log(
     B = images.shape[0]
 
     with torch.inference_mode():
-        outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
+        outputs, _, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
         mses = [nn.functional.mse_loss(out.scene, target).item() for out in outputs]
 
         # Initial scene from hidden or hidden_tokens
@@ -313,7 +313,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             random_viewpoint(cfg.batch_size, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
             for _ in range(cfg.n_viewpoints_per_step)
         ]
-        loss, final_hidden = avp.forward_loss(state.images, viewpoints, state.targets, state.hidden)
+        loss, final_hidden, final_local = avp.forward_loss(
+            state.images, viewpoints, state.targets, state.hidden, state.local_prev
+        )
 
         if not torch.isfinite(loss):
             log.warning(f"NaN/Inf loss at step {step}, pruning trial")
@@ -353,7 +355,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 raise optuna.TrialPruned()
 
         # Bernoulli survival at optimizer step boundary (AFTER visualization)
-        state = state.step(fresh_imgs, fresh_targets, final_hidden, cfg.survival_prob, avp.hidden_tokens)
+        state = state.step(
+            fresh_imgs, fresh_targets, final_hidden, final_local,
+            cfg.survival_prob, avp.hidden_tokens, avp.local_tokens,
+        )
 
     val_images = val_loader.next_batch().to(cfg.device)
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_images)
