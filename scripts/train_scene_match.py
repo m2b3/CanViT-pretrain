@@ -49,7 +49,7 @@ class Config:
     ckpt_dir: Path = Path("checkpoints")
     # Model
     avp: AVPConfig = field(default_factory=lambda: AVPConfig(
-        scene_grid_size=16,
+        scene_grid_size=32,
         glimpse_grid_size=7,
         gate_init=1e-5,
         use_output_proj=True,
@@ -60,17 +60,18 @@ class Config:
     # Training
     survival_prob: float = 0.5
     n_viewpoints_per_step: int = 2  # Inner loop: viewpoints per optimizer step (>=2 for length generalization)
-    n_steps: int = 20000
+    n_steps: int = 200000
     batch_size: int = 64
     num_workers: int = 8
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
-    warmup_ratio: float = 0.5
+    warmup_ratio: float = 0.01
     grad_clip: float = 1.0
     crop_scale_min: float = 0.4
     # Logging
     log_every: int = 20
-    val_every: int = 200
+    val_every: int = 50
+    ckpt_every: int = 500
     # Optuna
     n_trials: int = 100
     # Runtime
@@ -235,12 +236,14 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
     best_val_loss = float("inf")
+    ckpt_val_loss = float("inf")  # val_loss at last checkpoint, save only when improved
 
     # Initial eval
     val_images = val_loader.next_batch().to(cfg.device)
     val_loss = eval_and_log(exp, 0, avp, teacher, val_images)
     save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
     best_val_loss = val_loss
+    ckpt_val_loss = val_loss
 
     # Initialize training state
     fresh_imgs = train_loader.next_batch().to(cfg.device)
@@ -292,7 +295,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             val_loss = eval_and_log(exp, step, avp, teacher, val_images)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_checkpoint(avp, ckpt_path, exp, step, val_loss)
+            if step % cfg.ckpt_every == 0 and best_val_loss < ckpt_val_loss:
+                save_checkpoint(avp, ckpt_path, exp, step, best_val_loss)
+                ckpt_val_loss = best_val_loss
             trial.report(val_loss, step)
             if trial.should_prune():
                 exp.end()
@@ -302,7 +307,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_images)
     if val_loss < best_val_loss:
         best_val_loss = val_loss
-        save_checkpoint(avp, ckpt_path, exp, cfg.n_steps, val_loss)
+    if best_val_loss < ckpt_val_loss:
+        save_checkpoint(avp, ckpt_path, exp, cfg.n_steps, best_val_loss)
     log.info(f"Final: train_ema={ema_loss_t.item():.4f}, val={val_loss:.4f}, best={best_val_loss:.4f}")
     exp.end()
     return best_val_loss
