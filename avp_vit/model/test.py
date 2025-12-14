@@ -225,7 +225,8 @@ def test_scene_registers_disabled_by_default():
     avp = AVPViT(backbone, cfg)
 
     assert avp.n_scene_registers == 0
-    assert avp.scene_registers is None
+    assert avp.persistent_registers is None
+    assert avp.ephemeral_registers is None
 
 
 def test_scene_registers_scales_with_token_ratio():
@@ -235,12 +236,34 @@ def test_scene_registers_scales_with_token_ratio():
     avp = AVPViT(backbone, cfg)
 
     assert avp.n_scene_registers == 16  # 4 * (14/7)² = 4 * 4 = 16
-    assert avp.scene_registers is not None
-    assert avp.scene_registers.shape == (1, 16, 64)
+    assert avp.n_persistent_registers == 8
+    assert avp.n_ephemeral_registers == 8
+    assert avp.persistent_registers is not None
+    assert avp.ephemeral_registers is not None
+    assert avp.persistent_registers.shape == (1, 8, 64)
+    assert avp.ephemeral_registers.shape == (1, 8, 64)
 
 
-def test_scene_registers_output_shape_unchanged():
-    """Output should only contain grid tokens, not registers."""
+def test_scene_registers_split():
+    """Scene registers split into persistent (passthrough) and ephemeral (reinit)."""
+    embed_dim, num_heads, n_blocks = 64, 4, 2
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_scene_registers=True)
+    backbone = MockBackbone(embed_dim, num_heads, n_blocks, 4, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    # Total = 7, persistent = 3, ephemeral = 4
+    assert avp.n_scene_registers == 7
+    assert avp.n_persistent_registers == 3
+    assert avp.n_ephemeral_registers == 4
+
+    assert avp.persistent_registers is not None
+    assert avp.ephemeral_registers is not None
+    assert avp.persistent_registers.shape == (1, 3, embed_dim)
+    assert avp.ephemeral_registers.shape == (1, 4, embed_dim)
+
+
+def test_scene_output_always_spatial_only():
+    """Scene output should only contain grid tokens, not registers."""
     embed_dim, num_heads, n_blocks = 64, 4, 2
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_scene_registers=True)
     backbone = MockBackbone(embed_dim, num_heads, n_blocks, 4, PATCH_SIZE)
@@ -252,9 +275,38 @@ def test_scene_registers_output_shape_unchanged():
 
     scene, hidden, local = avp(images, viewpoints)
 
-    assert scene.shape == (B, 16, embed_dim)  # 4x4 grid, no registers
-    assert hidden.shape == (B, 16, embed_dim)
+    # Scene is always spatial-only (no registers)
+    assert scene.shape == (B, 16, embed_dim)  # 4x4 grid
     assert local is None  # use_local_temporal=False
+
+    # Hidden contains persistent registers + spatial (NOT glimpse registers)
+    n_persistent = avp.n_persistent_registers
+    assert hidden.shape == (B, n_persistent + 16, embed_dim)
+
+
+def test_scene_registers_continuity():
+    """Persistent registers flow between timesteps, glimpse registers don't."""
+    embed_dim, num_heads, n_blocks = 64, 4, 2
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, use_scene_registers=True)
+    backbone = MockBackbone(embed_dim, num_heads, n_blocks, 4, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    n_persistent = avp.n_persistent_registers
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+
+    # First step: hidden=None -> uses initial persistent registers
+    out1 = avp.forward_step(images, vp, None)
+    assert out1.hidden.shape == (B, n_persistent + 16, embed_dim)
+
+    # Second step: pass hidden from first step (includes persistent registers)
+    out2 = avp.forward_step(images, vp, out1.hidden)
+    assert out2.hidden.shape == (B, n_persistent + 16, embed_dim)
+
+    # Scene is always spatial-only
+    assert out1.scene.shape == (B, 16, embed_dim)
+    assert out2.scene.shape == (B, 16, embed_dim)
 
 
 def test_output_proj_is_always_module():

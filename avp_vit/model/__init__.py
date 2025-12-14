@@ -62,11 +62,16 @@ class AVPViT(nn.Module):
     """Active Visual Pondering ViT.
 
     Takes full images + viewpoints, handles glimpse extraction and tokenization internally.
+
+    Scene registers (when enabled) are split into two types:
+    - Persistent: passed through between timesteps (like spatial tokens)
+    - Glimpse: reinitialized each step from learned parameters
     """
 
     backbone: ViTBackbone
     cfg: AVPConfig
-    scene_registers: nn.Parameter | None
+    persistent_registers: nn.Parameter | None  # Passed through between steps
+    ephemeral_registers: nn.Parameter | None  # Reinitialized each step
     hidden_tokens: nn.Parameter  # Learned initial hidden state [1, G*G, D]
     scene_positions: Tensor
     read_attn: nn.ModuleList  # Raw attention (layerscale) or ConvexGatedAttention (convex)
@@ -89,10 +94,19 @@ class AVPViT(nn.Module):
 
     @property
     def n_scene_registers(self) -> int:
+        """Total scene registers (persistent + glimpse)."""
         if not self.cfg.use_scene_registers or self.backbone.n_register_tokens == 0:
             return 0
         ratio = (self.cfg.scene_grid_size / self.cfg.glimpse_grid_size) ** 2
         return round(self.backbone.n_register_tokens * ratio)
+
+    @property
+    def n_persistent_registers(self) -> int:
+        return self.n_scene_registers // 2
+
+    @property
+    def n_ephemeral_registers(self) -> int:
+        return self.n_scene_registers - self.n_persistent_registers
 
     @property
     def n_local_tokens(self) -> int:
@@ -107,13 +121,21 @@ class AVPViT(nn.Module):
         num_heads = backbone.num_heads
         n_blocks = backbone.n_blocks
 
-        # Scene registers (scaled proportionally to scene/glimpse token ratio)
-        if self.n_scene_registers > 0:
-            self.scene_registers = nn.Parameter(
-                torch.randn(1, self.n_scene_registers, embed_dim)
+        # Scene registers split into persistent (passed through) and ephemeral (reinit each step)
+        n_persistent = self.n_persistent_registers
+        n_ephemeral = self.n_ephemeral_registers
+        if n_persistent > 0:
+            self.persistent_registers = nn.Parameter(
+                torch.randn(1, n_persistent, embed_dim)
             )
         else:
-            self.scene_registers = None
+            self.persistent_registers = None
+        if n_ephemeral > 0:
+            self.ephemeral_registers = nn.Parameter(
+                torch.randn(1, n_ephemeral, embed_dim)
+            )
+        else:
+            self.ephemeral_registers = None
 
         # Learned initial hidden state: one learnable vector per spatial position.
         # Shape [1, G*G, D] where G = scene_grid_size (square grid).
@@ -182,11 +204,16 @@ class AVPViT(nn.Module):
             self.local_temporal_gate = None
 
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
-        """Initialize hidden state: use provided or expand learned tokens, prepend registers."""
+        """Initialize hidden state: persistent_registers + spatial.
+
+        Hidden state shape: [B, n_persistent + G*G, D]
+        - persistent_registers: passed through between timesteps
+        - spatial: the grid tokens
+        """
         if hidden is None:
             hidden = self.hidden_tokens.expand(B, -1, -1)
-        if self.scene_registers is not None:
-            hidden = torch.cat([self.scene_registers.expand(B, -1, -1), hidden], dim=1)
+            if self.persistent_registers is not None:
+                hidden = torch.cat([self.persistent_registers.expand(B, -1, -1), hidden], dim=1)
         return hidden
 
     def _process_glimpse(
@@ -205,7 +232,7 @@ class AVPViT(nn.Module):
             local_fresh: Tokenized glimpse features [B, N, D]
             centers: Viewpoint centers [B, 2]
             scales: Viewpoint scales [B]
-            hidden: Previous hidden state [B, G*G, D] or None for fresh start
+            hidden: Previous hidden state [B, n_persistent + G*G, D] or None for fresh start
             local_prev: Previous local state [B, N, D] or None (when use_local_temporal)
 
         Returns:
@@ -215,7 +242,8 @@ class AVPViT(nn.Module):
         H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
         periods = self.backbone.rope_periods
-        n_reg = self.n_scene_registers
+        n_ephemeral = self.n_ephemeral_registers
+        n_persistent = self.n_persistent_registers
 
         # Temporal gating on local stream: local = fresh + gate * LN(prev)
         if self.cfg.use_local_temporal:
@@ -226,7 +254,11 @@ class AVPViT(nn.Module):
         else:
             local = local_fresh
 
+        # hidden_t: persistent + spatial -> prepend ephemeral registers for processing
         hidden_t = self._init_hidden(B, hidden)
+        if self.ephemeral_registers is not None:
+            hidden_t = torch.cat([self.ephemeral_registers.expand(B, -1, -1), hidden_t], dim=1)
+
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
         local_rope = compute_rope(local_pos, periods)
@@ -245,9 +277,13 @@ class AVPViT(nn.Module):
                 assert self.write_scale is not None
                 hidden_t = hidden_t + self.write_scale[i](self.write_attn[i](hidden_t, local, scene_rope, local_rope))
 
-        # Strip registers, get grid tokens only
-        hidden_out = hidden_t[:, n_reg:]
-        scene_out = self.output_proj(hidden_out)
+        # Strip ephemeral registers -> persistent + spatial
+        hidden_out = hidden_t[:, n_ephemeral:]
+
+        # Scene output is spatial-only (exclude persistent registers too)
+        spatial = hidden_out[:, n_persistent:]
+        scene_out = self.output_proj(spatial)
+
         return StepOutput(glimpse, local, hidden_out, scene_out)
 
     def forward_step(
@@ -337,7 +373,7 @@ class AVPViT(nn.Module):
             acc = reducer(acc, out)
         # If no viewpoints processed, return initial states
         if hidden is None:
-            hidden = self.hidden_tokens.expand(B, -1, -1)
+            hidden = self._init_hidden(B, None)
         if self.cfg.use_local_temporal and local_prev is None:
             assert self.local_tokens is not None
             local_prev = self.local_tokens.expand(B, -1, -1)
@@ -377,12 +413,17 @@ class AVPViT(nn.Module):
             - final_local: For CONTINUATION when use_local_temporal
         """
         B = images.shape[0]
+        n_persistent = self.n_persistent_registers
 
-        # Resolve hidden once: use passed value or expand hidden_tokens
-        init_hidden = hidden if hidden is not None else self.hidden_tokens.expand(B, -1, -1)
+        # Extract spatial-only hidden for computing initial scene
+        if hidden is None:
+            spatial_init = self.hidden_tokens.expand(B, -1, -1)
+        else:
+            # hidden = persistent + spatial, extract spatial
+            spatial_init = hidden[:, n_persistent:]
 
         # Score initial scene BEFORE any glimpses
-        init_scene = self.output_proj(init_hidden)
+        init_scene = self.output_proj(spatial_init)
         init_loss = F.mse_loss(init_scene, target)
 
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
@@ -391,7 +432,7 @@ class AVPViT(nn.Module):
         total, final_hidden, final_local = self.forward_reduce(
             images, viewpoints, reducer,
             init=init_loss,
-            hidden=init_hidden,  # Pass resolved hidden, not None
+            hidden=hidden,  # Let _init_hidden handle initialization
             local_prev=local_prev,
         )
         return total / (len(viewpoints) + 1), final_hidden, final_local
