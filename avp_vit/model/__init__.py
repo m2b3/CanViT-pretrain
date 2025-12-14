@@ -60,8 +60,6 @@ class AVPViT(nn.Module):
 
     backbone: ViTBackbone
     cfg: AVPConfig
-    glimpse_size: int
-    n_scene_registers: int
     scene_registers: nn.Parameter | None
     hidden_tokens: nn.Parameter  # Learned initial hidden state [1, G*G, D]
     scene_positions: Tensor
@@ -71,25 +69,36 @@ class AVPViT(nn.Module):
     write_gate: nn.ParameterList
     output_proj: nn.Module
 
+    @property
+    def glimpse_size(self) -> int:
+        return self.cfg.glimpse_grid_size * self.backbone.patch_size
+
+    @property
+    def scene_size(self) -> int:
+        return self.cfg.scene_grid_size * self.backbone.patch_size
+
+    @property
+    def n_scene_registers(self) -> int:
+        if not self.cfg.use_scene_registers or self.backbone.n_register_tokens == 0:
+            return 0
+        ratio = (self.cfg.scene_grid_size / self.cfg.glimpse_grid_size) ** 2
+        return round(self.backbone.n_register_tokens * ratio)
+
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
         self.backbone = backbone
         self.cfg = cfg
-        self.glimpse_size = cfg.glimpse_grid_size * backbone.patch_size
 
         embed_dim = backbone.embed_dim
         num_heads = backbone.num_heads
         n_blocks = backbone.n_blocks
 
-        # Scale scene registers proportionally to scene/glimpse token ratio
-        if cfg.use_scene_registers and backbone.n_register_tokens > 0:
-            ratio = (cfg.scene_grid_size / cfg.glimpse_grid_size) ** 2
-            self.n_scene_registers = round(backbone.n_register_tokens * ratio)
+        # Scene registers (scaled proportionally to scene/glimpse token ratio)
+        if self.n_scene_registers > 0:
             self.scene_registers = nn.Parameter(
                 torch.randn(1, self.n_scene_registers, embed_dim)
             )
         else:
-            self.n_scene_registers = 0
             self.scene_registers = None
 
         # Learned initial hidden state, initialized with randn / sqrt(embed_dim)

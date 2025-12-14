@@ -48,13 +48,15 @@ class Config:
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     ckpt_dir: Path = Path("checkpoints")
     # Model
-    scene_grid_size: int = 16
-    glimpse_grid_size: int = 7
-    gate_init: float = 1e-5
-    use_output_proj: bool = True
-    use_scene_registers: bool = True
+    avp: AVPConfig = field(default_factory=lambda: AVPConfig(
+        scene_grid_size=16,
+        glimpse_grid_size=7,
+        gate_init=1e-5,
+        use_output_proj=True,
+        use_scene_registers=True,
+        gradient_checkpointing=True,
+    ))
     freeze_inner_backbone: bool = False
-    gradient_checkpointing: bool = True
     # Training
     survival_prob: float = 0.5
     n_viewpoints_per_step: int = 2  # Inner loop: viewpoints per optimizer step (>=2 for length generalization)
@@ -76,15 +78,11 @@ class Config:
 
     @property
     def min_viewpoint_scale(self) -> float:
-        return self.glimpse_grid_size / self.scene_grid_size
+        return self.avp.glimpse_grid_size / self.avp.scene_grid_size
 
     @property
     def max_viewpoint_scale(self) -> float:
         return 1.0
-
-    @property
-    def scene_size(self) -> int:
-        return 16 * self.scene_grid_size  # patch_size=16 for DINOv3
 
 
 def load_teacher(cfg: Config) -> DINOv3Backbone:
@@ -99,15 +97,7 @@ def create_avp(teacher: DINOv3Backbone, cfg: Config) -> AVPViT:
     backbone_copy = copy.deepcopy(teacher)
     for p in backbone_copy.parameters():
         p.requires_grad = not cfg.freeze_inner_backbone
-    avp_cfg = AVPConfig(
-        scene_grid_size=cfg.scene_grid_size,
-        glimpse_grid_size=cfg.glimpse_grid_size,
-        gate_init=cfg.gate_init,
-        use_output_proj=cfg.use_output_proj,
-        use_scene_registers=cfg.use_scene_registers,
-        gradient_checkpointing=cfg.gradient_checkpointing,
-    )
-    return AVPViT(backbone_copy, avp_cfg).to(cfg.device)
+    return AVPViT(backbone_copy, cfg.avp).to(cfg.device)
 
 
 def log_figure(exp: comet_ml.Experiment, fig: Figure, name: str, step: int) -> None:
@@ -127,26 +117,30 @@ def log_multistep_viz(
     outputs: list[StepOutput],
     viewpoints: list[Viewpoint],
     initial_scene: Tensor,
+    avp: AVPViT,
     teacher: DINOv3Backbone,
-    cfg: Config,
 ) -> None:
-    """Log full multi-row PCA visualization and trajectory to Comet.
+    """Log full multi-row PCA visualization and trajectory to Comet."""
+    assert isinstance(avp.backbone, DINOv3Backbone)
+    avp_backbone = avp.backbone
 
-    Args:
-        prefix: "train" or "val" for metric naming
-    """
     sample_idx = 0
     n_prefix = teacher.n_prefix_tokens
-    H, W = cfg.scene_size, cfg.scene_size
+    H, W = avp.scene_size, avp.scene_size
 
-    # Convert to numpy for viz (sample_idx only)
     full_img = imagenet_denormalize(image.cpu()).numpy()
     teacher_np = teacher_patches.cpu().float().numpy()
     initial_np = initial_scene.cpu().float().numpy()
 
     scenes_np = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
-    # Strip prefix tokens and normalize local features for fair comparison
-    locals_np = [
+    # CRITICAL: locals_avp uses AVP's TRAINABLE backbone, locals_teacher uses FROZEN teacher
+    # These will diverge as training progresses - comparing them shows representation drift
+    locals_avp_np = [
+        avp_backbone.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
+        .squeeze(0).cpu().float().numpy()
+        for out in outputs
+    ]
+    locals_teacher_np = [
         teacher.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
         .squeeze(0).cpu().float().numpy()
         for out in outputs
@@ -159,8 +153,8 @@ def log_multistep_viz(
     names = [vp.name for vp in viewpoints]
 
     fig_pca = plot_multistep_pca(
-        full_img, teacher_np, scenes_np, locals_np, glimpses_np,
-        boxes, names, cfg.scene_grid_size, cfg.glimpse_grid_size, initial_np,
+        full_img, teacher_np, scenes_np, locals_avp_np, locals_teacher_np, glimpses_np,
+        boxes, names, avp.cfg.scene_grid_size, avp.cfg.glimpse_grid_size, initial_np,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
@@ -174,11 +168,10 @@ def eval_and_log(
     avp: AVPViT,
     teacher: DINOv3Backbone,
     images: Tensor,
-    cfg: Config,
 ) -> float:
     """Evaluate on one batch and log to Comet. Returns final MSE."""
     B = images.shape[0]
-    viewpoints = make_eval_viewpoints(B, cfg.device)
+    viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
         target = teacher.forward_norm_patches(images)
@@ -191,7 +184,7 @@ def eval_and_log(
 
     log_multistep_viz(
         exp, step, "val", images[0], target[0], outputs, viewpoints,
-        initial_scene, teacher, cfg,
+        initial_scene, avp, teacher,
     )
 
     val_loss = mses[-1]
@@ -221,12 +214,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     train_loader = InfiniteLoader(make_loader(
         cfg.train_dir,
-        train_transform(cfg.scene_size, (cfg.crop_scale_min, 1.0)),
+        train_transform(avp.scene_size, (cfg.crop_scale_min, 1.0)),
         cfg.batch_size, cfg.num_workers, shuffle=True,
     ))
     val_loader = InfiniteLoader(make_loader(
         cfg.val_dir,
-        val_transform(cfg.scene_size),
+        val_transform(avp.scene_size),
         cfg.batch_size, cfg.num_workers, shuffle=True,
     ))
 
@@ -245,7 +238,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Initial eval
     val_images = val_loader.next_batch().to(cfg.device)
-    val_loss = eval_and_log(exp, 0, avp, teacher, val_images, cfg)
+    val_loss = eval_and_log(exp, 0, avp, teacher, val_images)
     save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
     best_val_loss = val_loss
 
@@ -296,7 +289,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         if step > 0 and step % cfg.val_every == 0:
             val_images = val_loader.next_batch().to(cfg.device)
-            val_loss = eval_and_log(exp, step, avp, teacher, val_images, cfg)
+            val_loss = eval_and_log(exp, step, avp, teacher, val_images)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 save_checkpoint(avp, ckpt_path, exp, step, val_loss)
@@ -306,7 +299,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 raise optuna.TrialPruned()
 
     val_images = val_loader.next_batch().to(cfg.device)
-    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_images, cfg)
+    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_images)
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         save_checkpoint(avp, ckpt_path, exp, cfg.n_steps, val_loss)

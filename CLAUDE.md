@@ -4,3 +4,4 @@
 - NEVER use `git add -A` or `git add -u`
 - DO use `avp_vit/mymodule/{__init__.py,test.py,my_nested_module/{__init__.py,test.py}}` structure
   - Directories over flat files for modules; nest freely.
+- assert > comment
