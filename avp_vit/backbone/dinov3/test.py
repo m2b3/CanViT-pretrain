@@ -71,3 +71,65 @@ def test_patch_embed_flops():
     D, P = 384, 16
     f = backbone.patch_embed_flops(n_patches)
     assert f == 2 * D * 3 * P * P * n_patches
+
+
+def test_our_rope_matches_dinov3_in_eval_mode():
+    """Our compute_rope must exactly match DINOv3's rope_embed in eval mode.
+
+    IMPORTANT: DINOv3's rope_embed applies random augmentations (shift, jitter,
+    rescale) during training. Model MUST be in eval mode for comparison.
+    """
+    torch.manual_seed(42)
+    native = vit_small(img_size=112, patch_size=16)
+    native.init_weights()
+    native.eval()  # CRITICAL: must be eval mode
+
+    backbone = DINOv3Backbone(native)
+
+    H, W = 7, 7
+    dino_sin, dino_cos = native.rope_embed(H=H, W=W)
+
+    centers = torch.zeros(1, 2)
+    scales = torch.ones(1)
+    our_pos = glimpse_positions(centers, scales, H, W, dtype=backbone.rope_dtype)
+    our_sin, our_cos = compute_rope(our_pos, backbone.rope_periods)
+
+    # Squeeze to match DINOv3 shape [HW, head_dim]
+    our_sin = our_sin.squeeze(0).squeeze(0)
+    our_cos = our_cos.squeeze(0).squeeze(0)
+
+    assert torch.allclose(dino_sin, our_sin)
+    assert torch.allclose(dino_cos, our_cos)
+
+
+def test_different_viewpoints_produce_different_features():
+    """Different viewpoint RoPE must produce different backbone outputs."""
+    torch.manual_seed(42)
+    native = vit_small(img_size=112, patch_size=16)
+    native.init_weights()
+    native.eval()
+
+    backbone = DINOv3Backbone(native)
+
+    B = 1
+    img = torch.randn(B, 3, 112, 112)
+    x, H, W = backbone.prepare_tokens(img)
+
+    # Viewpoint A: center=0, scale=1
+    pos_a = glimpse_positions(torch.zeros(B, 2), torch.ones(B), H, W, dtype=backbone.rope_dtype)
+    rope_a = compute_rope(pos_a, backbone.rope_periods)
+
+    # Viewpoint B: shifted center, smaller scale
+    pos_b = glimpse_positions(
+        torch.tensor([[0.3, -0.2]]), torch.tensor([0.5]), H, W, dtype=backbone.rope_dtype
+    )
+    rope_b = compute_rope(pos_b, backbone.rope_periods)
+
+    with torch.no_grad():
+        out_a = x.clone()
+        out_b = x.clone()
+        for i in range(backbone.n_blocks):
+            out_a = backbone.forward_block(i, out_a, rope_a)
+            out_b = backbone.forward_block(i, out_b, rope_b)
+
+    assert not torch.allclose(out_a, out_b)

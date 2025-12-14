@@ -96,3 +96,59 @@ def test_rope_apply_with_prefix_preserves_prefix():
     assert torch.allclose(out[:, :, :n_prefix], x[:, :, :n_prefix])
     expected_rest = rope_apply(x[:, :, n_prefix:], sin, cos)
     assert torch.allclose(out[:, :, n_prefix:], expected_rest)
+
+
+def test_stitched_quadrant_positions_match_full_grid():
+    """4 quadrant positions stitched together should exactly match 14x14 grid.
+
+    This catches center vs corner conventions, off-by-one errors, etc.
+    """
+    full_grid = make_grid_positions(14, 14, torch.device("cpu"), torch.float32)
+
+    # Quadrants: scale=0.5, centers at (±0.5, ±0.5) in (y, x)
+    quadrants = [
+        ("TL", -0.5, -0.5, 0, 0),
+        ("TR", -0.5, 0.5, 0, 7),
+        ("BL", 0.5, -0.5, 7, 0),
+        ("BR", 0.5, 0.5, 7, 7),
+    ]
+
+    stitched = torch.zeros(14, 14, 2)
+    for _, cy, cx, r0, c0 in quadrants:
+        centers = torch.tensor([[cy, cx]])
+        scales = torch.tensor([0.5])
+        pos = glimpse_positions(centers, scales, 7, 7, dtype=torch.float32).squeeze(0)
+        stitched[r0 : r0 + 7, c0 : c0 + 7] = pos.reshape(7, 7, 2)
+
+    assert torch.allclose(stitched.reshape(196, 2), full_grid)
+
+
+def test_different_viewpoints_produce_different_positions():
+    """Different center/scale should produce different positions."""
+    centers_a = torch.zeros(1, 2)
+    scales_a = torch.ones(1)
+    pos_a = glimpse_positions(centers_a, scales_a, 7, 7, dtype=torch.float32)
+
+    centers_b = torch.tensor([[0.3, -0.2]])
+    scales_b = torch.tensor([0.5])
+    pos_b = glimpse_positions(centers_b, scales_b, 7, 7, dtype=torch.float32)
+
+    assert not torch.allclose(pos_a, pos_b)
+
+
+def test_different_viewpoints_produce_different_rope():
+    """Different viewpoints should produce different RoPE sin/cos."""
+    periods = make_rope_periods(64, dtype=torch.float32)
+
+    centers_a = torch.zeros(1, 2)
+    scales_a = torch.ones(1)
+    pos_a = glimpse_positions(centers_a, scales_a, 7, 7, dtype=torch.float32)
+    sin_a, cos_a = compute_rope(pos_a, periods)
+
+    centers_b = torch.tensor([[0.3, -0.2]])
+    scales_b = torch.tensor([0.5])
+    pos_b = glimpse_positions(centers_b, scales_b, 7, 7, dtype=torch.float32)
+    sin_b, cos_b = compute_rope(pos_b, periods)
+
+    assert not torch.allclose(sin_a, sin_b)
+    assert not torch.allclose(cos_a, cos_b)
