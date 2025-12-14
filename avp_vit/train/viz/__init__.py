@@ -9,8 +9,7 @@ from numpy.typing import NDArray
 from sklearn.decomposition import PCA
 from torch import Tensor
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
+from avp_vit.train.data import IMAGENET_MEAN, IMAGENET_STD
 
 
 def fit_pca(features: NDArray[np.floating]) -> PCA:
