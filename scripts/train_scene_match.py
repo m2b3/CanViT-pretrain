@@ -73,7 +73,7 @@ class Config:
     val_every: int = 50
     ckpt_every: int = 500
     # Compilation
-    compile: bool = False
+    compile: bool = True
     # Optuna
     n_trials: int = 100
     # Runtime
