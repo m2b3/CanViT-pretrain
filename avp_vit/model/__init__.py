@@ -7,6 +7,8 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
+from ytch.nn.layer_scale import LayerScale
+
 from avp_vit.attention import AttentionConfig, RoPEReadCrossAttention, RoPEWriteCrossAttention
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint, extract_glimpse
@@ -67,8 +69,8 @@ class AVPViT(nn.Module):
     scene_positions: Tensor
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
-    read_gate: nn.ParameterList
-    write_gate: nn.ParameterList
+    read_scale: nn.ModuleList
+    write_scale: nn.ModuleList
     output_proj: nn.Module
     # Local temporal stream (when use_local_temporal=True)
     local_tokens: nn.Parameter | None  # Learned initial local state [1, N, D]
@@ -120,25 +122,14 @@ class AVPViT(nn.Module):
         )
 
         attn_cfg = cfg.attention
-        self.read_attn = nn.ModuleList(
-            [RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)]
-        )
-        self.write_attn = nn.ModuleList(
-            [RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)]
-        )
-
-        self.read_gate = nn.ParameterList(
-            [
-                nn.Parameter(torch.full((embed_dim,), cfg.gate_init))
-                for _ in range(n_blocks)
-            ]
-        )
-        self.write_gate = nn.ParameterList(
-            [
-                nn.Parameter(torch.full((embed_dim,), cfg.gate_init))
-                for _ in range(n_blocks)
-            ]
-        )
+        self.read_attn = nn.ModuleList([
+            RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)
+        ])
+        self.write_attn = nn.ModuleList([
+            RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg) for _ in range(n_blocks)
+        ])
+        self.read_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
+        self.write_scale = nn.ModuleList([LayerScale(embed_dim, cfg.gate_init) for _ in range(n_blocks)])
 
         device = self.hidden_tokens.device
         assert isinstance(device, torch.device)
@@ -220,13 +211,9 @@ class AVPViT(nn.Module):
         scene_rope = compute_rope(scene_pos, periods)
 
         for i in range(self.backbone.n_blocks):
-            local = local + self.read_gate[i] * self.read_attn[i](
-                local, hidden_t, local_rope, scene_rope
-            )
+            local = local + self.read_scale[i](self.read_attn[i](local, hidden_t, local_rope, scene_rope))
             local = self.backbone.forward_block(i, local, local_rope)
-            hidden_t = hidden_t + self.write_gate[i] * self.write_attn[i](
-                hidden_t, local, scene_rope, local_rope
-            )
+            hidden_t = hidden_t + self.write_scale[i](self.write_attn[i](hidden_t, local, scene_rope, local_rope))
 
         # Strip registers, get grid tokens only
         hidden_out = hidden_t[:, n_reg:]

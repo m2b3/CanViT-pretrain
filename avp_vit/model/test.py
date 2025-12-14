@@ -2,6 +2,7 @@ from typing import override
 
 import torch
 from torch import Tensor, nn
+from ytch.nn.layer_scale import LayerScale
 
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint
@@ -118,10 +119,12 @@ def test_gate_init():
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
-    for g in avp.read_gate:
-        assert (g == 0.5).all()
-    for g in avp.write_gate:
-        assert (g == 0.5).all()
+    for scale in avp.read_scale:
+        assert isinstance(scale, LayerScale)
+        assert (scale.scale == 0.5).all()
+    for scale in avp.write_scale:
+        assert isinstance(scale, LayerScale)
+        assert (scale.scale == 0.5).all()
 
 
 def test_scene_registers_disabled_by_default():

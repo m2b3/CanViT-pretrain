@@ -119,3 +119,5 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
             nn.init.eye_(proj.weight)
             nn.init.zeros_(proj.bias)
         return proj
+
+
