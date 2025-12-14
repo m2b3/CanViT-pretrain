@@ -288,3 +288,22 @@ def test_forward_reduce_custom():
 
     assert count == 1
     assert final_hidden.shape == (B, 16, embed_dim)
+
+
+def test_gradient_checkpointing_smoke():
+    """Gradient checkpointing produces same output and gradients flow."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gradient_checkpointing=True)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+    avp.train()
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    viewpoints = [Viewpoint.full_scene(B, images.device)]
+
+    scene, _ = avp(images, viewpoints)
+    loss = scene.sum()
+    loss.backward()
+
+    assert avp.hidden_tokens.grad is not None

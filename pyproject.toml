@@ -32,6 +32,7 @@ dev = [
     "pypatree>=0.3.0",
     "pyright>=1.1.407",
     "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
     "ruff>=0.14.9",
 ]
 
