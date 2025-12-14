@@ -149,6 +149,76 @@ def test_convex_gating_init():
         assert torch.allclose(cvx.gate_scale, torch.zeros(64))
 
 
+def test_convex_init_passthrough():
+    """At init with low gate, convex gating acts as passthrough on both streams."""
+    from avp_vit.glimpse import extract_glimpse
+
+    n_blocks = 2
+    gate_init = 1e-5
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=gate_init, use_convex_gating=True)
+    backbone = MockBackbone(64, 4, n_blocks, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    torch.manual_seed(42)
+    images = torch.randn(B, 3, avp.scene_size, avp.scene_size)
+    vp = Viewpoint("test", torch.zeros(B, 2), torch.ones(B))
+
+    with torch.no_grad():
+        glimpse = extract_glimpse(images, vp, avp.glimpse_size)
+
+        # Baseline local: backbone only (no cross-attention)
+        torch.manual_seed(123)
+        baseline_local, _, _ = backbone.prepare_tokens(glimpse)
+        for i in range(n_blocks):
+            baseline_local = backbone.forward_block(i, baseline_local, None)
+
+        # AVPViT forward (same seed for prepare_tokens)
+        torch.manual_seed(123)
+        out = avp.forward_step(images, vp)
+        initial_scene = avp.output_proj(avp.hidden_tokens.expand(B, -1, -1))
+
+    # Scene: write gate ≈ 0 → scene ≈ initial
+    scene_diff = (out.scene - initial_scene).abs().mean()
+    assert scene_diff < 0.1, f"Scene changed too much: {scene_diff}"
+
+    # Local: read gate ≈ 0 → local ≈ backbone-only
+    local_diff = (out.local - baseline_local).abs().mean()
+    assert local_diff < 1e-3, f"Local differs from backbone-only: {local_diff}"
+
+
+def test_convex_gate_value_affects_output():
+    """High gate breaks passthrough; low gate preserves it."""
+    cfg_lo = AVPConfig(scene_grid_size=4, gate_init=1e-5, use_convex_gating=True)
+    cfg_hi = AVPConfig(scene_grid_size=4, gate_init=0.5, use_convex_gating=True)
+
+    # Same seed for both → same hidden_tokens, attention weights
+    torch.manual_seed(999)
+    avp_lo = AVPViT(MockBackbone(64, 4, 2, 0, PATCH_SIZE), cfg_lo)
+    torch.manual_seed(999)
+    avp_hi = AVPViT(MockBackbone(64, 4, 2, 0, PATCH_SIZE), cfg_hi)
+
+    B = 2
+    torch.manual_seed(42)
+    images = torch.randn(B, 3, avp_lo.scene_size, avp_lo.scene_size)
+    vp = Viewpoint("test", torch.zeros(B, 2), torch.ones(B))
+
+    with torch.no_grad():
+        torch.manual_seed(123)
+        out_lo = avp_lo.forward_step(images, vp)
+        torch.manual_seed(123)
+        out_hi = avp_hi.forward_step(images, vp)
+        initial = avp_lo.output_proj(avp_lo.hidden_tokens.expand(B, -1, -1))
+
+    diff_lo = (out_lo.scene - initial).abs().mean()
+    diff_hi = (out_hi.scene - initial).abs().mean()
+
+    # Low gate: passthrough works (diff small)
+    assert diff_lo < 0.01, f"Low gate should preserve passthrough: {diff_lo}"
+    # High gate: passthrough broken (diff large)
+    assert diff_hi > 0.1, f"High gate should break passthrough: {diff_hi}"
+
+
 def test_scene_registers_disabled_by_default():
     cfg = AVPConfig(scene_grid_size=4)
     backbone = MockBackbone(64, 4, 2, 4, PATCH_SIZE)
