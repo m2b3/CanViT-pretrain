@@ -8,11 +8,34 @@ Coordinate convention (shared with avp_vit.rope):
 """
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 from torch import Tensor, nn
 
 from avp_vit.rope import grid_offsets
+
+
+class PixelBox(NamedTuple):
+    """Axis-aligned bounding box in pixel coordinates.
+
+    Coordinate system:
+    - Origin (0, 0) at top-left corner
+    - x increases rightward (horizontal)
+    - y increases downward (vertical)
+    """
+
+    left: float  # x of left edge
+    top: float  # y of top edge
+    width: float  # horizontal extent
+    height: float  # vertical extent
+    center_x: float  # x of center
+    center_y: float  # y of center
+
+
+def normalized_to_pixel(coord: float, size: int) -> float:
+    """Convert normalized [-1, 1] coordinate to pixel [0, size]."""
+    return (coord + 1) / 2 * size
 
 
 @dataclass
@@ -47,6 +70,34 @@ class Viewpoint:
             name=name,
             centers=centers,
             scales=torch.full((B,), 0.5, device=device),
+        )
+
+    def to_pixel_box(self, batch_idx: int, H: int, W: int) -> PixelBox:
+        """Convert viewpoint for a single batch item to pixel coordinates.
+
+        Args:
+            batch_idx: Index into the batch dimension.
+            H: Image height in pixels.
+            W: Image width in pixels.
+
+        Returns:
+            PixelBox with coordinates in pixel space.
+        """
+        cy, cx = self.centers[batch_idx].tolist()
+        scale = self.scales[batch_idx].item()
+
+        center_x = normalized_to_pixel(cx, W)
+        center_y = normalized_to_pixel(cy, H)
+        width = scale * W
+        height = scale * H
+
+        return PixelBox(
+            left=center_x - width / 2,
+            top=center_y - height / 2,
+            width=width,
+            height=height,
+            center_x=center_x,
+            center_y=center_y,
         )
 
 

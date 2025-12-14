@@ -2,8 +2,76 @@
 
 import torch
 
-from avp_vit.glimpse import Viewpoint, extract_glimpse
+from avp_vit.glimpse import Viewpoint, extract_glimpse, normalized_to_pixel
 from avp_vit.rope import glimpse_positions
+
+
+class TestNormalizedToPixel:
+    def test_center_maps_to_center(self) -> None:
+        assert normalized_to_pixel(0.0, 100) == 50.0
+
+    def test_left_maps_to_zero(self) -> None:
+        assert normalized_to_pixel(-1.0, 100) == 0.0
+
+    def test_right_maps_to_size(self) -> None:
+        assert normalized_to_pixel(1.0, 100) == 100.0
+
+
+class TestPixelBox:
+    def test_full_scene_box(self) -> None:
+        vp = Viewpoint.full_scene(1, torch.device("cpu"))
+        box = vp.to_pixel_box(0, H=100, W=200)
+
+        # Full scene: center at image center, covers entire image
+        assert box.center_x == 100.0  # W/2
+        assert box.center_y == 50.0  # H/2
+        assert box.width == 200.0  # W
+        assert box.height == 100.0  # H
+        assert box.left == 0.0
+        assert box.top == 0.0
+
+    def test_quadrant_box(self) -> None:
+        # Top-left quadrant: center at (-0.5, -0.5), scale=0.5
+        vp = Viewpoint.quadrant(1, torch.device("cpu"), 0, 0)
+        box = vp.to_pixel_box(0, H=100, W=100)
+
+        # TL quadrant center: pixel (25, 25), size 50x50
+        assert box.center_x == 25.0
+        assert box.center_y == 25.0
+        assert box.width == 50.0
+        assert box.height == 50.0
+        assert box.left == 0.0
+        assert box.top == 0.0
+
+    def test_bottom_right_quadrant(self) -> None:
+        # BR quadrant: center at (0.5, 0.5), scale=0.5
+        vp = Viewpoint.quadrant(1, torch.device("cpu"), 1, 1)
+        box = vp.to_pixel_box(0, H=100, W=100)
+
+        # BR quadrant center: pixel (75, 75), size 50x50
+        assert box.center_x == 75.0
+        assert box.center_y == 75.0
+        assert box.width == 50.0
+        assert box.height == 50.0
+        assert box.left == 50.0
+        assert box.top == 50.0
+
+    def test_batch_indexing(self) -> None:
+        # Different viewpoints per batch item
+        centers = torch.tensor([[0.0, 0.0], [0.5, 0.5]])
+        scales = torch.tensor([1.0, 0.5])
+        vp = Viewpoint("mixed", centers, scales)
+
+        box0 = vp.to_pixel_box(0, H=100, W=100)
+        box1 = vp.to_pixel_box(1, H=100, W=100)
+
+        # First: full scene
+        assert box0.center_x == 50.0
+        assert box0.width == 100.0
+
+        # Second: BR quadrant
+        assert box1.center_x == 75.0
+        assert box1.width == 50.0
 
 
 def test_viewpoint_full_scene() -> None:

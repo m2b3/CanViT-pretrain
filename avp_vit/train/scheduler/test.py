@@ -20,8 +20,9 @@ class TestWarmupCosineScheduler:
         opt = torch.optim.AdamW(model.parameters(), lr=1.0)
         sched = warmup_cosine_scheduler(opt, total_steps=100, warmup_steps=10)
 
-        # Step through warmup
+        # Step through warmup (optimizer.step() must precede scheduler.step())
         for _ in range(10):
+            opt.step()
             sched.step()
 
         # At end of warmup, LR should be peak (1.0)
@@ -34,6 +35,7 @@ class TestWarmupCosineScheduler:
 
         # Step through all steps
         for _ in range(100):
+            opt.step()
             sched.step()
 
         # At end, LR should be ~0
@@ -46,6 +48,7 @@ class TestWarmupCosineScheduler:
 
         lrs = [sched.get_last_lr()[0]]
         for _ in range(10):
+            opt.step()
             sched.step()
             lrs.append(sched.get_last_lr()[0])
 
