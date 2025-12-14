@@ -183,10 +183,11 @@ def eval_and_log(
     for t, mse in enumerate(mses):
         exp.log_metric(f"val/mse_t{t}", mse, step=step)
 
-    log_multistep_viz(
-        exp, step, "val", images[0], target[0], outputs, viewpoints,
-        initial_scene, avp, teacher,
-    )
+    with torch.inference_mode():
+        log_multistep_viz(
+            exp, step, "val", images[0], target[0], outputs, viewpoints,
+            initial_scene, avp, teacher,
+        )
 
     val_loss = mses[-1]
     exp.log_metric("val/loss", val_loss, step=step)
