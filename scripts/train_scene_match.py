@@ -294,7 +294,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         make_loader(
             cfg.val_dir,
             val_transform(avp.scene_size),
-            cfg.batch_size,
+            fresh_count,
             cfg.num_workers,
             shuffle=True,
         )
@@ -339,13 +339,16 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     best_val_loss = val_loss
     ckpt_val_loss = val_loss
 
-    # Initialize training state: accumulate batches from train_loader to fill batch_size
+    # Initialize training state: teacher only sees fresh_count at a time
     n_init_batches = (cfg.batch_size + fresh_count - 1) // fresh_count
-    init_imgs = torch.cat(
-        [train_loader.next_batch() for _ in range(n_init_batches)], dim=0
-    )[: cfg.batch_size].to(cfg.device)
+    init_imgs_list, init_targets_list = [], []
     with torch.no_grad():
-        init_targets = teacher.forward_norm_patches(init_imgs)
+        for _ in range(n_init_batches):
+            batch = train_loader.next_batch().to(cfg.device)
+            init_imgs_list.append(batch)
+            init_targets_list.append(teacher.forward_norm_patches(batch))
+    init_imgs = torch.cat(init_imgs_list, dim=0)[:cfg.batch_size]
+    init_targets = torch.cat(init_targets_list, dim=0)[:cfg.batch_size]
     hidden_init_full = avp._init_hidden(cfg.batch_size, None)
     local_init_full = (
         avp.local_init.expand(cfg.batch_size, -1, -1)
