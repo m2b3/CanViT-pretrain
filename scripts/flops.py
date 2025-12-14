@@ -1,20 +1,18 @@
 """FLOPs calculations for AVP-ViT and teacher backbone.
 
-Single source of truth for compute estimates. All formulas documented.
+Uses introspection on actual model instances - no hardcoded formulas that can drift.
 """
 
-from dataclasses import dataclass
-from typing import NamedTuple
+from pathlib import Path
+from typing import NamedTuple, cast
 
+from torch import nn
 
-@dataclass(frozen=True)
-class ViTConfig:
-    embed_dim: int = 384
-    num_heads: int = 6
-    n_blocks: int = 12
-    mlp_ratio: int = 4
-    patch_size: int = 16
-    n_prefix_tokens: int = 5  # CLS + storage
+from avp_vit import AVPConfig, AVPViT
+from avp_vit.attention import RoPECrossAttention
+from avp_vit.backbone.dinov3 import DINOv3Backbone
+
+CKPT_PATH = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
 
 
 class TeacherFLOPs(NamedTuple):
@@ -24,7 +22,7 @@ class TeacherFLOPs(NamedTuple):
     n_tokens: int
 
 
-class AVPFLOPs(NamedTuple):
+class AVPStepFLOPs(NamedTuple):
     glimpse_embed: int
     read_attn: int
     backbone: int
@@ -35,151 +33,107 @@ class AVPFLOPs(NamedTuple):
     n_scene: int
 
 
-def vit_block_flops(n_tokens: int, cfg: ViTConfig) -> int:
-    """FLOPs for one ViT block.
-
-    Self-attention:
-      QKV proj: 6ND², attn: 4N²D, O proj: 2ND² → 8ND² + 4N²D
-
-    MLP (4× expansion):
-      fc1 + fc2: 16ND²
-
-    Total: 24ND² + 4N²D
-
-    Ignored (negligible): LayerNorm, biases, GELU, softmax, RoPE.
-    """
-    assert n_tokens > 0
-    N, D = n_tokens, cfg.embed_dim
-    return 24 * N * D * D + 4 * N * N * D
-
-
-def patch_embed_flops(n_patches: int, cfg: ViTConfig) -> int:
-    """FLOPs for patch embedding Conv2d(3, D, kernel_size=P, stride=P).
-
-    = 2 × D × 3 × P² × n_patches
-    """
-    assert n_patches > 0
-    return 2 * cfg.embed_dim * 3 * cfg.patch_size**2 * n_patches
-
-
-def cross_attn_flops(
-    n_q: int, n_kv: int, cfg: ViTConfig, *, q_proj: bool, kv_proj: bool, o_proj: bool
-) -> int:
-    """FLOPs for one cross-attention layer.
-
-    Q proj (if on): 2 × N_q × D²
-    K+V proj (if on): 4 × N_kv × D²
-    Attention (Q@Kᵀ + attn@V): 4 × N_q × N_kv × D
-    O proj (if on): 2 × N_q × D²
-
-    Ignored: LayerNorm, ElementwiseAffine, RoPE.
-    """
-    assert n_q > 0 and n_kv > 0
-    D = cfg.embed_dim
-    flops = 4 * n_q * n_kv * D  # attention
-    if q_proj:
-        flops += 2 * n_q * D * D
-    if kv_proj:
-        flops += 4 * n_kv * D * D
-    if o_proj:
-        flops += 2 * n_q * D * D
-    return flops
-
-
-def teacher_flops(n_patches: int, cfg: ViTConfig) -> TeacherFLOPs:
-    """Total FLOPs for teacher forward pass."""
-    assert n_patches > 0
-    n_tokens = n_patches + cfg.n_prefix_tokens
-    patch_embed = patch_embed_flops(n_patches, cfg)
-    blocks = cfg.n_blocks * vit_block_flops(n_tokens, cfg)
+def teacher_flops(backbone: DINOv3Backbone, n_patches: int) -> TeacherFLOPs:
+    """FLOPs for teacher forward pass."""
+    n_tokens = n_patches + backbone.n_prefix_tokens
+    patch_embed = backbone.patch_embed_flops(n_patches)
+    blocks = backbone.n_blocks * backbone.block_flops(n_tokens)
     return TeacherFLOPs(patch_embed, blocks, patch_embed + blocks, n_tokens)
 
 
-def avp_flops(
-    glimpse_patches: int, scene_patches: int, cfg: ViTConfig, *, output_proj: bool
-) -> AVPFLOPs:
-    """Total FLOPs for AVP forward pass.
+def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone) -> AVPStepFLOPs:
+    """FLOPs for one AVP forward step. Introspects actual model structure."""
+    cfg = model.cfg
+    glimpse_patches = cfg.glimpse_grid_size ** 2
+    scene_patches = cfg.scene_grid_size ** 2
+    n_local = glimpse_patches + backbone.n_prefix_tokens
 
-    Per block:
-      1. Read cross-attn: local queries scene (Q/O proj, K/V identity)
-      2. Backbone block: self-attention + MLP on local
-      3. Write cross-attn: scene queries local (Q/O identity, K/V proj)
-    """
-    assert glimpse_patches > 0 and scene_patches > 0
-    n_local = glimpse_patches + cfg.n_prefix_tokens
+    glimpse_embed = backbone.patch_embed_flops(glimpse_patches)
 
-    read = cfg.n_blocks * cross_attn_flops(
-        n_local, scene_patches, cfg, q_proj=True, kv_proj=False, o_proj=True
+    read_attn = sum(
+        cast(RoPECrossAttention, model.read_attn[i]).flops(n_local, scene_patches)
+        for i in range(backbone.n_blocks)
     )
-    backbone = cfg.n_blocks * vit_block_flops(n_local, cfg)
-    write = cfg.n_blocks * cross_attn_flops(
-        scene_patches, n_local, cfg, q_proj=False, kv_proj=True, o_proj=False
+    blocks = backbone.n_blocks * backbone.block_flops(n_local)
+    write_attn = sum(
+        cast(RoPECrossAttention, model.write_attn[i]).flops(scene_patches, n_local)
+        for i in range(backbone.n_blocks)
     )
-    out_proj = 2 * scene_patches * cfg.embed_dim**2 if output_proj else 0
-    glimpse_embed = patch_embed_flops(glimpse_patches, cfg)
 
-    total = glimpse_embed + read + backbone + write + out_proj
-    return AVPFLOPs(glimpse_embed, read, backbone, write, out_proj, total, n_local, scene_patches)
+    if isinstance(model.output_proj, nn.Identity):
+        output_proj = 0
+    else:
+        output_proj = 2 * scene_patches * backbone.embed_dim ** 2
+
+    total = glimpse_embed + read_attn + blocks + write_attn + output_proj
+    return AVPStepFLOPs(glimpse_embed, read_attn, blocks, write_attn, output_proj, total, n_local, scene_patches)
 
 
-def fmt(flops: int) -> str:
-    if flops >= 1e9:
-        return f"{flops / 1e9:.2f}G"
-    if flops >= 1e6:
-        return f"{flops / 1e6:.2f}M"
-    return f"{flops:.0f}"
+def fmt(f: int) -> str:
+    if f >= 1e9:
+        return f"{f / 1e9:.2f}G"
+    if f >= 1e6:
+        return f"{f / 1e6:.2f}M"
+    return f"{f:.0f}"
 
 
 def main() -> None:
-    cfg = ViTConfig()
+    from dinov3.hub.backbones import dinov3_vits16
+
+    # Load actual models
+    backbone = DINOv3Backbone(dinov3_vits16(weights=str(CKPT_PATH), pretrained=True))
+
     print("=" * 60)
-    print("FLOPs Calculator for AVP-ViT")
+    print("FLOPs Calculator for AVP-ViT (introspection-based)")
     print("=" * 60)
-    print("ViT-S/16 config:")
-    print(f"  embed_dim={cfg.embed_dim}, num_heads={cfg.num_heads}, n_blocks={cfg.n_blocks}")
-    print(f"  patch_size={cfg.patch_size}, n_prefix_tokens={cfg.n_prefix_tokens}")
+    print("Backbone: DINOv3 ViT-S/16")
+    print(f"  embed_dim={backbone.embed_dim}, num_heads={backbone.num_heads}")
+    print(f"  n_blocks={backbone.n_blocks}, patch_size={backbone.patch_size}")
+    print(f"  n_prefix_tokens={backbone.n_prefix_tokens}")
     print()
 
     resolutions = [256, 512, 1024]
+    scene_grid = 16
     glimpse_grid = 7
-    glimpse_patches = glimpse_grid**2
 
     print("=" * 60)
     print("TEACHER (full self-attention)")
     print("=" * 60)
     for px in resolutions:
-        grid = px // cfg.patch_size
-        t = teacher_flops(grid**2, cfg)
-        print(f"{px}×{px} px ({grid}×{grid} grid, {t.n_tokens} tokens):")
+        grid = px // backbone.patch_size
+        t = teacher_flops(backbone, grid ** 2)
+        print(f"{px}×{px} ({grid}×{grid} grid, {t.n_tokens} tokens):")
         print(f"  Patch embed:  {fmt(t.patch_embed):>10}")
         print(f"  Blocks:       {fmt(t.blocks):>10}")
         print(f"  Total:        {fmt(t.total):>10}")
         print()
 
     print("=" * 60)
-    print(f"AVP ({glimpse_grid}×{glimpse_grid} glimpse, cross-attention to scene)")
+    print(f"AVP ({glimpse_grid}×{glimpse_grid} glimpse, {scene_grid}×{scene_grid} scene)")
     print("=" * 60)
-    for px in resolutions:
-        grid = px // cfg.patch_size
-        a = avp_flops(glimpse_patches, grid**2, cfg, output_proj=True)
-        print(f"Scene {grid}×{grid} ({a.n_scene} tokens), local={a.n_local} tokens:")
-        print(f"  Glimpse embed: {fmt(a.glimpse_embed):>10}")
-        print(f"  Read attn:     {fmt(a.read_attn):>10}")
-        print(f"  Backbone:      {fmt(a.backbone):>10}")
-        print(f"  Write attn:    {fmt(a.write_attn):>10}")
-        print(f"  Output proj:   {fmt(a.output_proj):>10}")
-        print(f"  Total:         {fmt(a.total):>10}")
-        print()
+
+    # Create AVP model for introspection
+    avp_cfg = AVPConfig(scene_grid_size=scene_grid, glimpse_grid_size=glimpse_grid, use_output_proj=True)
+    avp = AVPViT(backbone, avp_cfg)
+
+    a = avp_step_flops(avp, backbone)
+    print(f"Per-step FLOPs (local={a.n_local} tokens, scene={a.n_scene} tokens):")
+    print(f"  Glimpse embed: {fmt(a.glimpse_embed):>10}")
+    print(f"  Read attn:     {fmt(a.read_attn):>10}")
+    print(f"  Backbone:      {fmt(a.backbone):>10}")
+    print(f"  Write attn:    {fmt(a.write_attn):>10}")
+    print(f"  Output proj:   {fmt(a.output_proj):>10}")
+    print(f"  Total:         {fmt(a.total):>10}")
+    print()
 
     print("=" * 60)
-    print("COMPARISON (Teacher vs AVP)")
+    print("COMPARISON (Teacher vs AVP step)")
     print("=" * 60)
-    print(f"{'Resolution':<12} {'Teacher':>12} {'AVP':>12} {'Speedup':>10}")
+    print(f"{'Resolution':<12} {'Teacher':>12} {'AVP step':>12} {'Speedup':>10}")
     print("-" * 48)
     for px in resolutions:
-        grid = px // cfg.patch_size
-        t = teacher_flops(grid**2, cfg)
-        a = avp_flops(glimpse_patches, grid**2, cfg, output_proj=True)
+        grid = px // backbone.patch_size
+        t = teacher_flops(backbone, grid ** 2)
         print(f"{px}×{px:<8} {fmt(t.total):>12} {fmt(a.total):>12} {t.total / a.total:>9.1f}×")
 
 

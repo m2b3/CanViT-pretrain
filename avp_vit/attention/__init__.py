@@ -50,6 +50,20 @@ class RoPECrossAttention(nn.Module):
         out = F.scaled_dot_product_attention(q, k, v)
         return self.out_transform(from_multihead(out))
 
+    def flops(self, n_q: int, n_kv: int) -> int:
+        """FLOPs for one forward pass. Introspects actual transform structure."""
+        D = self.dim
+        f = 4 * n_q * n_kv * D  # Q @ Kᵀ + attn @ V
+        if not isinstance(self.q_transform, nn.Identity):
+            f += 2 * n_q * D * D
+        if not isinstance(self.k_transform, nn.Identity):
+            f += 2 * n_kv * D * D
+        if not isinstance(self.v_transform, nn.Identity):
+            f += 2 * n_kv * D * D
+        if not isinstance(self.out_transform, nn.Identity):
+            f += 2 * n_q * D * D
+        return f
+
 
 @final
 class RoPEReadCrossAttention(RoPECrossAttention):

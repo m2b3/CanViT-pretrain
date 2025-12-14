@@ -95,3 +95,15 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
         x, hw = self._backbone.prepare_tokens_with_masks(images, masks=None)
         H, W = cast(tuple[int, int], hw)
         return x, H, W
+
+    def block_flops(self, n_tokens: int) -> int:
+        """FLOPs for one DINOv3 transformer block (standard ViT: 4× MLP)."""
+        N, D = n_tokens, self.embed_dim
+        # Self-attention: 8ND² + 4N²D (QKV+O projections + attention)
+        # MLP (4× expansion): 16ND²
+        return 24 * N * D * D + 4 * N * N * D
+
+    def patch_embed_flops(self, n_patches: int) -> int:
+        """FLOPs for patch embedding Conv2d(3, D, kernel=P, stride=P)."""
+        D, P = self.embed_dim, self.patch_size
+        return 2 * D * 3 * P * P * n_patches
