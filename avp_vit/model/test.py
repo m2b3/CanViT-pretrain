@@ -463,3 +463,32 @@ def test_local_temporal_disabled_no_effect_on_output():
     # Shapes should match
     assert out1.scene.shape == out2.scene.shape
     assert out1.hidden.shape == out2.hidden.shape
+
+
+def test_forward_step_local_prev_flows_through():
+    """forward_step passes local_prev to _process_glimpse and uses local_tokens if None."""
+    embed_dim = 64
+    cfg = AVPConfig(
+        scene_grid_size=4,
+        glimpse_grid_size=3,
+        use_local_temporal=True,
+        gate_init=0.1,
+    )
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+
+    # First call with local_prev=None should use local_tokens
+    out1 = avp.forward_step(images, vp, None, None)
+    assert out1.local.shape == (B, avp.n_local_tokens, embed_dim)
+
+    # Second call with local_prev from first call
+    out2 = avp.forward_step(images, vp, out1.hidden, out1.local)
+    assert out2.local.shape == (B, avp.n_local_tokens, embed_dim)
+
+    # Output local can be used as next local_prev
+    out3 = avp.forward_step(images, vp, out2.hidden, out2.local)
+    assert out3.local.shape == (B, avp.n_local_tokens, embed_dim)

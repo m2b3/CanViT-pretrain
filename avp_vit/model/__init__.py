@@ -232,7 +232,11 @@ class AVPViT(nn.Module):
         return StepOutput(glimpse, local, hidden_out, scene_out)
 
     def forward_step(
-        self, images: Tensor, viewpoint: Viewpoint, hidden: Tensor | None = None
+        self,
+        images: Tensor,
+        viewpoint: Viewpoint,
+        hidden: Tensor | None = None,
+        local_prev: Tensor | None = None,
     ) -> StepOutput:
         """Process a single viewpoint.
 
@@ -240,21 +244,27 @@ class AVPViT(nn.Module):
             images: Input images [B, C, H, W]
             viewpoint: Where to look in the images
             hidden: Previous hidden state [B, G*G, D] for CONTINUATION, or None for fresh start
+            local_prev: Previous local state [B, N, D] for CONTINUATION (when use_local_temporal)
 
         Returns:
             StepOutput containing:
             - glimpse: Extracted glimpse image
-            - local: Local features from backbone
-            - hidden: Updated hidden state (use this for CONTINUATION)
-            - scene: Projected output (use this for LOSS/VIZ)
+            - local: Local features (use for CONTINUATION when use_local_temporal)
+            - hidden: Updated hidden state (use for CONTINUATION)
+            - scene: Projected output (use for LOSS/VIZ)
         """
+        B = images.shape[0]
         glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
         tokens, H, W = self.backbone.prepare_tokens(glimpse)
         # Assert square grid matches config (catch H/W mismatches early)
         G = self.cfg.glimpse_grid_size
         assert H == W == G, f"backbone returned {H}x{W} but config expects {G}x{G}"
-        # local_prev=None for now; will be passed properly in forward_step signature update
-        local_prev = None
+
+        # Initialize local_prev from local_tokens if needed
+        if self.cfg.use_local_temporal and local_prev is None:
+            assert self.local_tokens is not None
+            local_prev = self.local_tokens.expand(B, -1, -1)
+
         if self.cfg.gradient_checkpointing and self.training:
             return cast(StepOutput, checkpoint(
                 self._process_glimpse,
