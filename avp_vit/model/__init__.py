@@ -224,7 +224,7 @@ class AVPViT(nn.Module):
         self,
         images: Tensor,
         viewpoints: list[Viewpoint],
-        reducer: Callable[[T, Tensor, Tensor], T],
+        reducer: Callable[[T, StepOutput], T],
         init: T,
         hidden: Tensor | None = None,
     ) -> tuple[T, Tensor]:
@@ -236,9 +236,8 @@ class AVPViT(nn.Module):
         Args:
             images: Input images [B, C, H, W]
             viewpoints: Sequence of viewpoints to process
-            reducer: Function (accumulator, hidden, scene) -> new_accumulator
-                     - hidden: Internal state [B, G*G, D] (for custom logic if needed)
-                     - scene: Projected output [B, G*G, D] (for loss/viz)
+            reducer: Function (accumulator, step_output) -> new_accumulator
+                     Receives full StepOutput with glimpse, local, hidden, scene.
             init: Initial accumulator value
             hidden: Initial hidden state [B, G*G, D] or None for fresh start
 
@@ -251,7 +250,7 @@ class AVPViT(nn.Module):
         for vp in viewpoints:
             out = self.forward_step(images, vp, hidden)
             hidden = out.hidden
-            acc = reducer(acc, out.hidden, out.scene)
+            acc = reducer(acc, out)
         assert hidden is not None
         return acc, hidden
 
@@ -280,8 +279,8 @@ class AVPViT(nn.Module):
             - average_loss: Mean MSE across all viewpoints (scalar)
             - final_hidden: For CONTINUATION in Bernoulli survival
         """
-        def reducer(acc: Tensor, h: Tensor, s: Tensor) -> Tensor:
-            return acc + F.mse_loss(s, target)
+        def reducer(acc: Tensor, out: StepOutput) -> Tensor:
+            return acc + F.mse_loss(out.scene, target)
 
         total, final_hidden = self.forward_reduce(
             images, viewpoints, reducer,
@@ -308,8 +307,31 @@ class AVPViT(nn.Module):
             - scenes: List of projected scenes [B, G*G, D] at each timestep
             - final_hidden: For CONTINUATION if needed
         """
-        def reducer(acc: list[Tensor], h: Tensor, s: Tensor) -> list[Tensor]:
-            return [*acc, s]
+        def reducer(acc: list[Tensor], out: StepOutput) -> list[Tensor]:
+            return [*acc, out.scene]
+
+        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden)
+
+    def forward_trajectory_full(
+        self,
+        images: Tensor,
+        viewpoints: list[Viewpoint],
+        hidden: Tensor | None = None,
+    ) -> tuple[list[StepOutput], Tensor]:
+        """Full visualization: collect complete StepOutput at each step.
+
+        Args:
+            images: Input images [B, C, H, W]
+            viewpoints: Sequence of viewpoints to process
+            hidden: Initial hidden state or None
+
+        Returns:
+            (outputs, final_hidden) where:
+            - outputs: List of StepOutput (glimpse, local, hidden, scene) at each timestep
+            - final_hidden: For CONTINUATION if needed
+        """
+        def reducer(acc: list[StepOutput], out: StepOutput) -> list[StepOutput]:
+            return [*acc, out]
 
         return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden)
 
@@ -332,8 +354,8 @@ class AVPViT(nn.Module):
             - final_scene: Projected output after all viewpoints [B, G*G, D]
             - final_hidden: For CONTINUATION if needed
         """
-        def reducer(acc: Tensor, h: Tensor, s: Tensor) -> Tensor:
-            return s
+        def reducer(acc: Tensor, out: StepOutput) -> Tensor:
+            return out.scene
 
         # Use a dummy initial tensor (will be overwritten by first step)
         dummy = torch.empty(0, device=images.device)

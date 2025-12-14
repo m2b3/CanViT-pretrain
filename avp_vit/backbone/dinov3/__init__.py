@@ -80,6 +80,11 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
         out: Tensor = self._backbone.blocks[idx](x, rope)
         return out
 
+    @property
+    def output_norm(self) -> nn.Module:
+        """The LayerNorm applied to produce x_norm_patchtokens."""
+        return self._backbone.norm
+
     def forward_norm_patches(self, images: Tensor) -> Tensor:
         """Forward pass returning normalized patch tokens [B, H*W, D]."""
         out = cast(dict[str, Any], self._backbone.forward_features(images))

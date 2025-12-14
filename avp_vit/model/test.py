@@ -281,7 +281,7 @@ def test_forward_reduce_custom():
     viewpoints = [Viewpoint.full_scene(B, images.device)]
 
     # Custom reducer that counts steps
-    def count_reducer(acc: int, h: torch.Tensor, s: torch.Tensor) -> int:
+    def count_reducer(acc: int, out: StepOutput) -> int:
         return acc + 1
 
     count, final_hidden = avp.forward_reduce(images, viewpoints, count_reducer, init=0)

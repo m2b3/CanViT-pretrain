@@ -19,16 +19,16 @@ from ymc.lr import get_linear_scaled_lr
 from ytch.device import get_sensible_device
 from ytch.model import count_parameters
 
-from avp_vit import AVPConfig, AVPViT
+from avp_vit import AVPConfig, AVPViT, StepOutput
 from avp_vit.backbone.dinov3 import DINOv3Backbone
+from avp_vit.glimpse import Viewpoint
 from avp_vit.train import (
     InfiniteLoader,
     TrainState,
-    fit_pca,
     imagenet_denormalize,
     make_eval_viewpoints,
     make_loader,
-    plot_pca_grid,
+    plot_multistep_pca,
     plot_trajectory,
     random_viewpoint,
     train_transform,
@@ -118,6 +118,56 @@ def log_figure(exp: comet_ml.Experiment, fig: Figure, name: str, step: int) -> N
     plt.close(fig)
 
 
+def log_multistep_viz(
+    exp: comet_ml.Experiment,
+    step: int,
+    prefix: str,
+    image: Tensor,
+    teacher_patches: Tensor,
+    outputs: list[StepOutput],
+    viewpoints: list[Viewpoint],
+    initial_scene: Tensor,
+    teacher: DINOv3Backbone,
+    cfg: Config,
+) -> None:
+    """Log full multi-row PCA visualization and trajectory to Comet.
+
+    Args:
+        prefix: "train" or "val" for metric naming
+    """
+    sample_idx = 0
+    n_prefix = teacher.n_prefix_tokens
+    H, W = cfg.scene_size, cfg.scene_size
+
+    # Convert to numpy for viz (sample_idx only)
+    full_img = imagenet_denormalize(image.cpu()).numpy()
+    teacher_np = teacher_patches.cpu().float().numpy()
+    initial_np = initial_scene.cpu().float().numpy()
+
+    scenes_np = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
+    # Strip prefix tokens and normalize local features for fair comparison
+    locals_np = [
+        teacher.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
+        .squeeze(0).cpu().float().numpy()
+        for out in outputs
+    ]
+    glimpses_np = [
+        imagenet_denormalize(out.glimpse[sample_idx].cpu()).numpy()
+        for out in outputs
+    ]
+    boxes = [vp.to_pixel_box(sample_idx, H, W) for vp in viewpoints]
+    names = [vp.name for vp in viewpoints]
+
+    fig_pca = plot_multistep_pca(
+        full_img, teacher_np, scenes_np, locals_np, glimpses_np,
+        boxes, names, cfg.scene_grid_size, cfg.glimpse_grid_size, initial_np,
+    )
+    log_figure(exp, fig_pca, f"{prefix}/pca", step)
+
+    fig_traj = plot_trajectory(full_img, boxes, names)
+    log_figure(exp, fig_traj, f"{prefix}/trajectory", step)
+
+
 def eval_and_log(
     exp: comet_ml.Experiment,
     step: int,
@@ -132,29 +182,17 @@ def eval_and_log(
 
     with torch.inference_mode():
         target = teacher.forward_norm_patches(images)
-        # Use forward_trajectory: returns (list[scene], final_hidden)
-        # scene = projected output for loss/viz (no need to call output_proj)
-        scenes, _ = avp.forward_trajectory(images, viewpoints)
-        mses = [nn.functional.mse_loss(s, target).item() for s in scenes]
-        scenes_np = [s[0].cpu().float().numpy() for s in scenes]
+        outputs, _ = avp.forward_trajectory_full(images, viewpoints)
+        mses = [nn.functional.mse_loss(out.scene, target).item() for out in outputs]
+        initial_scene = avp.output_proj(avp.hidden_tokens.expand(1, -1, -1))[0]
 
     for t, mse in enumerate(mses):
         exp.log_metric(f"val/mse_t{t}", mse, step=step)
 
-    # PCA visualization
-    teacher_np = target[0].cpu().float().numpy()
-    pca = fit_pca(teacher_np)
-    titles = [f"t={i} ({vp.name})" for i, vp in enumerate(viewpoints)]
-    fig_pca = plot_pca_grid(pca, teacher_np, scenes_np, cfg.scene_grid_size, titles)
-    log_figure(exp, fig_pca, "val/pca", step)
-
-    # Trajectory visualization
-    img_np = imagenet_denormalize(images[0].cpu()).numpy()
-    H, W = img_np.shape[:2]
-    boxes = [vp.to_pixel_box(0, H, W) for vp in viewpoints]
-    names = [vp.name for vp in viewpoints]
-    fig_traj = plot_trajectory(img_np, boxes, names)
-    log_figure(exp, fig_traj, "val/trajectory", step)
+    log_multistep_viz(
+        exp, step, "val", images[0], target[0], outputs, viewpoints,
+        initial_scene, teacher, cfg,
+    )
 
     val_loss = mses[-1]
     exp.log_metric("val/loss", val_loss, step=step)
@@ -231,7 +269,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             random_viewpoint(cfg.batch_size, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
             for _ in range(cfg.n_viewpoints_per_step)
         ]
-        # forward_loss handles the inner loop, returns averaged MSE and final hidden
         loss, final_hidden = avp.forward_loss(state.images, viewpoints, state.targets, state.hidden)
 
         if not torch.isfinite(loss):

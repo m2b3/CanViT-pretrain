@@ -150,3 +150,134 @@ def plot_pca_grid(
 
     plt.tight_layout()
     return fig
+
+
+def plot_multistep_pca(
+    full_img: NDArray[np.floating],
+    teacher: NDArray[np.floating],
+    scenes: list[NDArray[np.floating]],
+    locals_: list[NDArray[np.floating]],
+    glimpses: list[NDArray[np.floating]],
+    boxes: list[PixelBox],
+    names: list[str],
+    scene_grid_size: int,
+    glimpse_grid_size: int,
+    initial_scene: NDArray[np.floating],
+) -> Figure:
+    """Full multi-row visualization with all diagnostic columns.
+
+    Columns: Trajectory | Glimpse | Teacher | Scene | Local | Delta | Error
+
+    - Trajectory: Full image with cumulative viewpoint boxes up to time t
+    - Glimpse: Actual glimpse image at time t
+    - Teacher: PCA of teacher features (reference)
+    - Scene: PCA of scene at time t
+    - Local: PCA of glimpse backbone features at time t
+    - Delta: Spatial MSE of (scene_t - scene_{t-1}), or (scene_0 - initial) for t=0
+    - Error: Spatial MSE of (scene_t - teacher)
+
+    Args:
+        full_img: [H, W, 3] full image in [0, 1]
+        teacher: [S*S, D] teacher features
+        scenes: List of [S*S, D] scene features per timestep
+        locals_: List of [G*G, D] glimpse backbone features per timestep
+        glimpses: List of [H', W', 3] glimpse images per timestep
+        boxes: List of PixelBox in pixel coords per timestep
+        names: List of viewpoint names per timestep
+        scene_grid_size: S
+        glimpse_grid_size: G
+        initial_scene: [S*S, D] projected initial hidden (for t=0 delta)
+
+    Returns:
+        matplotlib Figure
+    """
+    n_views = len(scenes)
+    assert len(locals_) == n_views
+    assert len(glimpses) == n_views
+    assert len(boxes) == n_views
+    assert len(names) == n_views
+
+    S, G = scene_grid_size, glimpse_grid_size
+    colors = timestep_colors(n_views)
+
+    # Fit PCA on teacher
+    pca = fit_pca(teacher)
+    teacher_rgb = pca_rgb(pca, teacher, S, S)
+
+    # Precompute error maps for consistent colorbar
+    error_maps = [((s - teacher) ** 2).mean(axis=-1).reshape(S, S) for s in scenes]
+    error_vmax = max(e.max() for e in error_maps)
+
+    # Compute delta maps (scene change from previous timestep)
+    delta_maps: list[NDArray[np.floating]] = []
+    prev = initial_scene
+    for scene in scenes:
+        delta = ((scene - prev) ** 2).mean(axis=-1).reshape(S, S)
+        delta_maps.append(delta)
+        prev = scene
+
+    fig, axes = plt.subplots(n_views, 7, figsize=(28, 4 * n_views))
+    if n_views == 1:
+        axes = axes.reshape(1, -1)
+
+    for row in range(n_views):
+        scene_rgb = pca_rgb(pca, scenes[row], S, S)
+        local_rgb = pca_rgb(pca, locals_[row], G, G)
+
+        # Col 0: Trajectory - cumulative boxes up to row
+        ax = axes[row, 0]
+        ax.imshow(full_img)
+        for t in range(row + 1):
+            box = boxes[t]
+            alpha = 1.0 if t == row else 0.4
+            rect = Rectangle(
+                (box.left, box.top), box.width, box.height,
+                linewidth=2, edgecolor=colors[t], facecolor="none", alpha=alpha,
+            )
+            ax.add_patch(rect)
+            ax.plot(box.center_x, box.center_y, "o", color=colors[t], markersize=5, alpha=alpha)
+        # Draw path
+        for t in range(1, row + 1):
+            ax.plot(
+                [boxes[t - 1].center_x, boxes[t].center_x],
+                [boxes[t - 1].center_y, boxes[t].center_y],
+                "-", color=colors[t], linewidth=1.5, alpha=0.7,
+            )
+        ax.set_title(f"t={row}")
+        ax.axis("off")
+
+        # Col 1: Glimpse
+        axes[row, 1].imshow(glimpses[row])
+        axes[row, 1].set_title(f"Glimpse ({names[row]})")
+        axes[row, 1].axis("off")
+
+        # Col 2: Teacher PCA
+        axes[row, 2].imshow(teacher_rgb)
+        axes[row, 2].set_title("Teacher" if row == 0 else "")
+        axes[row, 2].axis("off")
+
+        # Col 3: Scene PCA
+        axes[row, 3].imshow(scene_rgb)
+        axes[row, 3].set_title(f"Scene t={row}")
+        axes[row, 3].axis("off")
+
+        # Col 4: Local PCA
+        axes[row, 4].imshow(local_rgb)
+        axes[row, 4].set_title(f"Local t={row}")
+        axes[row, 4].axis("off")
+
+        # Col 5: Delta
+        im_delta = axes[row, 5].imshow(delta_maps[row], cmap="viridis")
+        axes[row, 5].set_title(f"Δ t={row}")
+        axes[row, 5].axis("off")
+        fig.colorbar(im_delta, ax=axes[row, 5], fraction=0.046, pad=0.04)
+
+        # Col 6: Error
+        im_err = axes[row, 6].imshow(error_maps[row], cmap="hot", vmin=0, vmax=error_vmax)
+        mse = float(error_maps[row].mean())
+        axes[row, 6].set_title(f"Err ({mse:.4f})")
+        axes[row, 6].axis("off")
+        fig.colorbar(im_err, ax=axes[row, 6], fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    return fig

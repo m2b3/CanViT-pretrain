@@ -1,3 +1,3 @@
-from .model import AVPConfig, AVPViT
+from .model import AVPConfig, AVPViT, StepOutput
 
-__all__ = ["AVPConfig", "AVPViT"]
+__all__ = ["AVPConfig", "AVPViT", "StepOutput"]
