@@ -106,9 +106,10 @@ def test_forward_shapes():
     images = torch.randn(B, 3, 64, 64)  # scene_grid_size * patch_size = 4 * 16 = 64
     viewpoints = [Viewpoint.full_scene(B, images.device)]
 
-    scene = avp(images, viewpoints)
+    scene, hidden = avp(images, viewpoints)
 
     assert scene.shape == (B, 16, embed_dim)  # 4x4 grid
+    assert hidden.shape == (B, 16, embed_dim)  # hidden same shape
 
 
 def test_gate_init():
@@ -153,9 +154,10 @@ def test_scene_registers_output_shape_unchanged():
     images = torch.randn(B, 3, 64, 64)
     viewpoints = [Viewpoint.full_scene(B, images.device)]
 
-    scene = avp(images, viewpoints)
+    scene, hidden = avp(images, viewpoints)
 
     assert scene.shape == (B, 16, embed_dim)  # 4x4 grid, no registers
+    assert hidden.shape == (B, 16, embed_dim)
 
 
 def test_output_proj_is_always_module():
@@ -186,9 +188,10 @@ def test_multi_viewpoint_forward():
         Viewpoint.quadrant(B, images.device, 1, 1),
     ]
 
-    scene = avp(images, viewpoints)
+    scene, hidden = avp(images, viewpoints)
 
     assert scene.shape == (B, 16, embed_dim)
+    assert hidden.shape == (B, 16, embed_dim)
 
 
 def test_glimpse_size_from_backbone():
@@ -201,6 +204,7 @@ def test_glimpse_size_from_backbone():
 
 
 def test_forward_step_returns_step_output():
+    """forward_step returns StepOutput with both hidden and scene."""
     embed_dim = 64
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
@@ -214,4 +218,73 @@ def test_forward_step_returns_step_output():
 
     assert isinstance(out, StepOutput)
     assert out.local.shape == (B, 10, embed_dim)  # CLS + 3x3 glimpse grid
-    assert out.scene.shape == (B, 16, embed_dim)  # 4x4 scene grid
+    # hidden: internal state for continuation
+    assert out.hidden.shape == (B, 16, embed_dim)  # 4x4 scene grid
+    # scene: projected output for loss/viz
+    assert out.scene.shape == (B, 16, embed_dim)
+
+
+def test_forward_loss():
+    """forward_loss returns averaged MSE and final hidden."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    target = torch.randn(B, 16, embed_dim)
+    viewpoints = [
+        Viewpoint.full_scene(B, images.device),
+        Viewpoint.quadrant(B, images.device, 0, 0),
+    ]
+
+    loss, final_hidden = avp.forward_loss(images, viewpoints, target)
+
+    assert loss.shape == ()  # scalar
+    assert loss.item() >= 0  # MSE is non-negative
+    assert final_hidden.shape == (B, 16, embed_dim)
+
+
+def test_forward_trajectory():
+    """forward_trajectory returns list of projected scenes."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    viewpoints = [
+        Viewpoint.full_scene(B, images.device),
+        Viewpoint.quadrant(B, images.device, 0, 0),
+        Viewpoint.quadrant(B, images.device, 1, 1),
+    ]
+
+    scenes, final_hidden = avp.forward_trajectory(images, viewpoints)
+
+    assert len(scenes) == 3  # one per viewpoint
+    for s in scenes:
+        assert s.shape == (B, 16, embed_dim)
+    assert final_hidden.shape == (B, 16, embed_dim)
+
+
+def test_forward_reduce_custom():
+    """forward_reduce with custom reducer."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    viewpoints = [Viewpoint.full_scene(B, images.device)]
+
+    # Custom reducer that counts steps
+    def count_reducer(acc: int, h: torch.Tensor, s: torch.Tensor) -> int:
+        return acc + 1
+
+    count, final_hidden = avp.forward_reduce(images, viewpoints, count_reducer, init=0)
+
+    assert count == 1
+    assert final_hidden.shape == (B, 16, embed_dim)

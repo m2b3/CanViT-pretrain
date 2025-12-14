@@ -131,16 +131,11 @@ def eval_and_log(
 
     with torch.inference_mode():
         target = teacher.forward_norm_patches(images)
-        scene = None
-        scenes_np = []
-        mses = []
-        for vp in viewpoints:
-            out = avp.forward_step(images, vp, scene)
-            scene = out.scene
-            projected = avp.output_proj(scene)
-            mse = nn.functional.mse_loss(projected, target).item()
-            mses.append(mse)
-            scenes_np.append(projected[0].cpu().float().numpy())
+        # Use forward_trajectory: returns (list[scene], final_hidden)
+        # scene = projected output for loss/viz (no need to call output_proj)
+        scenes, _ = avp.forward_trajectory(images, viewpoints)
+        mses = [nn.functional.mse_loss(s, target).item() for s in scenes]
+        scenes_np = [s[0].cpu().float().numpy() for s in scenes]
 
     for t, mse in enumerate(mses):
         exp.log_metric(f"val/mse_t{t}", mse, step=step)
@@ -231,8 +226,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             fresh_targets = teacher.forward_norm_patches(fresh_imgs)
 
         vp = random_viewpoint(cfg.batch_size, cfg.device, cfg.min_viewpoint_scale, cfg.max_viewpoint_scale)
-        out = avp.forward_step(state.images, vp, state.scene)
-        loss = nn.functional.mse_loss(avp.output_proj(out.scene), state.targets)
+        out = avp.forward_step(state.images, vp, state.hidden)
+        # out.scene = projected output for loss (no need to call output_proj)
+        # out.hidden = internal state for continuation
+        loss = nn.functional.mse_loss(out.scene, state.targets)
 
         if not torch.isfinite(loss):
             log.warning(f"NaN/Inf loss at step {step}, pruning trial")
@@ -245,7 +242,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         optimizer.step()
         scheduler.step()
 
-        state = state.step(fresh_imgs, fresh_targets, out.scene, cfg.survival_prob, avp.scene_tokens)
+        # Use out.hidden for continuation, avp.hidden_tokens for reset
+        state = state.step(fresh_imgs, fresh_targets, out.hidden, cfg.survival_prob, avp.hidden_tokens)
 
         ema_loss_t = alpha * loss.detach() + (1 - alpha) * ema_loss_t if step > 0 else loss.detach()
 

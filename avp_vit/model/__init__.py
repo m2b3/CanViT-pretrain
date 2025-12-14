@@ -1,8 +1,9 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NamedTuple, cast, final, override
+from typing import NamedTuple, TypeVar, cast, final, override
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
@@ -11,13 +12,32 @@ from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint, extract_glimpse
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 
+# Type variable for forward_reduce accumulator
+T = TypeVar("T")
+
 
 class StepOutput(NamedTuple):
-    """Output from a single AVPViT forward step."""
+    """Output from a single AVPViT forward step.
+
+    IMPORTANT - Two scene representations with distinct purposes:
+
+    - hidden: Internal state passed between timesteps. Use this for CONTINUATION
+              (e.g., Bernoulli survival in training). This is the raw output of
+              the write attention mechanism.
+
+    - scene:  Projected output for external use. Use this for LOSS COMPUTATION
+              and VISUALIZATION. This is output_proj(hidden).
+
+    The distinction matters because:
+    1. Continuation needs the unprojected state (hidden)
+    2. Loss/viz need the projected state (scene)
+    3. output_proj may not be invertible, so you can't recover hidden from scene
+    """
 
     glimpse: Tensor  # [B, C, H, W] extracted glimpse image
     local: Tensor  # [B, N, D] local features (CLS + patches)
-    scene: Tensor  # [B, G*G, D] updated scene representation
+    hidden: Tensor  # [B, G*G, D] internal state for CONTINUATION between steps
+    scene: Tensor  # [B, G*G, D] projected output for LOSS and VISUALIZATION
 
 
 @final
@@ -43,7 +63,7 @@ class AVPViT(nn.Module):
     glimpse_size: int
     n_scene_registers: int
     scene_registers: nn.Parameter | None
-    scene_tokens: nn.Parameter
+    hidden_tokens: nn.Parameter  # Learned initial hidden state [1, G*G, D]
     scene_positions: Tensor
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
@@ -72,8 +92,8 @@ class AVPViT(nn.Module):
             self.n_scene_registers = 0
             self.scene_registers = None
 
-        # Initialize scene_tokens with randn / sqrt(embed_dim)
-        self.scene_tokens = nn.Parameter(
+        # Learned initial hidden state, initialized with randn / sqrt(embed_dim)
+        self.hidden_tokens = nn.Parameter(
             torch.randn(1, cfg.scene_grid_size**2, embed_dim) / (embed_dim**0.5)
         )
 
@@ -97,8 +117,10 @@ class AVPViT(nn.Module):
             ]
         )
 
+        device = self.hidden_tokens.device
+        assert isinstance(device, torch.device)
         pos = make_grid_positions(
-            cfg.scene_grid_size, cfg.scene_grid_size, self.scene_tokens.device, dtype=backbone.rope_dtype
+            cfg.scene_grid_size, cfg.scene_grid_size, device, dtype=backbone.rope_dtype
         )
         self.register_buffer("scene_positions", pos)
         self.scene_positions = pos
@@ -111,13 +133,13 @@ class AVPViT(nn.Module):
         else:
             self.output_proj = nn.Identity()
 
-    def _init_scene(self, B: int, scene: Tensor | None) -> Tensor:
-        """Initialize scene: use provided or expand scene_tokens, prepend registers."""
-        if scene is None:
-            scene = self.scene_tokens.expand(B, -1, -1)
+    def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
+        """Initialize hidden state: use provided or expand learned tokens, prepend registers."""
+        if hidden is None:
+            hidden = self.hidden_tokens.expand(B, -1, -1)
         if self.scene_registers is not None:
-            scene = torch.cat([self.scene_registers.expand(B, -1, -1), scene], dim=1)
-        return scene
+            hidden = torch.cat([self.scene_registers.expand(B, -1, -1), hidden], dim=1)
+        return hidden
 
     def _process_glimpse(
         self,
@@ -125,16 +147,27 @@ class AVPViT(nn.Module):
         local: Tensor,
         centers: Tensor,
         scales: Tensor,
-        scene: Tensor | None,
+        hidden: Tensor | None,
     ) -> StepOutput:
-        """Process one glimpse: read from scene, forward through backbone, write to scene."""
+        """Process one glimpse: read from hidden, forward through backbone, write to hidden.
+
+        Args:
+            glimpse: Extracted glimpse image [B, C, H, W]
+            local: Tokenized glimpse features [B, N, D]
+            centers: Viewpoint centers [B, 2]
+            scales: Viewpoint scales [B]
+            hidden: Previous hidden state [B, G*G, D] or None for fresh start
+
+        Returns:
+            StepOutput with both hidden (for continuation) and scene (for loss/viz)
+        """
         B = local.shape[0]
         H = W = self.cfg.glimpse_grid_size
         rope_dtype = self.backbone.rope_dtype
         periods = self.backbone.rope_periods
         n_reg = self.n_scene_registers
 
-        scene_t = self._init_scene(B, scene)
+        hidden_t = self._init_hidden(B, hidden)
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
         local_rope = compute_rope(local_pos, periods)
@@ -142,25 +175,37 @@ class AVPViT(nn.Module):
 
         for i in range(self.backbone.n_blocks):
             local = local + self.read_gate[i] * self.read_attn[i](
-                local, scene_t, local_rope, scene_rope
+                local, hidden_t, local_rope, scene_rope
             )
             local = self.backbone.forward_block(i, local, local_rope)
-            scene_t = scene_t + self.write_gate[i] * self.write_attn[i](
-                scene_t, local, scene_rope, local_rope
+            hidden_t = hidden_t + self.write_gate[i] * self.write_attn[i](
+                hidden_t, local, scene_rope, local_rope
             )
 
-        # Strip registers, return grid tokens only
-        return StepOutput(glimpse, local, scene_t[:, n_reg:])
+        # Strip registers, get grid tokens only
+        hidden_out = hidden_t[:, n_reg:]
+        scene_out = self.output_proj(hidden_out)
+        return StepOutput(glimpse, local, hidden_out, scene_out)
 
     def forward_step(
-        self, images: Tensor, viewpoint: Viewpoint, scene: Tensor | None = None
+        self, images: Tensor, viewpoint: Viewpoint, hidden: Tensor | None = None
     ) -> StepOutput:
-        """Single step: extract glimpse, process, return StepOutput."""
+        """Process a single viewpoint.
+
+        Args:
+            images: Input images [B, C, H, W]
+            viewpoint: Where to look in the images
+            hidden: Previous hidden state [B, G*G, D] for CONTINUATION, or None for fresh start
+
+        Returns:
+            StepOutput containing:
+            - glimpse: Extracted glimpse image
+            - local: Local features from backbone
+            - hidden: Updated hidden state (use this for CONTINUATION)
+            - scene: Projected output (use this for LOSS/VIZ)
+        """
         glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
         tokens, _, _ = self.backbone.prepare_tokens(glimpse)
-        B = tokens.shape[0]
-        if scene is None:
-            scene = self.scene_tokens.expand(B, -1, -1)
         if self.cfg.gradient_checkpointing and self.training:
             return cast(StepOutput, checkpoint(
                 self._process_glimpse,
@@ -168,32 +213,129 @@ class AVPViT(nn.Module):
                 tokens,
                 viewpoint.centers,
                 viewpoint.scales,
-                scene,
+                hidden,
                 use_reentrant=False,
             ))
-        return self._process_glimpse(glimpse, tokens, viewpoint.centers, viewpoint.scales, scene)
+        return self._process_glimpse(glimpse, tokens, viewpoint.centers, viewpoint.scales, hidden)
 
-    @override
-    def forward(self, images: Tensor, viewpoints: list[Viewpoint]) -> Tensor:
-        """Process full images through viewpoints, return final scene representation."""
-        scene: Tensor | None = None
-        for vp in viewpoints:
-            out = self.forward_step(images, vp, scene)
-            scene = out.scene
-        assert scene is not None
-        return self.output_proj(scene)
+    # ==================== General Primitive ====================
 
-    def forward_with_loss(
+    def forward_reduce(
         self,
         images: Tensor,
         viewpoints: list[Viewpoint],
-        loss_fn: Callable[[Tensor], Tensor],
-    ) -> Tensor:
-        """Stream through viewpoints, compute loss at each step, return average."""
-        scene: Tensor | None = None
-        loss_sum = torch.tensor(0.0, device=images.device)
+        reducer: Callable[[T, Tensor, Tensor], T],
+        init: T,
+        hidden: Tensor | None = None,
+    ) -> tuple[T, Tensor]:
+        """Process viewpoints sequentially, reducing with a custom function.
+
+        This is the GENERAL PRIMITIVE that all other forward methods build on.
+        It implements a functional "scan" pattern over viewpoints.
+
+        Args:
+            images: Input images [B, C, H, W]
+            viewpoints: Sequence of viewpoints to process
+            reducer: Function (accumulator, hidden, scene) -> new_accumulator
+                     - hidden: Internal state [B, G*G, D] (for custom logic if needed)
+                     - scene: Projected output [B, G*G, D] (for loss/viz)
+            init: Initial accumulator value
+            hidden: Initial hidden state [B, G*G, D] or None for fresh start
+
+        Returns:
+            (final_accumulator, final_hidden) where:
+            - final_accumulator: Result of reducing all steps
+            - final_hidden: Hidden state after last step (for CONTINUATION)
+        """
+        acc = init
         for vp in viewpoints:
-            out = self.forward_step(images, vp, scene)
-            scene = out.scene
-            loss_sum = loss_sum + loss_fn(self.output_proj(scene))
-        return loss_sum / len(viewpoints)
+            out = self.forward_step(images, vp, hidden)
+            hidden = out.hidden
+            acc = reducer(acc, out.hidden, out.scene)
+        assert hidden is not None
+        return acc, hidden
+
+    # ==================== Standard Invocations ====================
+    # These are the common patterns, centralized here to avoid errors.
+
+    def forward_loss(
+        self,
+        images: Tensor,
+        viewpoints: list[Viewpoint],
+        target: Tensor,
+        hidden: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Standard training: compute MSE loss against target at each step.
+
+        Memory-efficient: does not store intermediate scenes.
+
+        Args:
+            images: Input images [B, C, H, W]
+            viewpoints: Sequence of viewpoints to process
+            target: Target to compare against [B, G*G, D] (e.g., teacher patches)
+            hidden: Initial hidden state or None
+
+        Returns:
+            (average_loss, final_hidden) where:
+            - average_loss: Mean MSE across all viewpoints (scalar)
+            - final_hidden: For CONTINUATION in Bernoulli survival
+        """
+        def reducer(acc: Tensor, h: Tensor, s: Tensor) -> Tensor:
+            return acc + F.mse_loss(s, target)
+
+        total, final_hidden = self.forward_reduce(
+            images, viewpoints, reducer,
+            init=torch.tensor(0.0, device=images.device),
+            hidden=hidden,
+        )
+        return total / len(viewpoints), final_hidden
+
+    def forward_trajectory(
+        self,
+        images: Tensor,
+        viewpoints: list[Viewpoint],
+        hidden: Tensor | None = None,
+    ) -> tuple[list[Tensor], Tensor]:
+        """Standard visualization: collect projected scenes at each step.
+
+        Args:
+            images: Input images [B, C, H, W]
+            viewpoints: Sequence of viewpoints to process
+            hidden: Initial hidden state or None
+
+        Returns:
+            (scenes, final_hidden) where:
+            - scenes: List of projected scenes [B, G*G, D] at each timestep
+            - final_hidden: For CONTINUATION if needed
+        """
+        def reducer(acc: list[Tensor], h: Tensor, s: Tensor) -> list[Tensor]:
+            return [*acc, s]
+
+        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden)
+
+    @override
+    def forward(
+        self,
+        images: Tensor,
+        viewpoints: list[Viewpoint],
+        hidden: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Standard inference: return final projected scene.
+
+        Args:
+            images: Input images [B, C, H, W]
+            viewpoints: Sequence of viewpoints to process
+            hidden: Initial hidden state or None
+
+        Returns:
+            (final_scene, final_hidden) where:
+            - final_scene: Projected output after all viewpoints [B, G*G, D]
+            - final_hidden: For CONTINUATION if needed
+        """
+        def reducer(acc: Tensor, h: Tensor, s: Tensor) -> Tensor:
+            return s
+
+        # Use a dummy initial tensor (will be overwritten by first step)
+        dummy = torch.empty(0, device=images.device)
+        scene, final_hidden = self.forward_reduce(images, viewpoints, reducer, init=dummy, hidden=hidden)
+        return scene, final_hidden
