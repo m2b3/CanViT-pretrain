@@ -6,6 +6,7 @@ from .data import (
     generate_multi_blob_batch,
     hsv_to_rgb,
     imagenet_denormalize,
+    perlin_noise_2d,
 )
 from .viz import (
     log_figure,

@@ -2,7 +2,16 @@
 
 import torch
 
-from .data import generate_multi_blob_batch, hsv_to_rgb
+from .data import generate_multi_blob_batch, hsv_to_rgb, perlin_noise_2d
+
+
+def test_perlin_noise_shape_and_range() -> None:
+    """Perlin noise has correct shape and range."""
+    B, H, W = 4, 64, 64
+    noise = perlin_noise_2d((B, H, W), scale=16, octaves=3, persistence=0.5, device=torch.device("cpu"))
+    assert noise.shape == (B, H, W)
+    assert noise.min() >= 0
+    assert noise.max() <= 1
 
 
 def test_hsv_to_rgb() -> None:
