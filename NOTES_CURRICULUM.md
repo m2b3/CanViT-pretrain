@@ -7,49 +7,9 @@
 - ✅ `SurvivalBatch` replaces `TrainState` (commit 1226dcb)
 - ✅ `avp_vit/train/norm/PositionAwareNorm` created (commit 67508bf)
 - ✅ `avp_vit/train/curriculum/` created with formulas + CurriculumStage (commit da17552)
+- ✅ `make_curriculum_eval_viewpoints()` added (commit 43ad0fd)
 
 ## REMAINING WORK
-
-### Phase 1.4: Update viewpoint module (IN PROGRESS)
-
-Add to `avp_vit/train/viewpoint/__init__.py`:
-
-```python
-def make_curriculum_eval_viewpoints(B: int, G: int, g: int, device) -> list[Viewpoint]:
-    """Generate eval viewpoints for curriculum stage. Uses quadrant recursion."""
-    from avp_vit.train.curriculum import n_eval_viewpoints
-    n_eval = n_eval_viewpoints(G, g)
-    all_vps = [Viewpoint.full_scene(B, device)]
-
-    # Depth needed: sum of 4^i from i=0 to d = (4^(d+1)-1)/3 >= n_eval
-    max_depth = max(1, math.ceil(math.log((3 * n_eval + 1), 4)) - 1)
-
-    for depth in range(1, max_depth + 1):
-        level_vps = _quadrants_at_depth(B, depth, device)
-        random.shuffle(level_vps)
-        all_vps.extend(level_vps)
-
-    return all_vps[:n_eval]
-
-def _quadrants_at_depth(B: int, depth: int, device) -> list[Viewpoint]:
-    """Generate all 4^depth quadrants at given depth."""
-    # depth=1: 4 quadrants (scale=0.5)
-    # depth=2: 16 sub-quadrants (scale=0.25)
-    scale = 0.5 ** depth
-    n = 2 ** depth  # grid divisions per side
-    vps = []
-    for i in range(n):
-        for j in range(n):
-            # Center of cell (i,j) in [-1,1] coords
-            cx = -1 + scale + 2 * scale * j
-            cy = -1 + scale + 2 * scale * i
-            centers = torch.full((B, 2), 0.0, device=device)
-            centers[:, 0] = cx
-            centers[:, 1] = cy
-            scales = torch.full((B,), scale, device=device)
-            vps.append(Viewpoint(f"depth{depth}_{i}_{j}", centers, scales))
-    return vps
-```
 
 ### Phase 2: Restructure training script
 
