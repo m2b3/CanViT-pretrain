@@ -34,11 +34,13 @@ class Config:
             attention=AttentionConfig(write_v_expansion=2),
         )
     )
-    freeze_inner_backbone: bool = False
+    freeze_inner_backbone: bool = True
     # Grid sizes (randomly sampled each step)
     grid_sizes: tuple[int, ...] = (16, 32, 64)
     # Training
-    n_viewpoints_per_step: int = 2  # Inner loop viewpoints (>=2 for length generalization)
+    n_viewpoints_per_step: int = (
+        2  # Inner loop viewpoints (>=2 for length generalization)
+    )
     n_steps: int = 200000
     batch_size: int = 32  # Max batch size (at max grid size)
     num_workers: int = 8
