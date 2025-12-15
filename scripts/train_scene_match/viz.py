@@ -171,7 +171,7 @@ def save_checkpoint(
     path: Path,
     exp: comet_ml.Experiment,
     step: int,
-    val_loss: float,
+    train_loss: float,
     current_grid_size: int,
 ) -> None:
     """Save checkpoint with model and all norm states."""
@@ -184,5 +184,5 @@ def save_checkpoint(
     }
     torch.save(checkpoint, path)
     size_mb = path.stat().st_size / (1024 * 1024)
-    log.info(f"Saved checkpoint: {path} ({size_mb:.1f} MB), val_loss={val_loss:.4f}")
-    exp.log_metric("ckpt/val_loss", val_loss, step=step)
+    log.info(f"Saved checkpoint: {path} ({size_mb:.1f} MB), train_loss={train_loss:.4f}")
+    exp.log_metric("ckpt/train_loss", train_loss, step=step)

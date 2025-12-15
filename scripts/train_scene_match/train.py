@@ -134,9 +134,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     scheduler = create_scheduler(optimizer, cfg)
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
 
-    ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
-    best_val_loss = float("inf")
-    ckpt_val_loss = float("inf")
+    ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
     def make_target_fn(norm: PositionAwareNorm) -> Callable[[Tensor], Tensor]:
         def compute_targets(images: Tensor) -> Tensor:
@@ -257,15 +255,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 exp, step, avp, teacher, compute_targets, val_images, norm, f"grid{G}/val"
             )
             norm.train()
-
             exp.log_metric("val/loss", val_loss, step=step)
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-            if step % cfg.ckpt_every == 0 and best_val_loss < ckpt_val_loss:
-                save_checkpoint(avp, norms, ckpt_path, exp, step, best_val_loss, G)
-                ckpt_val_loss = best_val_loss
-            trial.report(val_loss, step)
+            if step % cfg.ckpt_every == 0:
+                save_checkpoint(avp, norms, ckpt_path, exp, step, ema_loss_t.item(), G)
+
+            trial.report(ema_loss_t.item(), step)
             if trial.should_prune():
                 exp.end()
                 raise optuna.TrialPruned()
@@ -286,26 +281,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             local_init,
         )
 
-    # Final evaluation (use max grid size)
-    G = cfg.max_grid_size
-    avp.set_scene_grid_size(G)
-    norm = norms[G]
-    val_loader = val_loaders[G]
-    compute_targets = make_target_fn(norm)
-    val_images = val_loader.next_batch().to(cfg.device)
-    norm.eval()
-    val_loss = eval_and_log(
-        exp, cfg.n_steps, avp, teacher, compute_targets, val_images, norm, f"grid{G}/val"
-    )
-    norm.train()
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-    if best_val_loss < ckpt_val_loss:
-        save_checkpoint(avp, norms, ckpt_path, exp, cfg.n_steps, best_val_loss, G)
+    # Final checkpoint
+    save_checkpoint(avp, norms, ckpt_path, exp, cfg.n_steps, ema_loss_t.item(), cfg.max_grid_size)
 
-    log.info(
-        f"Final: train_ema={ema_loss_t.item():.4f}, val={val_loss:.4f}, "
-        f"best={best_val_loss:.4f}"
-    )
+    log.info(f"Final: train_ema={ema_loss_t.item():.4f}")
     exp.end()
-    return best_val_loss
+    return ema_loss_t.item()
