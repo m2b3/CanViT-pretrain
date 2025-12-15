@@ -265,6 +265,8 @@ class ViewpointPolicy(nn.Module):
         min_scale: float = 0.25,
         max_scale: float = 1.0,
         noise_std: float = 0.1,
+        center_head_init_scale: float = 0.1,
+        scale_head_init_scale: float = 0.01,
         fixed_scale: float | None = None,
     ) -> None:
         super().__init__()
@@ -293,13 +295,12 @@ class ViewpointPolicy(nn.Module):
         self.center_head = nn.Linear(mlp_hidden, 2)
         self.scale_head = nn.Linear(mlp_hidden, 1)
 
-        self._init_weights()
+        self._init_weights(center_head_init_scale, scale_head_init_scale)
 
-    def _init_weights(self) -> None:
-        # Small init on heads for stable start near origin
-        nn.init.uniform_(self.center_head.weight, -0.1, 0.1)
+    def _init_weights(self, center_init: float, scale_init: float) -> None:
+        nn.init.uniform_(self.center_head.weight, -center_init, center_init)
         nn.init.zeros_(self.center_head.bias)
-        nn.init.uniform_(self.scale_head.weight, -0.01, 0.01)
+        nn.init.uniform_(self.scale_head.weight, -scale_init, scale_init)
         nn.init.zeros_(self.scale_head.bias)
 
     def forward(
@@ -792,6 +793,8 @@ class Config:
     policy_proj_dim: int = 4
     policy_mlp_hidden: int = 256
     policy_noise_std: float = 0.1
+    policy_center_head_init_scale: float = 0.1
+    policy_scale_head_init_scale: float = 0.01
     policy_fixed_scale: float | None = None
     # Training
     n_steps_per_episode: int = 4
@@ -991,6 +994,8 @@ def train(cfg: Config) -> None:
         min_scale=cfg.min_viewpoint_scale,
         max_scale=cfg.max_viewpoint_scale,
         noise_std=cfg.policy_noise_std,
+        center_head_init_scale=cfg.policy_center_head_init_scale,
+        scale_head_init_scale=cfg.policy_scale_head_init_scale,
         fixed_scale=cfg.policy_fixed_scale,
     ).to(cfg.device)
     log.info(f"Policy params: {count_parameters(policy):,}")
