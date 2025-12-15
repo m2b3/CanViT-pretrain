@@ -198,12 +198,10 @@ class AVPViT(nn.Module):
             self.scene_input_norm = nn.Identity()
 
         if cfg.use_output_proj:
-            self.output_proj = nn.Linear(embed_dim, embed_dim)
-            # Scale weights so output matches normalized target scale (std~1, norm~sqrt(D))
-            # Input has std~1/sqrt(D), default Linear preserves this, we need sqrt(D) boost
-            with torch.no_grad():
-                self.output_proj.weight.mul_(embed_dim**0.5)
-                self.output_proj.bias.zero_()
+            self.output_proj = nn.Sequential(
+                nn.Linear(embed_dim, embed_dim),
+                nn.LayerNorm(embed_dim),
+            )
         else:
             self.output_proj = nn.Identity()
 

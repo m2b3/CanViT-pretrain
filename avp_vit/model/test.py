@@ -363,7 +363,7 @@ def test_output_proj_is_always_module():
     avp_yes = AVPViT(backbone, cfg_with_proj)
 
     assert isinstance(avp_no.output_proj, torch.nn.Identity)
-    assert isinstance(avp_yes.output_proj, torch.nn.Linear)
+    assert isinstance(avp_yes.output_proj, torch.nn.Sequential)
 
 
 def test_multi_viewpoint_forward():
