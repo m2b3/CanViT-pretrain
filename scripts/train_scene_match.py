@@ -40,30 +40,7 @@ from avp_vit.train import (
 )
 
 
-class TargetNorm(torch.nn.Module):
-    """BatchNorm2d wrapper for patch features [B, N, D] -> [B, D, H, W].
-
-    Collects running statistics during training (train mode).
-    Uses running statistics during eval (eval mode).
-    No trainable parameters (requires_grad=False).
-    """
-
-    def __init__(self, embed_dim: int, grid_size: int) -> None:
-        super().__init__()
-        self.grid_size = grid_size
-        self.bn = torch.nn.BatchNorm2d(embed_dim, affine=False)
-        self.requires_grad_(False)
-
-    def forward(self, x: Tensor) -> Tensor:
-        B, N, D = x.shape
-        G = self.grid_size
-        assert N == G * G
-        x = x.transpose(1, 2).reshape(B, D, G, G)
-        x = self.bn(x)
-        return x.reshape(B, D, N).transpose(1, 2)
-
-
-LOSS_FN = mse_loss  # Change to l1_loss for L1
+LOSS_FN = l1_loss
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -171,18 +148,19 @@ def viz_and_log(
     viewpoints: list[Viewpoint],
     target: Tensor,
     hidden: Tensor | None,
-) -> list[float]:
+) -> tuple[list[float], list[float]]:
     """Run forward trajectory and log visualization.
 
     This is the core visualization function used by both validation and training viz.
-    Returns per-step MSEs (one per viewpoint).
+    Returns (l1_losses, mse_losses) per timestep.
     """
     assert isinstance(avp.backbone, DINOv3Backbone)
     avp_backbone = avp.backbone
 
     with torch.inference_mode():
         outputs, _, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
-        losses = [LOSS_FN(out.scene, target).item() for out in outputs]
+        l1_losses = [l1_loss(out.scene, target).item() for out in outputs]
+        mse_losses = [mse_loss(out.scene, target).item() for out in outputs]
 
         # Initial scene from hidden (or spatial_init if None)
         if hidden is not None:
@@ -241,7 +219,7 @@ def viz_and_log(
     fig_traj = plot_trajectory(full_img, boxes, names)
     log_figure(exp, fig_traj, f"{prefix}/trajectory", step)
 
-    return losses
+    return l1_losses, mse_losses
 
 
 def eval_and_log(
@@ -249,28 +227,26 @@ def eval_and_log(
     step: int,
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    target_norm: TargetNorm,
     images: Tensor,
 ) -> float:
-    """Evaluate on one batch with fixed viewpoints. Returns final MSE."""
+    """Evaluate on one batch with fixed viewpoints. Returns final L1 loss."""
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
-    target_norm.eval()
     with torch.inference_mode():
-        target = target_norm(teacher.forward_norm_patches(images))
-    target_norm.train()
+        target = teacher.forward_norm_patches(images)
 
-    losses = viz_and_log(
+    l1_losses, mse_losses = viz_and_log(
         exp, step, "val", avp, teacher, images, viewpoints, target, None
     )
 
-    for t, loss in enumerate(losses):
-        exp.log_metric(f"val/loss_t{t}", loss, step=step)
+    for t, (l1, mse) in enumerate(zip(l1_losses, mse_losses, strict=True)):
+        exp.log_metric(f"val/l1_t{t}", l1, step=step)
+        exp.log_metric(f"val/mse_t{t}", mse, step=step)
 
-    val_loss = losses[-1]
-    exp.log_metric("val/loss", val_loss, step=step)
-    return val_loss
+    exp.log_metric("val/l1", l1_losses[-1], step=step)
+    exp.log_metric("val/mse", mse_losses[-1], step=step)
+    return l1_losses[-1]
 
 
 def save_checkpoint(
@@ -307,10 +283,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     avp = create_avp(teacher, cfg)
     if cfg.compile:
         compile_avp(avp)
-
-    # Target normalization: BatchNorm2d to standardize teacher features
-    # Collects running stats in train mode, uses them in eval mode
-    target_norm = TargetNorm(teacher.embed_dim, cfg.avp.scene_grid_size).to(cfg.device)
 
     # Fresh ratio: only load/compute teacher for this many images per step
     fresh_count = max(1, int(cfg.fresh_ratio * cfg.batch_size))
@@ -371,7 +343,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     # Initial eval
     log.info("Running initial validation...")
     val_images = val_loader.next_batch().to(cfg.device)
-    val_loss = eval_and_log(exp, 0, avp, teacher, target_norm, val_images)
+    val_loss = eval_and_log(exp, 0, avp, teacher, val_images)
     log.info(f"Initial val_loss: {val_loss:.4f}")
     save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
     best_val_loss = val_loss
@@ -385,7 +357,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             batch = train_loader.next_batch().to(cfg.device)
             init_imgs_list.append(batch)
             raw_targets = teacher.forward_norm_patches(batch)
-            init_targets_list.append(target_norm(raw_targets))
+            init_targets_list.append(raw_targets)
     init_imgs = torch.cat(init_imgs_list, dim=0)[: cfg.batch_size]
     init_targets = torch.cat(init_targets_list, dim=0)[: cfg.batch_size]
     hidden_init_full = avp._init_hidden(cfg.batch_size, None)
@@ -406,7 +378,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         # Load only fresh_count images (the speedup!)
         fresh_imgs = train_loader.next_batch().to(cfg.device)
         with torch.no_grad():
-            fresh_targets = target_norm(teacher.forward_norm_patches(fresh_imgs))
+            fresh_targets = teacher.forward_norm_patches(fresh_imgs)
 
         # Inner loop: multiple viewpoints per optimizer step
         viewpoints = [
@@ -458,7 +430,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         if step > 0 and step % cfg.val_every == 0:
             # Training viz: actual state, viewpoints, targets (BEFORE state update)
-            viz_and_log(
+            train_l1, train_mse = viz_and_log(
                 exp,
                 step,
                 "train",
@@ -469,10 +441,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 state.targets,
                 state.hidden,
             )
+            exp.log_metric("train/viz_l1", train_l1[-1], step=step)
+            exp.log_metric("train/viz_mse", train_mse[-1], step=step)
 
             # Validation viz: fresh batch, fixed viewpoints
             val_images = val_loader.next_batch().to(cfg.device)
-            val_loss = eval_and_log(exp, step, avp, teacher, target_norm, val_images)
+            val_loss = eval_and_log(exp, step, avp, teacher, val_images)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
             if step % cfg.ckpt_every == 0 and best_val_loss < ckpt_val_loss:
@@ -500,7 +474,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         )
 
     val_images = val_loader.next_batch().to(cfg.device)
-    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, target_norm, val_images)
+    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_images)
     if val_loss < best_val_loss:
         best_val_loss = val_loss
     if best_val_loss < ckpt_val_loss:
