@@ -1014,6 +1014,12 @@ def train(cfg: Config) -> None:
 
         optimizer.zero_grad()
         loss.backward()
+
+        # Compute grad norms BEFORE clipping (only at log steps to avoid overhead)
+        grad_norms = None
+        if step % cfg.log_every == 0:
+            grad_norms = compute_policy_grad_norms(policy)
+
         grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.grad_clip)
         optimizer.step()
         scheduler.step()
@@ -1022,8 +1028,7 @@ def train(cfg: Config) -> None:
         ema_loss = loss.detach() if step == 0 else alpha * loss.detach() + (1 - alpha) * ema_loss
 
         if step % cfg.log_every == 0:
-            # Only sync here at logging time
-            grad_norms = compute_policy_grad_norms(policy)
+            assert grad_norms is not None
             assert first_stats is not None
             policy_stats = summarize_policy_stats(first_stats)
 
