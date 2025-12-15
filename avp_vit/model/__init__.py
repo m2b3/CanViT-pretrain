@@ -58,7 +58,6 @@ class AVPConfig:
     use_local_temporal: bool = False  # Temporal gating on local stream across glimpses
     use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
     use_scene_input_norm: bool = False  # LayerNorm on hidden at start of each timestep
-    use_scene_temporal_gate: bool = False  # Gated residual for recurrence stability
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
 
@@ -89,8 +88,8 @@ class AVPViT(nn.Module):
     local_init: nn.Parameter | None  # Learned initial local state [1, N, D]
     local_temporal_norm: nn.LayerNorm | None
     local_temporal_gate: nn.Parameter | None
-    # Scene temporal gating (when use_scene_temporal_gate=True)
-    scene_temporal_gate: nn.Parameter | None
+    # Scene temporal gating: hidden = base + gate * (prev_hidden - base)
+    scene_temporal_gate: nn.Parameter
 
     @property
     def glimpse_size(self) -> int:
@@ -220,10 +219,7 @@ class AVPViT(nn.Module):
 
         # Scene temporal gating: hidden = base + gate * (prev_hidden - base)
         # At init (gate≈0), each timestep starts from base, enabling stable single-step learning
-        if cfg.use_scene_temporal_gate:
-            self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), cfg.temporal_gate_init))
-        else:
-            self.scene_temporal_gate = None
+        self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), cfg.temporal_gate_init))
 
     def set_scene_grid_size(self, new_size: int) -> None:
         """Update scene grid size for curriculum. Recomputes scene_positions buffer."""
@@ -246,10 +242,10 @@ class AVPViT(nn.Module):
         return spatial
 
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
-        """Initialize hidden state with optional gated residual.
+        """Initialize hidden state with gated residual.
 
-        When use_scene_temporal_gate=True:
-            hidden = base + gate * (prev_hidden - base)
+        hidden = base + gate * (prev_hidden - base)
+
         At init (gate≈0), each timestep starts from base regardless of prev_hidden.
         This enables stable single-step learning before recurrence kicks in.
 
@@ -258,10 +254,7 @@ class AVPViT(nn.Module):
         base = self._get_base_hidden(B)
         if hidden is None:
             return base
-        if self.scene_temporal_gate is not None:
-            residual = hidden - base
-            return base + self.scene_temporal_gate * residual
-        return hidden
+        return base + self.scene_temporal_gate * (hidden - base)
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
         """Extract spatial tokens from hidden state.
