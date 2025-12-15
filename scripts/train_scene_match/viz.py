@@ -41,8 +41,12 @@ def viz_and_log(
     target: Tensor,
     hidden: Tensor | None,
     target_norm: PositionAwareNorm | None = None,
+    show_hidden: bool = True,
 ) -> tuple[list[float], list[float]]:
     """Run forward trajectory and log visualization.
+
+    Args:
+        show_hidden: If True, show raw hidden spatial column in PCA plot.
 
     Returns (l1_losses, mse_losses) per timestep.
     """
@@ -59,9 +63,10 @@ def viz_and_log(
 
         # Initial scene from hidden (or base hidden if None)
         if hidden is not None:
-            initial_scene = avp.compute_scene(hidden[0:1])[0]
+            initial_hidden_full = hidden[0:1]
         else:
-            initial_scene = avp.compute_scene(avp._get_base_hidden(1))[0]
+            initial_hidden_full = avp._get_base_hidden(1)
+        initial_scene = avp.compute_scene(initial_hidden_full)[0]
 
         # Prepare viz data for first sample
         sample_idx = 0
@@ -73,6 +78,17 @@ def viz_and_log(
         initial_np = initial_scene.cpu().float().numpy()
 
         scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
+
+        # Raw hidden spatials (before output_proj)
+        if show_hidden:
+            initial_hidden_spatial = avp.get_spatial(initial_hidden_full)[0].cpu().float().numpy()
+            hidden_spatials = [
+                avp.get_spatial(out.hidden[sample_idx : sample_idx + 1])[0].cpu().float().numpy()
+                for out in outputs
+            ]
+        else:
+            initial_hidden_spatial = None
+            hidden_spatials = None
 
         # Local features - normalize with interpolated stats if available
         locals_avp_raw = [
@@ -120,6 +136,8 @@ def viz_and_log(
         avp.cfg.scene_grid_size,
         avp.cfg.glimpse_grid_size,
         initial_np,
+        hidden_spatials=hidden_spatials,
+        initial_hidden_spatial=initial_hidden_spatial,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 

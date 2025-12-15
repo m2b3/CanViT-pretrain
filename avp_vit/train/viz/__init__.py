@@ -164,19 +164,22 @@ def plot_multistep_pca(
     scene_grid_size: int,
     glimpse_grid_size: int,
     initial_scene: NDArray[np.floating],
+    hidden_spatials: list[NDArray[np.floating]] | None = None,
+    initial_hidden_spatial: NDArray[np.floating] | None = None,
 ) -> Figure:
     """Full multi-row visualization with all diagnostic columns.
 
     Row 0 = "init": learned spatial_init projected through output_proj, BEFORE any glimpses
     Row 1+ = "t=0, t=1, ...": scene state AFTER processing each glimpse
 
-    Columns: Trajectory | Glimpse | Teacher | Scene | Scene (self) | Local (AVP) | Local (Teacher) | Delta | Error
+    Columns: Trajectory | Glimpse | Teacher | Scene | Scene (self) | Hidden (self) | Local (AVP) | Local (Teacher) | Delta | Error
 
     - Trajectory: Full image with cumulative viewpoint boxes
     - Glimpse: Actual glimpse image (empty for init row)
     - Teacher: PCA of teacher features (reference)
     - Scene: PCA of scene representation (using teacher PCA)
     - Scene (self): PCA of scene representation (using final scene's PCA)
+    - Hidden (self): PCA of raw hidden spatial (before output_proj, using own PCA) - optional
     - Local (AVP): PCA of glimpse features from AVP's TRAINABLE backbone
     - Local (Teacher): PCA of glimpse features from FROZEN teacher backbone
     - Delta: Spatial MSE change from previous row
@@ -199,6 +202,8 @@ def plot_multistep_pca(
         scene_grid_size: S
         glimpse_grid_size: G
         initial_scene: [S*S, D] projected initial hidden (BEFORE any glimpses)
+        hidden_spatials: Optional list of [S*S, D] raw hidden spatial per timestep (before output_proj)
+        initial_hidden_spatial: Optional [S*S, D] raw initial hidden spatial
 
     Returns:
         matplotlib Figure
@@ -209,6 +214,11 @@ def plot_multistep_pca(
     assert len(glimpses) == n_views
     assert len(boxes) == n_views
     assert len(names) == n_views
+
+    show_hidden = hidden_spatials is not None
+    if show_hidden:
+        assert len(hidden_spatials) == n_views
+        assert initial_hidden_spatial is not None
 
     S, G = scene_grid_size, glimpse_grid_size
     n_rows = n_views + 1  # +1 for init row
@@ -221,6 +231,15 @@ def plot_multistep_pca(
     initial_rgb = pca_rgb(pca, initial_scene, S, S)
     initial_rgb_self = pca_rgb(pca_self, initial_scene, S, S)
 
+    # Hidden PCA (optional)
+    if show_hidden:
+        assert hidden_spatials is not None and initial_hidden_spatial is not None
+        pca_hidden = fit_pca(hidden_spatials[-1])
+        initial_hidden_rgb = pca_rgb(pca_hidden, initial_hidden_spatial, S, S)
+    else:
+        pca_hidden = None
+        initial_hidden_rgb = None
+
     # Precompute error maps (including initial)
     initial_error = ((initial_scene - teacher) ** 2).mean(axis=-1).reshape(S, S)
     error_maps = [initial_error] + [((s - teacher) ** 2).mean(axis=-1).reshape(S, S) for s in scenes]
@@ -228,7 +247,6 @@ def plot_multistep_pca(
 
     # Compute delta maps
     delta_maps: list[NDArray[np.floating]] = []
-    # Init row has no delta (or we could show zeros)
     delta_maps.append(np.zeros((S, S)))
     prev = initial_scene
     for scene in scenes:
@@ -236,52 +254,72 @@ def plot_multistep_pca(
         delta_maps.append(delta)
         prev = scene
 
-    n_cols = 9  # Trajectory | Glimpse | Teacher | Scene | Scene(self) | Local(AVP) | Local(Teacher) | Delta | Error
+    # Column indices (adjust based on whether hidden column is shown)
+    # Base: Trajectory | Glimpse | Teacher | Scene | Scene/self | [Hidden/self] | Local(AVP) | Local(Teacher) | Delta | Error
+    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE, C_SCENE_SELF = 0, 1, 2, 3, 4
+    c = 5
+    C_HIDDEN = c if show_hidden else None
+    if show_hidden:
+        c += 1
+    C_LOCAL_AVP, C_LOCAL_TEACHER, C_DELTA, C_ERROR = c, c + 1, c + 2, c + 3
+    n_cols = c + 4
+
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
 
     # Row 0: Initial state (before any glimpses)
     row = 0
-    axes[row, 0].imshow(full_img)
-    axes[row, 0].set_title("init")
-    axes[row, 0].axis("off")
+    axes[row, C_TRAJ].imshow(full_img)
+    axes[row, C_TRAJ].set_title("init")
+    axes[row, C_TRAJ].axis("off")
 
-    axes[row, 1].axis("off")  # No glimpse yet
-    axes[row, 1].set_title("(no glimpse)")
+    axes[row, C_GLIMPSE].axis("off")
+    axes[row, C_GLIMPSE].set_title("(no glimpse)")
 
-    axes[row, 2].imshow(teacher_rgb)
-    axes[row, 2].set_title("Teacher")
-    axes[row, 2].axis("off")
+    axes[row, C_TEACHER].imshow(teacher_rgb)
+    axes[row, C_TEACHER].set_title("Teacher")
+    axes[row, C_TEACHER].axis("off")
 
-    axes[row, 3].imshow(initial_rgb)
-    axes[row, 3].set_title("Scene (init)")
-    axes[row, 3].axis("off")
+    axes[row, C_SCENE].imshow(initial_rgb)
+    axes[row, C_SCENE].set_title("Scene (init)")
+    axes[row, C_SCENE].axis("off")
 
-    axes[row, 4].imshow(initial_rgb_self)
-    axes[row, 4].set_title("Scene/self (init)")
-    axes[row, 4].axis("off")
+    axes[row, C_SCENE_SELF].imshow(initial_rgb_self)
+    axes[row, C_SCENE_SELF].set_title("Scene/self (init)")
+    axes[row, C_SCENE_SELF].axis("off")
 
-    axes[row, 5].axis("off")  # No local yet
-    axes[row, 6].axis("off")  # No local yet
+    if show_hidden:
+        assert C_HIDDEN is not None and initial_hidden_rgb is not None
+        axes[row, C_HIDDEN].imshow(initial_hidden_rgb)
+        axes[row, C_HIDDEN].set_title("Hidden/self (init)")
+        axes[row, C_HIDDEN].axis("off")
 
-    axes[row, 7].axis("off")  # No delta for init
-    axes[row, 7].set_title("(no Δ)")
+    axes[row, C_LOCAL_AVP].axis("off")
+    axes[row, C_LOCAL_TEACHER].axis("off")
 
-    im_err = axes[row, 8].imshow(error_maps[0], cmap="hot", vmin=0, vmax=error_vmax)
+    axes[row, C_DELTA].axis("off")
+    axes[row, C_DELTA].set_title("(no Δ)")
+
+    im_err = axes[row, C_ERROR].imshow(error_maps[0], cmap="hot", vmin=0, vmax=error_vmax)
     mse = float(error_maps[0].mean())
-    axes[row, 8].set_title(f"Err ({mse:.4f})")
-    axes[row, 8].axis("off")
-    fig.colorbar(im_err, ax=axes[row, 8], fraction=0.046, pad=0.04)
+    axes[row, C_ERROR].set_title(f"Err ({mse:.4f})")
+    axes[row, C_ERROR].axis("off")
+    fig.colorbar(im_err, ax=axes[row, C_ERROR], fraction=0.046, pad=0.04)
 
     # Rows 1+: After each glimpse (t=0, t=1, ...)
     for t in range(n_views):
         row = t + 1
         scene_rgb = pca_rgb(pca, scenes[t], S, S)
         scene_rgb_self = pca_rgb(pca_self, scenes[t], S, S)
+        if show_hidden:
+            assert pca_hidden is not None and hidden_spatials is not None
+            hidden_rgb = pca_rgb(pca_hidden, hidden_spatials[t], S, S)
+        else:
+            hidden_rgb = None
         local_avp_rgb = pca_rgb(pca, locals_avp[t], G, G)
         local_teacher_rgb = pca_rgb(pca, locals_teacher[t], G, G)
 
-        # Col 0: Trajectory - cumulative boxes up to t
-        ax = axes[row, 0]
+        # Col: Trajectory - cumulative boxes up to t
+        ax = axes[row, C_TRAJ]
         ax.imshow(full_img)
         for i in range(t + 1):
             box = boxes[i]
@@ -301,47 +339,54 @@ def plot_multistep_pca(
         ax.set_title(f"t={t}")
         ax.axis("off")
 
-        # Col 1: Glimpse
-        axes[row, 1].imshow(glimpses[t])
-        axes[row, 1].set_title(f"Glimpse ({names[t]})")
-        axes[row, 1].axis("off")
+        # Col: Glimpse
+        axes[row, C_GLIMPSE].imshow(glimpses[t])
+        axes[row, C_GLIMPSE].set_title(f"Glimpse ({names[t]})")
+        axes[row, C_GLIMPSE].axis("off")
 
-        # Col 2: Teacher PCA
-        axes[row, 2].imshow(teacher_rgb)
-        axes[row, 2].axis("off")
+        # Col: Teacher PCA
+        axes[row, C_TEACHER].imshow(teacher_rgb)
+        axes[row, C_TEACHER].axis("off")
 
-        # Col 3: Scene PCA (teacher basis)
-        axes[row, 3].imshow(scene_rgb)
-        axes[row, 3].set_title(f"Scene t={t}")
-        axes[row, 3].axis("off")
+        # Col: Scene PCA (teacher basis)
+        axes[row, C_SCENE].imshow(scene_rgb)
+        axes[row, C_SCENE].set_title(f"Scene t={t}")
+        axes[row, C_SCENE].axis("off")
 
-        # Col 4: Scene PCA (self basis - final scene)
-        axes[row, 4].imshow(scene_rgb_self)
-        axes[row, 4].set_title(f"Scene/self t={t}" if t == 0 else "")
-        axes[row, 4].axis("off")
+        # Col: Scene PCA (self basis - final scene)
+        axes[row, C_SCENE_SELF].imshow(scene_rgb_self)
+        axes[row, C_SCENE_SELF].set_title("Scene/self" if t == 0 else "")
+        axes[row, C_SCENE_SELF].axis("off")
 
-        # Col 5: Local (AVP) - from TRAINABLE backbone
-        axes[row, 5].imshow(local_avp_rgb)
-        axes[row, 5].set_title(f"Local AVP t={t}" if t == 0 else "")
-        axes[row, 5].axis("off")
+        # Col: Hidden PCA (self basis - final hidden)
+        if show_hidden:
+            assert C_HIDDEN is not None and hidden_rgb is not None
+            axes[row, C_HIDDEN].imshow(hidden_rgb)
+            axes[row, C_HIDDEN].set_title("Hidden/self" if t == 0 else "")
+            axes[row, C_HIDDEN].axis("off")
 
-        # Col 6: Local (Teacher) - from FROZEN teacher
-        axes[row, 6].imshow(local_teacher_rgb)
-        axes[row, 6].set_title(f"Local Teacher t={t}" if t == 0 else "")
-        axes[row, 6].axis("off")
+        # Col: Local (AVP) - from TRAINABLE backbone
+        axes[row, C_LOCAL_AVP].imshow(local_avp_rgb)
+        axes[row, C_LOCAL_AVP].set_title("Local AVP" if t == 0 else "")
+        axes[row, C_LOCAL_AVP].axis("off")
 
-        # Col 7: Delta
-        im_delta = axes[row, 7].imshow(delta_maps[row], cmap="viridis")
-        axes[row, 7].set_title(f"Δ t={t}")
-        axes[row, 7].axis("off")
-        fig.colorbar(im_delta, ax=axes[row, 7], fraction=0.046, pad=0.04)
+        # Col: Local (Teacher) - from FROZEN teacher
+        axes[row, C_LOCAL_TEACHER].imshow(local_teacher_rgb)
+        axes[row, C_LOCAL_TEACHER].set_title("Local Teacher" if t == 0 else "")
+        axes[row, C_LOCAL_TEACHER].axis("off")
 
-        # Col 8: Error
-        im_err = axes[row, 8].imshow(error_maps[row], cmap="hot", vmin=0, vmax=error_vmax)
+        # Col: Delta
+        im_delta = axes[row, C_DELTA].imshow(delta_maps[row], cmap="viridis")
+        axes[row, C_DELTA].set_title(f"Δ t={t}")
+        axes[row, C_DELTA].axis("off")
+        fig.colorbar(im_delta, ax=axes[row, C_DELTA], fraction=0.046, pad=0.04)
+
+        # Col: Error
+        im_err = axes[row, C_ERROR].imshow(error_maps[row], cmap="hot", vmin=0, vmax=error_vmax)
         mse = float(error_maps[row].mean())
-        axes[row, 8].set_title(f"Err ({mse:.4f})")
-        axes[row, 8].axis("off")
-        fig.colorbar(im_err, ax=axes[row, 8], fraction=0.046, pad=0.04)
+        axes[row, C_ERROR].set_title(f"Err ({mse:.4f})")
+        axes[row, C_ERROR].axis("off")
+        fig.colorbar(im_err, ax=axes[row, C_ERROR], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     return fig
