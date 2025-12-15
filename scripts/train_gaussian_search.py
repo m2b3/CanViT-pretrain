@@ -928,9 +928,8 @@ def evaluate_policy(
         final_vp = viewpoints[-1]
         final_dist = dists_t[-1].item()
 
-        # Also run stochastic to compare scales (using fresh context)
-        ctx_fresh = policy.embed_context(target_colors)
-        vp_noised, stats_noised = policy(ctx_fresh, deterministic=False)
+        # Also run stochastic to compare scales (using final context_out)
+        vp_noised, stats_noised = policy(ctx_for_policy, deterministic=False)
         scales_noised = stats_noised["scale"]
 
         # Log per-timestep distance
