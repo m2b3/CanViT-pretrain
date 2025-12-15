@@ -9,6 +9,7 @@ Key formulas:
 - fresh_ratio = n_viewpoints_per_step / n_eval
 """
 
+import logging
 from dataclasses import dataclass
 
 
@@ -110,10 +111,8 @@ def create_curriculum_stage(
     )
 
 
-def log_curriculum_stage(stage: CurriculumStage, logger: "logging.Logger") -> None:
+def log_curriculum_stage(stage: CurriculumStage, logger: logging.Logger) -> None:
     """Log curriculum stage configuration with all computed values."""
-    import logging
-
     assert isinstance(logger, logging.Logger)
     logger.info(
         f"Stage G={stage.scene_grid_size} ({stage.n_scene_tokens} scene tokens):"

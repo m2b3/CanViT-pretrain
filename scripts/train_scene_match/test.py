@@ -10,7 +10,8 @@ def test_config_defaults() -> None:
     """Config defaults are valid."""
     cfg = Config()
     assert cfg.max_grid_size == 64
-    assert cfg.steps_per_stage == cfg.n_steps // len(cfg.grid_sizes)
+    assert cfg.warmup_steps == int(cfg.n_steps * cfg.warmup_ratio)
+    assert cfg.main_training_steps == cfg.n_steps - cfg.warmup_steps
 
 
 def test_curriculum_stages_creation() -> None:

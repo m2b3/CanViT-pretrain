@@ -23,9 +23,16 @@ def main() -> None:
     log.info("=" * 60)
     log.info(f"Config: {cfg}")
     log.info(f"Device: {cfg.device}")
-    log.info(f"Curriculum grid sizes: {cfg.grid_sizes}")
-    log.info(f"Steps per stage: {cfg.steps_per_stage}")
-    log.info(f"Total steps: {cfg.n_steps}")
+    log.info(f"Total steps: {cfg.n_steps:,}")
+
+    # Log schedule
+    log.info(f"WARMUP PHASE: {cfg.warmup_steps:,} steps (largest→smallest, mini LR cycles)")
+    log.info(f"MAIN TRAINING: {cfg.main_training_steps:,} steps (smallest→largest, cosine decay)")
+    log.info("Schedule:")
+    for phase, G, start, end in cfg.get_schedule():
+        phase_label = "warmup" if phase == "warmup" else "main  "
+        log.info(f"  [{phase_label}] G={G}: steps {start:,} - {end:,}")
+
     log.info("=" * 60)
 
     def objective(trial: optuna.Trial) -> float:

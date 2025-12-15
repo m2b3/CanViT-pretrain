@@ -31,8 +31,8 @@ class Config:
         )
     )
     freeze_inner_backbone: bool = False
-    # Curriculum
-    grid_sizes: tuple[int, ...] = (16, 32, 64)  # Scene grid sizes in curriculum order
+    # Curriculum (small → large for main training)
+    grid_sizes: tuple[int, ...] = (16, 32, 64)
     # Training
     n_viewpoints_per_step: int = 2  # Inner loop viewpoints (>=2 for length generalization)
     n_steps: int = 200000
@@ -40,7 +40,7 @@ class Config:
     num_workers: int = 8
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
-    warmup_ratio: float = 0.01
+    warmup_ratio: float = 0.01  # Fraction of n_steps for warmup phase
     grad_clip: float = 1.0
     crop_scale_min: float = 0.4
     loss: Literal["l1", "mse"] = "mse"
@@ -60,5 +60,58 @@ class Config:
         return max(self.grid_sizes)
 
     @property
-    def steps_per_stage(self) -> int:
-        return self.n_steps // len(self.grid_sizes)
+    def warmup_steps(self) -> int:
+        """Total warmup steps (cycles through all sizes in reverse order)."""
+        return int(self.n_steps * self.warmup_ratio)
+
+    @property
+    def warmup_steps_per_size(self) -> int:
+        """Steps per grid size during warmup phase."""
+        return self.warmup_steps // len(self.grid_sizes)
+
+    @property
+    def main_training_steps(self) -> int:
+        """Steps for main curriculum training (after warmup)."""
+        return self.n_steps - self.warmup_steps
+
+    @property
+    def main_steps_per_stage(self) -> int:
+        """Steps per curriculum stage during main training."""
+        return self.main_training_steps // len(self.grid_sizes)
+
+    @property
+    def warmup_grid_sizes(self) -> tuple[int, ...]:
+        """Grid sizes for warmup phase (largest first for OOM detection)."""
+        return tuple(reversed(self.grid_sizes))
+
+    def get_schedule(self) -> list[tuple[str, int, int, int]]:
+        """Return full training schedule as list of (phase, grid_size, start_step, end_step).
+
+        Warmup phase cycles through all sizes (largest first) with mini LR cycles.
+        Main training follows curriculum order (smallest to largest).
+        """
+        schedule: list[tuple[str, int, int, int]] = []
+
+        # Warmup phase (largest → smallest)
+        step = 0
+        for G in self.warmup_grid_sizes:
+            end = step + self.warmup_steps_per_size - 1
+            schedule.append(("warmup", G, step, end))
+            step = end + 1
+
+        # Main training (smallest → largest)
+        for i, G in enumerate(self.grid_sizes):
+            start = self.warmup_steps + i * self.main_steps_per_stage
+            end = start + self.main_steps_per_stage - 1
+            if i == len(self.grid_sizes) - 1:
+                end = self.n_steps - 1  # Last stage gets remaining steps
+            schedule.append(("main", G, start, end))
+
+        return schedule
+
+    def get_phase_and_grid(self, step: int) -> tuple[str, int]:
+        """Return (phase, grid_size) for a given step."""
+        for phase, G, start, end in self.get_schedule():
+            if start <= step <= end:
+                return phase, G
+        return "main", self.grid_sizes[-1]  # Fallback
