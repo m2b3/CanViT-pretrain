@@ -5,8 +5,8 @@ import io
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Literal
 from pathlib import Path
+from typing import Literal
 
 import comet_ml
 import matplotlib.pyplot as plt
@@ -111,7 +111,9 @@ class TargetNorm(torch.nn.Module):
 
         # Reshape stats to [1, D, S, S] for grid_sample
         mean_grid = self.mean.view(S, S, D).permute(2, 0, 1).unsqueeze(0)
-        std_grid = (self.var + self.eps).sqrt().view(S, S, D).permute(2, 0, 1).unsqueeze(0)
+        std_grid = (
+            (self.var + self.eps).sqrt().view(S, S, D).permute(2, 0, 1).unsqueeze(0)
+        )
 
         # Build glimpse sampling grid (same coords as extract_glimpse)
         offsets = grid_offsets(G, G, self.mean.device, dtype=torch.float32)
@@ -154,7 +156,7 @@ class Config:
         default_factory=lambda: AVPConfig(
             scene_grid_size=32,
             glimpse_grid_size=7,
-            layer_scale_init=1e-3,
+            layer_scale_init=1e-2,
             use_output_proj=True,
             use_scene_registers=True,
             gradient_checkpointing=True,
@@ -286,13 +288,15 @@ def viz_and_log(
 
         # Local features - normalize with interpolated stats if available
         locals_avp_raw = [
-            avp_backbone.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
-            .squeeze(0)
+            avp_backbone.output_norm(
+                out.local[sample_idx : sample_idx + 1, n_prefix:]
+            ).squeeze(0)
             for out in outputs
         ]
         locals_teacher_raw = [
-            teacher.forward_norm_patches(out.glimpse[sample_idx : sample_idx + 1])
-            .squeeze(0)
+            teacher.forward_norm_patches(
+                out.glimpse[sample_idx : sample_idx + 1]
+            ).squeeze(0)
             for out in outputs
         ]
 
@@ -406,9 +410,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Target normalization: position-aware running stats
     n_tokens = cfg.avp.scene_grid_size**2
-    target_norm = TargetNorm(
-        n_tokens, teacher.embed_dim, cfg.avp.scene_grid_size
-    ).to(cfg.device)
+    target_norm = TargetNorm(n_tokens, teacher.embed_dim, cfg.avp.scene_grid_size).to(
+        cfg.device
+    )
 
     def get_targets(images: Tensor) -> Tensor:
         """Get normalized teacher targets for images."""
@@ -579,7 +583,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             # Validation viz: fresh batch, fixed viewpoints
             val_images = val_loader.next_batch().to(cfg.device)
             target_norm.eval()
-            val_loss = eval_and_log(exp, step, avp, teacher, get_targets, val_images, target_norm)
+            val_loss = eval_and_log(
+                exp, step, avp, teacher, get_targets, val_images, target_norm
+            )
             target_norm.train()
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -609,7 +615,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     val_images = val_loader.next_batch().to(cfg.device)
     target_norm.eval()
-    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, get_targets, val_images, target_norm)
+    val_loss = eval_and_log(
+        exp, cfg.n_steps, avp, teacher, get_targets, val_images, target_norm
+    )
     target_norm.train()
     if val_loss < best_val_loss:
         best_val_loss = val_loss
