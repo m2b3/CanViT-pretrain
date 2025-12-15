@@ -50,6 +50,36 @@ def pca_rgb(pca: PCA, features: NDArray[np.floating], H: int, W: int) -> NDArray
     return 1.0 / (1.0 + np.exp(-proj.reshape(H, W, 3) * 2.0))
 
 
+def pca_rgb_proj_only(
+    pca: PCA,
+    features: NDArray[np.floating],
+    H: int,
+    W: int,
+) -> NDArray[np.floating]:
+    """Project features using PCA components but with OWN mean/std centering.
+
+    Unlike pca_rgb which uses the fitted PCA's mean/variance (from teacher),
+    this function centers the features using their OWN mean and standardizes
+    with their OWN std before projecting. This reveals whether AVP's scene
+    has the right "structure" even if systematically shifted.
+
+    Args:
+        pca: Fitted PCA (we only use its components_, not mean_)
+        features: [H*W, D] numpy array
+
+    Returns:
+        [H, W, 3] numpy array with sigmoid-scaled values in [0, 1]
+    """
+    # Center with OWN mean
+    centered = features - features.mean(axis=0, keepdims=True)
+    # Standardize with OWN std
+    std = centered.std(axis=0, keepdims=True)
+    standardized = centered / (std + 1e-8)
+    # Project using PCA components (shape: [n_components, n_features])
+    proj = standardized @ pca.components_.T
+    return 1.0 / (1.0 + np.exp(-proj.reshape(H, W, 3) * 2.0))
+
+
 def imagenet_denormalize(t: Tensor) -> Tensor:
     """Convert [3, H, W] ImageNet-normalized tensor to [H, W, 3] in [0, 1].
 
@@ -172,14 +202,15 @@ def plot_multistep_pca(
     Row 0 = "init": learned spatial_init projected through output_proj, BEFORE any glimpses
     Row 1+ = "t=0, t=1, ...": scene state AFTER processing each glimpse
 
-    Columns: Trajectory | Glimpse | Teacher | Scene | Scene (self) | Hidden (self) | Local (AVP) | Local (Teacher) | Delta | Error
+    Columns: Trajectory | Glimpse | Teacher | Scene | Scene/self | Scene/proj | [Hidden/self] | Local (AVP) | Local (Teacher) | Delta | Error
 
     - Trajectory: Full image with cumulative viewpoint boxes
     - Glimpse: Actual glimpse image (empty for init row)
     - Teacher: PCA of teacher features (reference)
-    - Scene: PCA of scene representation (using teacher PCA)
-    - Scene (self): PCA of scene representation (using final scene's PCA)
-    - Hidden (self): PCA of raw hidden spatial (before output_proj, using own PCA) - optional
+    - Scene: PCA of scene using teacher's full PCA (teacher's mean, components, variance)
+    - Scene/self: PCA of scene using final scene's own PCA
+    - Scene/proj: Teacher's PCA components BUT scene's own mean/std (reveals structure despite shift)
+    - Hidden/self: PCA of raw hidden spatial (before output_proj, using own PCA) - optional
     - Local (AVP): PCA of glimpse features from AVP's TRAINABLE backbone
     - Local (Teacher): PCA of glimpse features from FROZEN teacher backbone
     - Delta: Spatial MSE change from previous row
@@ -230,6 +261,7 @@ def plot_multistep_pca(
     teacher_rgb = pca_rgb(pca, teacher, S, S)
     initial_rgb = pca_rgb(pca, initial_scene, S, S)
     initial_rgb_self = pca_rgb(pca_self, initial_scene, S, S)
+    initial_rgb_proj = pca_rgb_proj_only(pca, initial_scene, S, S)
 
     # Hidden PCA (optional)
     if show_hidden:
@@ -255,9 +287,9 @@ def plot_multistep_pca(
         prev = scene
 
     # Column indices (adjust based on whether hidden column is shown)
-    # Base: Trajectory | Glimpse | Teacher | Scene | Scene/self | [Hidden/self] | Local(AVP) | Local(Teacher) | Delta | Error
-    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE, C_SCENE_SELF = 0, 1, 2, 3, 4
-    c = 5
+    # Base: Trajectory | Glimpse | Teacher | Scene | Scene/self | Scene/proj | [Hidden/self] | Local(AVP) | Local(Teacher) | Delta | Error
+    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE, C_SCENE_SELF, C_SCENE_PROJ = 0, 1, 2, 3, 4, 5
+    c = 6
     C_HIDDEN = c if show_hidden else None
     if show_hidden:
         c += 1
@@ -287,6 +319,10 @@ def plot_multistep_pca(
     axes[row, C_SCENE_SELF].set_title("Scene/self (init)")
     axes[row, C_SCENE_SELF].axis("off")
 
+    axes[row, C_SCENE_PROJ].imshow(initial_rgb_proj)
+    axes[row, C_SCENE_PROJ].set_title("Scene/proj (init)")
+    axes[row, C_SCENE_PROJ].axis("off")
+
     if show_hidden:
         assert C_HIDDEN is not None and initial_hidden_rgb is not None
         axes[row, C_HIDDEN].imshow(initial_hidden_rgb)
@@ -310,6 +346,7 @@ def plot_multistep_pca(
         row = t + 1
         scene_rgb = pca_rgb(pca, scenes[t], S, S)
         scene_rgb_self = pca_rgb(pca_self, scenes[t], S, S)
+        scene_rgb_proj = pca_rgb_proj_only(pca, scenes[t], S, S)
         if show_hidden:
             assert pca_hidden is not None and hidden_spatials is not None
             hidden_rgb = pca_rgb(pca_hidden, hidden_spatials[t], S, S)
@@ -357,6 +394,11 @@ def plot_multistep_pca(
         axes[row, C_SCENE_SELF].imshow(scene_rgb_self)
         axes[row, C_SCENE_SELF].set_title("Scene/self" if t == 0 else "")
         axes[row, C_SCENE_SELF].axis("off")
+
+        # Col: Scene PCA (teacher components, own mean/std)
+        axes[row, C_SCENE_PROJ].imshow(scene_rgb_proj)
+        axes[row, C_SCENE_PROJ].set_title("Scene/proj" if t == 0 else "")
+        axes[row, C_SCENE_PROJ].axis("off")
 
         # Col: Hidden PCA (self basis - final hidden)
         if show_hidden:
