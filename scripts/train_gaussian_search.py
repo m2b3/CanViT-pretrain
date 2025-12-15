@@ -284,6 +284,9 @@ class ViewpointPolicy(nn.Module):
         # Context embedding: target_colors [B, 3] → [B, D]
         self.context_embed = nn.Linear(3, embed_dim)
 
+        # Learnable initial context for first viewpoint (before any scene info)
+        self.ctx_init = nn.Parameter(torch.randn(1, 1, embed_dim) / (embed_dim ** 0.5))
+
         # Decode from context token
         self.norm = nn.LayerNorm(embed_dim)
         self.mlp = nn.Sequential(
@@ -900,7 +903,7 @@ def evaluate_policy(
         B = images.shape[0]
         hidden = avp._init_hidden(B, None)
         ctx_in = policy.embed_context(target_colors)  # [B, 1, D] fresh, passed to AVP
-        ctx_for_policy = ctx_in  # first step: raw; subsequent: context_out
+        ctx_for_policy = policy.ctx_init.expand(B, -1, -1)  # first step: learnable init
 
         # Run episode with deterministic policy - collect viewpoints and glimpses
         viewpoints: list[Viewpoint] = []
@@ -1048,7 +1051,7 @@ def train(cfg: Config) -> None:
         B = images.shape[0]
         hidden = avp._init_hidden(B, None)
         ctx_in = policy.embed_context(target_colors)  # [B, 1, D] fresh, passed to AVP
-        ctx_for_policy = ctx_in  # first step: raw; subsequent: context_out
+        ctx_for_policy = policy.ctx_init.expand(B, -1, -1)  # first step: learnable init
         first_stats = None
         train_viewpoints: list[Viewpoint] = []
         train_glimpses: list[Tensor] = []
