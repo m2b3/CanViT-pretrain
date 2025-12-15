@@ -54,6 +54,7 @@ class AVPConfig:
     layer_scale_init: float = 0.0  # Init for intra-step LayerScales (cross-attention)
     temporal_gate_init: float = 0.0  # Init for inter-step gates (scene/local temporal)
     use_output_proj: bool = False
+    use_output_proj_norm: bool = True  # LayerNorm before Linear in output_proj
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries to save VRAM
     use_local_temporal: bool = False  # Temporal gating on local stream across glimpses
     use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
@@ -194,10 +195,12 @@ class AVPViT(nn.Module):
             self.scene_input_norm = nn.Identity()
 
         if cfg.use_output_proj:
-            self.output_proj = nn.Sequential(
-                nn.Linear(embed_dim, embed_dim),
-                ElementwiseAffine(embed_dim),
-            )
+            layers: list[nn.Module] = []
+            if cfg.use_output_proj_norm:
+                layers.append(nn.LayerNorm(embed_dim))
+            layers.append(nn.Linear(embed_dim, embed_dim))
+            layers.append(ElementwiseAffine(embed_dim))
+            self.output_proj = nn.Sequential(*layers)
         else:
             self.output_proj = nn.Identity()
 
