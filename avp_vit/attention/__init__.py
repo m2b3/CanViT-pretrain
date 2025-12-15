@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from ytch.attention.mh import from_multihead, to_multihead
 from ytch.nn.elementwise_affine import ElementwiseAffine
+from ytch.nn.layer_scale import LayerScale
 
 from avp_vit.rope import rope_apply_with_prefix
 
@@ -76,6 +77,8 @@ class RoPECrossAttention(nn.Module):
                 for m in module
                 if isinstance(m, nn.Linear)
             )
+        if isinstance(module, _ResidualMLP):
+            return self._proj_flops(module.mlp, n_tokens)
         return 0
 
     def flops(self, n_q: int, n_kv: int) -> int:
@@ -104,6 +107,22 @@ class RoPEReadCrossAttention(RoPECrossAttention):
         self.out_transform = nn.Linear(dim, dim)
 
 
+class _ResidualMLP(nn.Module):
+    """MLP with residual connection and LayerScale gating."""
+
+    def __init__(self, dim: int, expansion: int) -> None:
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * expansion),
+            nn.SiLU(),
+            nn.Linear(dim * expansion, dim),
+        )
+        self.scale = LayerScale(dim, init_values=0.0)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x + self.scale(self.mlp(x))
+
+
 @final
 class RoPEWriteCrossAttention(RoPECrossAttention):
     """For writing: K and V projected, Q and O use EWA (or Identity)."""
@@ -123,10 +142,6 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
                 nn.init.eye_(proj.weight)
                 nn.init.zeros_(proj.bias)
             return proj
-        return nn.Sequential(
-            nn.Linear(dim, dim * expansion),
-            nn.SiLU(),
-            nn.Linear(dim * expansion, dim),
-        )
+        return _ResidualMLP(dim, expansion)
 
 
