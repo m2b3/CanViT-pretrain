@@ -134,27 +134,20 @@ class AVPViT(nn.Module):
         n_adapters = (n_blocks + cfg.adapter_stride - 1) // cfg.adapter_stride
 
         # Scene registers split into persistent (passed through) and ephemeral (reinit each step)
-        # Scale by 1/sqrt(D) for consistent initialization with spatial_init
         n_persistent = self.n_persistent_registers
         n_ephemeral = self.n_ephemeral_registers
         if n_persistent > 0:
-            self.persistent_registers = nn.Parameter(
-                torch.randn(1, n_persistent, embed_dim) / (embed_dim**0.5)
-            )
+            self.persistent_registers = nn.Parameter(torch.randn(1, n_persistent, embed_dim))
         else:
             self.persistent_registers = None
         if n_ephemeral > 0:
-            self.ephemeral_registers = nn.Parameter(
-                torch.randn(1, n_ephemeral, embed_dim) / (embed_dim**0.5)
-            )
+            self.ephemeral_registers = nn.Parameter(torch.randn(1, n_ephemeral, embed_dim))
         else:
             self.ephemeral_registers = None
 
         # Learned initial spatial token: single vector broadcasted to all grid positions.
         # Shape [1, 1, D], expanded to [B, G*G, D] at runtime. Enables multi-resolution.
-        self.spatial_init = nn.Parameter(
-            torch.randn(1, 1, embed_dim) / (embed_dim**0.5)
-        )
+        self.spatial_init = nn.Parameter(torch.randn(1, 1, embed_dim))
 
         attn_cfg = cfg.attention
         if cfg.use_convex_gating:
@@ -195,9 +188,7 @@ class AVPViT(nn.Module):
         self.scene_positions = pos
 
         if cfg.use_scene_input_norm:
-            norm = nn.LayerNorm(embed_dim)
-            nn.init.constant_(norm.weight, 1.0 / (embed_dim ** 0.5))
-            self.scene_input_norm = norm
+            self.scene_input_norm = nn.LayerNorm(embed_dim)
         else:
             self.scene_input_norm = nn.Identity()
 
@@ -215,9 +206,7 @@ class AVPViT(nn.Module):
         # Gate shape: (n_prefix + 1, D) - one gate per prefix token, one for all patches
         if cfg.use_local_temporal:
             n_prefix = backbone.n_prefix_tokens
-            self.local_init = nn.Parameter(
-                torch.randn(1, self.n_local_tokens, embed_dim) / (embed_dim**0.5)
-            )
+            self.local_init = nn.Parameter(torch.randn(1, self.n_local_tokens, embed_dim))
             self.local_temporal_norm = nn.LayerNorm(embed_dim)
             self.local_temporal_gate = nn.Parameter(
                 torch.full((n_prefix + 1, embed_dim), cfg.temporal_gate_init)
