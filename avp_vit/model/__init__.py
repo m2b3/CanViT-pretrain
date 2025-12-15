@@ -16,6 +16,12 @@ from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint, extract_glimpse
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 
+
+def _inverse_sigmoid(p: float) -> float:
+    """Compute logit (inverse sigmoid). Clamps to avoid inf."""
+    p = max(1e-6, min(1 - 1e-6, p))
+    return float(torch.tensor(p / (1 - p)).log())
+
 # Type variable for forward_reduce accumulator
 T = TypeVar("T")
 
@@ -208,17 +214,20 @@ class AVPViT(nn.Module):
             n_prefix = backbone.n_prefix_tokens
             self.local_init = nn.Parameter(torch.randn(1, self.n_local_tokens, embed_dim))
             self.local_temporal_norm = nn.LayerNorm(embed_dim)
+            # Store logit, apply sigmoid at runtime to bound gate to [0,1]
+            logit_init = _inverse_sigmoid(cfg.temporal_gate_init)
             self.local_temporal_gate = nn.Parameter(
-                torch.full((n_prefix + 1, embed_dim), cfg.temporal_gate_init)
+                torch.full((n_prefix + 1, embed_dim), logit_init)
             )
         else:
             self.local_init = None
             self.local_temporal_norm = None
             self.local_temporal_gate = None
 
-        # Scene temporal gating: hidden = base + gate * (prev_hidden - base)
-        # At init (gate≈0), each timestep starts from base, enabling stable single-step learning
-        self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), cfg.temporal_gate_init))
+        # Scene temporal gating: hidden = base + sigmoid(logit) * (prev_hidden - base)
+        # Store logit, apply sigmoid at runtime to bound gate to [0,1]
+        logit_init = _inverse_sigmoid(cfg.temporal_gate_init)
+        self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), logit_init))
 
     def set_scene_grid_size(self, new_size: int) -> None:
         """Update scene grid size for curriculum. Recomputes scene_positions buffer."""
@@ -243,7 +252,7 @@ class AVPViT(nn.Module):
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
         """Initialize hidden state with gated residual.
 
-        hidden_out = base + gate * (norm(prev_hidden) - base)
+        hidden_out = base + sigmoid(gate_logit) * (norm(prev_hidden) - base)
 
         At init (gate≈0), each timestep starts from base regardless of prev_hidden.
         This enables stable single-step learning before recurrence kicks in.
@@ -254,7 +263,8 @@ class AVPViT(nn.Module):
         if hidden is None:
             return base
         normed = self.scene_input_norm(hidden)
-        return base + self.scene_temporal_gate * (normed - base)
+        gate = torch.sigmoid(self.scene_temporal_gate)
+        return base + gate * (normed - base)
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
         """Extract spatial tokens from hidden state.
@@ -323,7 +333,7 @@ class AVPViT(nn.Module):
             assert context.shape[2] == D, f"context dim {context.shape[2]} != embed_dim {D}"
             n_ctx = context.shape[1]
 
-        # Temporal gating on local stream: local = fresh + gate * LN(prev)
+        # Temporal gating on local stream: local = fresh + sigmoid(gate_logit) * LN(prev)
         # Gate has shape (n_prefix + 1, D): one per prefix token, one broadcast for patches
         if self.cfg.use_local_temporal:
             assert local_prev is not None, "local_prev required when use_local_temporal=True"
@@ -331,8 +341,9 @@ class AVPViT(nn.Module):
             assert self.local_temporal_norm is not None
             n_prefix = self.backbone.n_prefix_tokens
             normed = self.local_temporal_norm(local_prev)
-            gate_prefix = self.local_temporal_gate[:n_prefix]  # (n_prefix, D)
-            gate_patch = self.local_temporal_gate[n_prefix]  # (D,) broadcasts across patches
+            gate = torch.sigmoid(self.local_temporal_gate)
+            gate_prefix = gate[:n_prefix]  # (n_prefix, D)
+            gate_patch = gate[n_prefix]  # (D,) broadcasts across patches
             local = torch.cat([
                 local_fresh[:, :n_prefix] + gate_prefix * normed[:, :n_prefix],
                 local_fresh[:, n_prefix:] + gate_patch * normed[:, n_prefix:],

@@ -564,9 +564,10 @@ def test_local_temporal_parameters_shapes():
     assert isinstance(avp.local_temporal_norm, nn.LayerNorm)
 
     # Gate shape: (n_prefix + 1, D) - one per prefix token, one for all patches
+    # Stores logit, sigmoid(logit) ≈ init_value
     assert avp.local_temporal_gate is not None
     assert avp.local_temporal_gate.shape == (n_prefix + 1, embed_dim)
-    assert (avp.local_temporal_gate == 1e-5).all()
+    assert torch.allclose(torch.sigmoid(avp.local_temporal_gate), torch.full_like(avp.local_temporal_gate, 1e-5), atol=1e-6)
 
 
 def test_local_temporal_gating_gradient_flow():

@@ -217,17 +217,18 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             ema_loss = ema_loss_t.item()
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
-            scene_gate_norm = avp.scene_temporal_gate.norm().item()
+            # Log actual gate values (sigmoid of logits), not raw logits
+            scene_gate_mean = torch.sigmoid(avp.scene_temporal_gate).mean().item()
             metrics = {
                 f"grid{G}/train/loss": ema_loss,
                 "train/loss": ema_loss,
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
                 "train/grid_size": G,
-                "train/scene_temporal_gate_norm": scene_gate_norm,
+                "train/scene_temporal_gate_mean": scene_gate_mean,
             }
             if avp.local_temporal_gate is not None:
-                metrics["train/local_temporal_gate_norm"] = avp.local_temporal_gate.norm().item()
+                metrics["train/local_temporal_gate_mean"] = torch.sigmoid(avp.local_temporal_gate).mean().item()
             exp.log_metrics(metrics, step=step)
             pbar.set_postfix_str(
                 f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}"
