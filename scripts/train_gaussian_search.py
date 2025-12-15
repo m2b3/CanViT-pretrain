@@ -708,9 +708,8 @@ def compute_policy_grad_norms(policy: ViewpointPolicy) -> dict[str, float]:
     }
 
 
-def log_grad_breakdown(policy: ViewpointPolicy, step: int) -> None:
-    """Log detailed grad breakdown to stdout (for debugging at step 0)."""
-    norms = compute_policy_grad_norms(policy)
+def log_grad_breakdown(norms: dict[str, float], step: int) -> None:
+    """Log detailed grad breakdown to stdout."""
     log.info(f"Step {step} grad breakdown:")
     for name, val in norms.items():
         log.info(f"  {name}: {val:.6f}")
@@ -1038,7 +1037,7 @@ def train(cfg: Config) -> None:
 
             # Log detailed grad breakdown on first step
             if step == 0:
-                log_grad_breakdown(policy, step)
+                log_grad_breakdown(grad_norms, step)
 
             exp.log_metrics({
                 "loss": ema_loss.item(),
