@@ -247,10 +247,37 @@ def generate_multi_blob_batch(
 # ============================================================================
 
 
+class TransformerBlock(nn.Module):
+    """Simple transformer block with pre-norm."""
+
+    def __init__(self, dim: int, n_heads: int = 4, mlp_ratio: float = 2.0) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, n_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        mlp_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, dim),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False)[0]
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
 class ViewpointPolicy(nn.Module):
     """Policy that predicts viewpoint from scene hidden state and target query.
 
-    The target color is concatenated with pooled hidden features.
+    Architecture:
+    1. Avg pool scene from HxW to pool_size x pool_size (preserves spatial structure)
+    2. Project to policy hidden dim
+    3. Append query token (from color embedding)
+    4. Run through N transformer blocks
+    5. Read from query token to predict viewpoint
+
     Outputs tanh-bounded center + sigmoid-bounded scale.
     Fixed gaussian noise for exploration (no learned std).
     """
@@ -259,6 +286,9 @@ class ViewpointPolicy(nn.Module):
         self,
         embed_dim: int,
         hidden_dim: int = 256,
+        n_transformer_blocks: int = 2,
+        n_heads: int = 4,
+        pool_size: int = 4,
         min_scale: float = 0.25,
         max_scale: float = 1.0,
         noise_std: float = 0.1,
@@ -268,27 +298,47 @@ class ViewpointPolicy(nn.Module):
         self.min_scale = min_scale
         self.max_scale = max_scale
         self.noise_std = noise_std
+        self.pool_size = pool_size
 
-        # Color embedding
+        # Project scene features to policy dim
+        self.scene_proj = nn.Linear(embed_dim, hidden_dim)
+
+        # Color embedding → query token
         self.color_embed = nn.Linear(3, hidden_dim)
 
-        # MLP with orthogonal init (gain=sqrt(2) works well for SiLU)
-        self.net = nn.Sequential(
-            nn.Linear(embed_dim + hidden_dim, hidden_dim),
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            TransformerBlock(hidden_dim, n_heads) for _ in range(n_transformer_blocks)
+        ])
+        self.final_norm = nn.LayerNorm(hidden_dim)
+
+        # Output MLP: norm → 2-layer SiLU MLP → heads
+        self.output_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
         )
-        for m in self.net.modules():
+        self.center_head = nn.Linear(hidden_dim, 2)
+        self.scale_head = nn.Linear(hidden_dim, 1)
+
+        # Init
+        self._init_weights(head_init_scale)
+
+    def _init_weights(self, head_init_scale: float) -> None:
+        # Orthogonal init for projections
+        nn.init.orthogonal_(self.scene_proj.weight, gain=1.0)
+        nn.init.zeros_(self.scene_proj.bias)
+        nn.init.orthogonal_(self.color_embed.weight, gain=1.0)
+        nn.init.zeros_(self.color_embed.bias)
+
+        # Orthogonal init for output MLP (gain=sqrt(2) for SiLU)
+        for m in self.output_mlp.modules():
             if isinstance(m, nn.Linear):
                 nn.init.orthogonal_(m.weight, gain=2**0.5)
                 nn.init.zeros_(m.bias)
 
-        # Output heads
-        self.center_head = nn.Linear(hidden_dim, 2)
-        self.scale_head = nn.Linear(hidden_dim, 1)
-
-        # Small uniform init on heads so outputs have reasonable spread
+        # Small uniform init on final heads only
         nn.init.uniform_(self.center_head.weight, -head_init_scale, head_init_scale)
         nn.init.zeros_(self.center_head.bias)
         nn.init.uniform_(self.scale_head.weight, -head_init_scale, head_init_scale)
@@ -300,7 +350,7 @@ class ViewpointPolicy(nn.Module):
         """Predict viewpoint from hidden state and target query.
 
         Args:
-            hidden: Scene hidden state [B, n_tokens, D]
+            hidden: Scene hidden state [B, H*W, D] (will be reshaped to spatial)
             target_color: Target color query [B, 3]
             deterministic: If True, no noise
 
@@ -308,15 +358,36 @@ class ViewpointPolicy(nn.Module):
             viewpoint: Viewpoint with centers and scales
             stats: Dict of statistics for logging
         """
-        pooled = hidden.mean(dim=1)  # [B, D]
-        color_feat = self.color_embed(target_color)  # [B, hidden_dim]
+        B, N, D = hidden.shape
+        H = W = int(N**0.5)
+        assert H * W == N, f"Expected square spatial dims, got {N} tokens"
 
-        h = torch.cat([pooled, color_feat], dim=-1)
-        h = self.net(h)
+        # Reshape to spatial and avg pool to pool_size x pool_size
+        spatial = hidden.view(B, H, W, D).permute(0, 3, 1, 2)  # [B, D, H, W]
+        pooled = nn.functional.adaptive_avg_pool2d(spatial, self.pool_size)  # [B, D, pool_size, pool_size]
+        pooled = pooled.permute(0, 2, 3, 1).reshape(B, self.pool_size * self.pool_size, D)  # [B, pool_size^2, D]
+
+        # Project to policy dim
+        scene_tokens = self.scene_proj(pooled)  # [B, pool_size^2, hidden_dim]
+
+        # Create query token from color
+        query = self.color_embed(target_color).unsqueeze(1)  # [B, 1, hidden_dim]
+
+        # Concatenate: [scene_tokens, query]
+        tokens = torch.cat([scene_tokens, query], dim=1)  # [B, pool_size^2 + 1, hidden_dim]
+
+        # Transformer blocks
+        for block in self.blocks:
+            tokens = block(tokens)
+        tokens = self.final_norm(tokens)
+
+        # Read from query token (last position) and pass through output MLP
+        query_out = tokens[:, -1]  # [B, hidden_dim]
+        query_out = self.output_mlp(query_out)  # [B, hidden_dim]
 
         # Pre-activation logits
-        center_logits = self.center_head(h)  # [B, 2]
-        scale_logit = self.scale_head(h).squeeze(-1)  # [B]
+        center_logits = self.center_head(query_out)  # [B, 2]
+        scale_logit = self.scale_head(query_out).squeeze(-1)  # [B]
 
         # Add noise to logits (reparameterization), then bound with tanh/sigmoid
         if deterministic:
@@ -659,6 +730,9 @@ class Config:
         )
     )
     policy_hidden_dim: int = 256
+    policy_n_transformer_blocks: int = 2
+    policy_n_heads: int = 4
+    policy_pool_size: int = 4
     policy_noise_std: float = 0.1
     policy_head_init_scale: float = 0.1
     # Training
@@ -849,6 +923,9 @@ def train(cfg: Config) -> None:
     policy = ViewpointPolicy(
         embed_dim=backbone.embed_dim,
         hidden_dim=cfg.policy_hidden_dim,
+        n_transformer_blocks=cfg.policy_n_transformer_blocks,
+        n_heads=cfg.policy_n_heads,
+        pool_size=cfg.policy_pool_size,
         min_scale=cfg.min_viewpoint_scale,
         max_scale=cfg.max_viewpoint_scale,
         noise_std=cfg.policy_noise_std,
