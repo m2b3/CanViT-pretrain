@@ -159,18 +159,16 @@ def generate_multi_blob_batch(
     valid_range = 1 - margin
     cell_size = 2 * valid_range / grid_size
 
-    # Base grid positions
+    # Base grid positions (generate all, then shuffle and select)
     base_positions = []
     for gy in range(grid_size):
         for gx in range(grid_size):
-            if len(base_positions) >= n_blobs:
-                break
             cy = -valid_range + cell_size * (gy + 0.5)
             cx = -valid_range + cell_size * (gx + 0.5)
             base_positions.append([cy, cx])
-        if len(base_positions) >= n_blobs:
-            break
-    base_pos = torch.tensor(base_positions[:n_blobs], device=device)  # [n_blobs, 2]
+    base_pos = torch.tensor(base_positions, device=device)  # [grid_size^2, 2]
+    # Shuffle grid positions so blob placement isn't biased to top-left
+    base_pos = base_pos[torch.randperm(base_pos.shape[0], device=device)[:n_blobs]]  # [n_blobs, 2]
 
     # Add random jitter within cell
     jitter_range = cell_size * 0.3
