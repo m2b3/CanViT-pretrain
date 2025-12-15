@@ -8,7 +8,6 @@ import torch
 from ytch.device import get_sensible_device
 
 from avp_vit import AVPConfig
-from avp_vit.attention import AttentionConfig
 
 
 @dataclass
@@ -18,22 +17,8 @@ class Config:
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     ckpt_dir: Path = Path("checkpoints")
-    # Model
-    avp: AVPConfig = field(
-        default_factory=lambda: AVPConfig(
-            scene_grid_size=64,
-            glimpse_grid_size=7,
-            layer_scale_init=1e-4,
-            temporal_gate_init=1e-4,
-            use_output_proj=False,
-            use_output_proj_norm=False,
-            n_scene_registers=32,
-            gradient_checkpointing=True,
-            use_convex_gating=False,
-            use_local_temporal=True,
-            attention=AttentionConfig(write_v_expansion=2),
-        )
-    )
+    # Model (uses AVPConfig defaults, only override scene_grid_size)
+    avp: AVPConfig = field(default_factory=lambda: AVPConfig(scene_grid_size=64))
     freeze_inner_backbone: bool = True
     # Grid sizes (randomly sampled each step)
     grid_sizes: tuple[int, ...] = (16, 32, 64)

@@ -18,7 +18,8 @@ class AttentionConfig:
     use_ewa_transforms: bool = True  # EWA instead of Identity for unprojected streams
     use_post_rope_ewa: bool = False  # EWA after RoPE on Q/K
     vo_identity_init: bool = True  # Identity-init V and O projections (content path, not Q/K)
-    write_v_expansion: int | None = None  # None = Linear, int = MLP with SiLU and given expansion
+    write_v_expansion: int | None = 2  # None = Linear, int = MLP with SiLU and given expansion
+    layer_scale_init: float = 1e-4  # Init for LayerScale in _ResidualMLP (when write_v_expansion set)
 
 
 class RoPECrossAttention(nn.Module):
@@ -113,14 +114,14 @@ class RoPEReadCrossAttention(RoPECrossAttention):
 class _ResidualMLP(nn.Module):
     """MLP with residual connection and LayerScale gating."""
 
-    def __init__(self, dim: int, expansion: int) -> None:
+    def __init__(self, dim: int, expansion: int, layer_scale_init: float) -> None:
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(dim, dim * expansion),
             nn.SiLU(),
             nn.Linear(dim * expansion, dim),
         )
-        self.scale = LayerScale(dim, init_values=0.0)
+        self.scale = LayerScale(dim, init_values=layer_scale_init)
 
     def forward(self, x: Tensor) -> Tensor:
         return x + self.scale(self.mlp(x))
@@ -134,17 +135,17 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
         super().__init__(dim, num_heads, cfg)
         self.q_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.k_transform = nn.Linear(dim, dim)
-        self.v_transform = self._make_v_proj(dim, cfg.vo_identity_init, cfg.write_v_expansion)
+        self.v_transform = self._make_v_proj(dim, cfg)
         self.out_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
 
     @staticmethod
-    def _make_v_proj(dim: int, identity_init: bool, expansion: int | None) -> nn.Module:
-        if expansion is None:
+    def _make_v_proj(dim: int, cfg: AttentionConfig) -> nn.Module:
+        if cfg.write_v_expansion is None:
             proj = nn.Linear(dim, dim)
-            if identity_init:
+            if cfg.vo_identity_init:
                 nn.init.eye_(proj.weight)
                 nn.init.zeros_(proj.bias)
             return proj
-        return _ResidualMLP(dim, expansion)
+        return _ResidualMLP(dim, cfg.write_v_expansion, cfg.layer_scale_init)
 
 

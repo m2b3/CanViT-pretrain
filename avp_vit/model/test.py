@@ -104,7 +104,7 @@ PATCH_SIZE = 16
 
 def test_forward_shapes():
     embed_dim, num_heads, n_blocks = 64, 4, 2
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0, use_local_temporal=False)
     backbone = MockBackbone(embed_dim, num_heads, n_blocks, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -116,7 +116,7 @@ def test_forward_shapes():
 
     assert scene.shape == (B, 16, embed_dim)  # 4x4 grid
     assert hidden.shape == (B, 16, embed_dim)  # hidden same shape (no registers)
-    assert local is None  # use_local_temporal=False by default
+    assert local is None  # use_local_temporal=False explicitly
 
 
 def test_layer_scale_init():
@@ -160,7 +160,11 @@ def test_convex_init_passthrough():
 
     n_blocks = 2
     gate_init = 1e-5
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, layer_scale_init=gate_init, use_convex_gating=True, n_scene_registers=0)
+    cfg = AVPConfig(
+        scene_grid_size=4, glimpse_grid_size=3, layer_scale_init=gate_init,
+        use_convex_gating=True, n_scene_registers=0,
+        use_local_temporal=False, use_scene_input_norm=False,
+    )
     backbone = MockBackbone(64, 4, n_blocks, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -196,8 +200,14 @@ def test_convex_init_passthrough():
 
 def test_convex_gate_value_affects_output():
     """High gate breaks passthrough; low gate preserves it."""
-    cfg_lo = AVPConfig(scene_grid_size=4, layer_scale_init=1e-5, use_convex_gating=True, n_scene_registers=0)
-    cfg_hi = AVPConfig(scene_grid_size=4, layer_scale_init=0.5, use_convex_gating=True, n_scene_registers=0)
+    cfg_lo = AVPConfig(
+        scene_grid_size=4, layer_scale_init=1e-5, use_convex_gating=True, n_scene_registers=0,
+        use_local_temporal=False, use_scene_input_norm=False,
+    )
+    cfg_hi = AVPConfig(
+        scene_grid_size=4, layer_scale_init=0.5, use_convex_gating=True, n_scene_registers=0,
+        use_local_temporal=False, use_scene_input_norm=False,
+    )
 
     # Same seed for both → same spatial_init, attention weights
     torch.manual_seed(999)
@@ -274,7 +284,7 @@ def test_scene_registers_split():
 def test_scene_output_always_spatial_only():
     """Scene output should only contain grid tokens, not registers."""
     embed_dim, num_heads, n_blocks = 64, 4, 2
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=7)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=7, use_local_temporal=False)
     backbone = MockBackbone(embed_dim, num_heads, n_blocks, 4, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -369,7 +379,7 @@ def test_output_proj_is_always_module():
 def test_multi_viewpoint_forward():
     """Forward with multiple viewpoints processes all sequentially."""
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0, use_local_temporal=False)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -421,7 +431,7 @@ def test_forward_step_returns_step_output():
 def test_forward_loss():
     """forward_loss returns averaged MSE and final hidden."""
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0, use_local_temporal=False)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -444,7 +454,7 @@ def test_forward_loss():
 def test_forward_trajectory():
     """forward_trajectory returns list of projected scenes."""
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0, use_local_temporal=False)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -468,7 +478,7 @@ def test_forward_trajectory():
 def test_forward_reduce_custom():
     """forward_reduce with custom reducer."""
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0, use_local_temporal=False)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
@@ -522,10 +532,10 @@ def test_forward_loss_requires_viewpoints():
         avp.forward_loss(images, [], target)
 
 
-def test_local_temporal_disabled_by_default():
+def test_local_temporal_disabled():
     """Local temporal parameters are None when use_local_temporal=False."""
     embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0, use_local_temporal=False)
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 

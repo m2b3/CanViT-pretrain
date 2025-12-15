@@ -8,6 +8,11 @@ def _default_cfg() -> AttentionConfig:
     return AttentionConfig()
 
 
+def _simple_v_cfg() -> AttentionConfig:
+    """Config with simple Linear V (no MLP) for FLOPs tests."""
+    return AttentionConfig(write_v_expansion=None)
+
+
 def test_read_shapes():
     B, N_q, N_kv, D, heads = 2, 10, 20, 64, 4
     head_dim = D // heads
@@ -32,10 +37,10 @@ def test_write_shapes():
     assert out.shape == (B, N_q, D)
 
 
-def test_write_v_identity_init():
-    """V projection starts as identity when vo_identity_init=True."""
+def test_write_v_linear_identity_init():
+    """V as Linear starts at identity when vo_identity_init=True, write_v_expansion=None."""
     D = 64
-    cfg = AttentionConfig(vo_identity_init=True)
+    cfg = AttentionConfig(vo_identity_init=True, write_v_expansion=None)
     attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=cfg)
     v = attn.v_transform
     assert isinstance(v, nn.Linear)
@@ -43,14 +48,13 @@ def test_write_v_identity_init():
     assert torch.allclose(v.bias, torch.zeros(D))
 
 
-def test_write_v_default_init():
-    """V projection uses default init when vo_identity_init=False."""
+def test_write_v_residual_mlp():
+    """V as ResidualMLP when write_v_expansion is set (default=2)."""
+    from avp_vit.attention import _ResidualMLP
     D = 64
-    cfg = AttentionConfig(vo_identity_init=False)
+    cfg = AttentionConfig(write_v_expansion=2)  # default
     attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=cfg)
-    v = attn.v_transform
-    assert isinstance(v, nn.Linear)
-    assert not torch.allclose(v.weight, torch.eye(D))
+    assert isinstance(attn.v_transform, _ResidualMLP)
 
 
 def test_read_o_identity_init():
@@ -58,6 +62,7 @@ def test_read_o_identity_init():
     D = 64
     cfg = AttentionConfig(vo_identity_init=True)
     attn = RoPEReadCrossAttention(D, num_heads=4, cfg=cfg)
+    assert isinstance(attn.out_transform, nn.Linear)
     assert torch.allclose(attn.out_transform.weight, torch.eye(D))
     assert torch.allclose(attn.out_transform.bias, torch.zeros(D))
 
@@ -72,18 +77,18 @@ def test_flops_read():
 
 
 def test_flops_write():
-    """Write attention: K and V projections on keys/values."""
+    """Write attention: K and V projections on keys/values (Linear V)."""
     D = 64
-    attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=_default_cfg())
+    attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=_simple_v_cfg())
     f = attn.flops(n_q=20, n_kv=10)
-    # attention + K proj + V proj
+    # attention + K proj + V proj (Linear)
     assert f == 4 * 20 * 10 * D + 2 * 10 * D * D + 2 * 10 * D * D
 
 
 def test_flops_projection_placement_matters():
     """Which tokens get projected affects FLOPs significantly."""
     D = 64
-    cfg = _default_cfg()
+    cfg = _simple_v_cfg()  # Use Linear V for predictable FLOPs
     read = RoPEReadCrossAttention(D, 4, cfg)
     write = RoPEWriteCrossAttention(D, 4, cfg)
     # Asymmetric: 10 queries, 100 keys/values

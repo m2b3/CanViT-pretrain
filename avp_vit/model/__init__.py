@@ -57,14 +57,14 @@ class AVPConfig:
     scene_grid_size: int
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
-    layer_scale_init: float = 0.0  # Init for intra-step LayerScales (cross-attention)
-    temporal_gate_init: float = 0.0  # Init for inter-step gates (scene/local temporal)
+    layer_scale_init: float = 1e-4  # Init for intra-step LayerScales (cross-attention)
+    temporal_gate_init: float = 1e-4  # Init for inter-step gates (scene/local temporal)
     use_output_proj: bool = False
-    use_output_proj_norm: bool = True  # LayerNorm before Linear in output_proj
-    gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries to save VRAM
-    use_local_temporal: bool = False  # Temporal gating on local stream across glimpses
+    use_output_proj_norm: bool = False  # LayerNorm before Linear in output_proj (if enabled)
+    gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries to save VRAM
+    use_local_temporal: bool = True  # Temporal gating on local stream across glimpses
     use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
-    use_scene_input_norm: bool = False  # LayerNorm on hidden at start of each timestep
+    use_scene_input_norm: bool = True  # LayerNorm on hidden at start of each timestep
     adapter_stride: int = 2  # Apply read/write adapters every N backbone blocks
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
