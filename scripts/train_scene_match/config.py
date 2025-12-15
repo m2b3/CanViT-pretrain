@@ -25,7 +25,7 @@ class Config:
             glimpse_grid_size=7,
             layer_scale_init=1e-2,
             temporal_gate_init=1e-3,
-            use_output_proj=True,
+            use_output_proj=False,
             use_output_proj_norm=False,
             n_scene_registers=32,
             gradient_checkpointing=True,
