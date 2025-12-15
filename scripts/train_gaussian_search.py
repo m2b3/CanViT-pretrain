@@ -40,6 +40,10 @@ from avp_vit.train import warmup_cosine_scheduler
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
+# ImageNet normalization constants
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
 
 # ============================================================================
 # Synthetic data: multiple colored gaussian blobs on a canvas
@@ -236,8 +240,8 @@ def generate_multi_blob_batch(
     target_centers = all_centers[torch.arange(B, device=device), target_idx]  # [B, 2]
 
     # Apply ImageNet normalization
-    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+    mean = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
     images = (images - mean) / std
 
     return images, target_colors, target_centers, all_centers
@@ -262,6 +266,7 @@ class ViewpointPolicy(nn.Module):
         embed_dim: int,
         n_tokens: int,
         proj_dim: int,
+        color_dim: int,
         mlp_hidden: int,
         min_scale: float,
         max_scale: float,
@@ -281,7 +286,6 @@ class ViewpointPolicy(nn.Module):
         self.scene_proj = nn.Linear(embed_dim, proj_dim)
 
         # Color: project to small dim
-        color_dim = 16
         self.color_proj = nn.Linear(3, color_dim)
 
         # MLP: [scene_flat, color] → hidden → viewpoint
@@ -477,8 +481,8 @@ def plot_sample_images(
     H, W = images.shape[2], images.shape[3]
 
     # Denormalize
-    mean = torch.tensor([0.485, 0.456, 0.406], device=images.device).view(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225], device=images.device).view(1, 3, 1, 1)
+    mean = torch.tensor(IMAGENET_MEAN, device=images.device).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=images.device).view(1, 3, 1, 1)
     imgs = (images[:n] * std + mean).clamp(0, 1).cpu()
 
     fig, axes = plt.subplots(2, 4, figsize=(16, 8))
@@ -550,8 +554,8 @@ def plot_trajectory_with_glimpses(
     H, W = images.shape[2], images.shape[3]
 
     # Denormalize image
-    mean = torch.tensor([0.485, 0.456, 0.406], device=images.device).view(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225], device=images.device).view(1, 3, 1, 1)
+    mean = torch.tensor(IMAGENET_MEAN, device=images.device).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=images.device).view(1, 3, 1, 1)
     img = (images[sample_idx : sample_idx + 1] * std + mean).clamp(0, 1)[0]
     img_np = img.permute(1, 2, 0).cpu().numpy()
 
@@ -792,6 +796,7 @@ class Config:
         )
     )
     policy_proj_dim: int = 4
+    policy_color_dim: int = 16
     policy_mlp_hidden: int = 256
     policy_noise_std: float = 0.1
     policy_center_head_init_scale: float = 0.1
@@ -801,7 +806,8 @@ class Config:
     n_steps_per_episode: int = 4
     n_steps: int = 10000
     batch_size: int = 64
-    ref_lr: float = 4e-4  # at batch_size=64
+    ref_batch_size: int = 64  # reference batch size for LR scaling
+    ref_lr: float = 4e-4  # LR at ref_batch_size
     weight_decay: float = 0.0
     warmup_steps: int = 5000
     grad_clip: float = 1.0
@@ -993,6 +999,7 @@ def train(cfg: Config) -> None:
         embed_dim=backbone.embed_dim,
         n_tokens=n_scene_tokens,
         proj_dim=cfg.policy_proj_dim,
+        color_dim=cfg.policy_color_dim,
         mlp_hidden=cfg.policy_mlp_hidden,
         min_scale=cfg.min_viewpoint_scale,
         max_scale=cfg.max_viewpoint_scale,
@@ -1003,7 +1010,7 @@ def train(cfg: Config) -> None:
     ).to(cfg.device)
     log.info(f"Policy params: {count_parameters(policy):,}")
 
-    peak_lr = cfg.ref_lr * (cfg.batch_size / 64)  # linear scaling from ref_lr @ BS=64
+    peak_lr = cfg.ref_lr * (cfg.batch_size / cfg.ref_batch_size)
     all_params = list(avp.parameters()) + list(policy.parameters())
     optimizer = torch.optim.AdamW(
         all_params,
