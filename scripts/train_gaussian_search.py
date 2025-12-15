@@ -327,6 +327,7 @@ class ViewpointPolicy(nn.Module):
 
         # Color embedding → query token
         self.color_embed = nn.Linear(3, hidden_dim)
+        self.query_norm = nn.LayerNorm(embed_dim)
 
         # Transformer blocks
         self.blocks = nn.ModuleList(
@@ -354,12 +355,6 @@ class ViewpointPolicy(nn.Module):
     def _init_weights(
         self, center_head_init_scale: float, scale_head_init_scale: float
     ) -> None:
-        # Orthogonal init for projections
-        nn.init.orthogonal_(self.scene_proj.weight, gain=1.0)
-        nn.init.zeros_(self.scene_proj.bias)
-        nn.init.orthogonal_(self.color_embed.weight, gain=1.0)
-        nn.init.zeros_(self.color_embed.bias)
-
         # Orthogonal init for output MLP (gain=sqrt(2) for SiLU)
         for m in self.output_mlp.modules():
             if isinstance(m, nn.Linear):
@@ -411,6 +406,7 @@ class ViewpointPolicy(nn.Module):
         # Colors are in [0.09, 0.9], mean ~0.5, std ~0.37
         color_normalized = (target_color - 0.5) / 0.4
         query = self.color_embed(color_normalized).unsqueeze(1)  # [B, 1, hidden_dim]
+        query = self.query_norm(query)
 
         # Concatenate: [scene_tokens, query]
         tokens = torch.cat(
@@ -1158,17 +1154,18 @@ def train(cfg: Config) -> None:
         train_viewpoints: list[Viewpoint] = []
         train_glimpses: list[Tensor] = []
 
+        timestep_losses = []
         for t in range(cfg.n_steps_per_episode):
             vp, stats = policy(hidden, target_colors, deterministic=False)
             if t == 0:
                 first_stats = stats
             train_viewpoints.append(vp)
             train_glimpses.append(extract_glimpse(images, vp, glimpse_size))
+            timestep_losses.append(compute_distance_loss(vp, target_centers))
             out = avp.forward_step(images, vp, hidden, None)
             hidden = out.hidden
 
-        final_vp = train_viewpoints[-1]
-        loss = compute_distance_loss(final_vp, target_centers)
+        loss = torch.stack(timestep_losses).mean()  # average over timesteps
 
         optimizer.zero_grad()
         loss.backward()
