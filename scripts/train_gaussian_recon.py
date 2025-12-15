@@ -133,30 +133,32 @@ def create_avp(backbone: DINOv3Backbone, cfg: Config) -> AVPViT:
 def plot_pixel_recon(
     original: Tensor,
     reconstructions: list[Tensor],
+    glimpses: list[Tensor],
     viewpoints: list[Viewpoint],
     sample_idx: int = 0,
 ) -> Figure:
-    """Plot original image and reconstructions at each timestep.
+    """Plot original image, glimpses, and reconstructions at each timestep.
 
     Args:
         original: [B, 3, H, W] original images (ImageNet-normalized)
         reconstructions: List of [B, 3, H, W] reconstructed images per timestep
+        glimpses: List of [B, 3, G, G] glimpse images per timestep
         viewpoints: List of viewpoints
         sample_idx: Which batch sample to show
     """
     n_steps = len(reconstructions)
-    fig, axes = plt.subplots(1, n_steps + 1, figsize=(3 * (n_steps + 1), 3))
+    # Row 1: original + glimpses, Row 2: reconstructions
+    fig, axes = plt.subplots(2, n_steps + 1, figsize=(3 * (n_steps + 1), 6))
 
     H, W = original.shape[-2], original.shape[-1]
-
-    # Original
-    orig_img = imagenet_denormalize(original[sample_idx : sample_idx + 1])
-    axes[0].imshow(orig_img[0].permute(1, 2, 0).cpu().numpy())
-    axes[0].set_title("Original")
-    axes[0].axis("off")
-
-    # Draw all viewpoint boxes on original
     colors = plt.cm.viridis(torch.linspace(0, 1, n_steps).numpy())
+
+    # Row 0, Col 0: Original with viewpoint boxes
+    orig_img = imagenet_denormalize(original[sample_idx : sample_idx + 1])
+    axes[0, 0].imshow(orig_img[0].permute(1, 2, 0).cpu().numpy())
+    axes[0, 0].set_title("Original")
+    axes[0, 0].axis("off")
+
     for t, vp in enumerate(viewpoints):
         box = vp.to_pixel_box(sample_idx, H, W)
         rect = plt.Rectangle(
@@ -167,15 +169,30 @@ def plot_pixel_recon(
             edgecolor=colors[t],
             linewidth=2,
         )
-        axes[0].add_patch(rect)
+        axes[0, 0].add_patch(rect)
 
-    # Reconstructions
+    # Row 0, Cols 1+: Glimpses
+    for t, glimpse in enumerate(glimpses):
+        g_img = imagenet_denormalize(glimpse[sample_idx : sample_idx + 1])
+        axes[0, t + 1].imshow(g_img[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy())
+        axes[0, t + 1].set_title(f"Glimpse t={t}")
+        axes[0, t + 1].axis("off")
+        # Color border to match viewpoint box
+        for spine in axes[0, t + 1].spines.values():
+            spine.set_edgecolor(colors[t])
+            spine.set_linewidth(3)
+            spine.set_visible(True)
+
+    # Row 1, Col 0: empty (or could show something else)
+    axes[1, 0].axis("off")
+
+    # Row 1, Cols 1+: Reconstructions
     for t, recon in enumerate(reconstructions):
         recon_img = imagenet_denormalize(recon[sample_idx : sample_idx + 1])
-        axes[t + 1].imshow(recon_img[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy())
+        axes[1, t + 1].imshow(recon_img[0].permute(1, 2, 0).clamp(0, 1).cpu().numpy())
         mse = nn.functional.mse_loss(recon[sample_idx], original[sample_idx]).item()
-        axes[t + 1].set_title(f"t={t} ({viewpoints[t].name})\nMSE={mse:.4f}")
-        axes[t + 1].axis("off")
+        axes[1, t + 1].set_title(f"Recon t={t}\nMSE={mse:.4f}")
+        axes[1, t + 1].axis("off")
 
     plt.tight_layout()
     return fig
@@ -187,12 +204,13 @@ def forward_recon(
     images: Tensor,
     viewpoints: list[Viewpoint],
     hidden: Tensor | None,
-) -> tuple[Tensor, list[Tensor], Tensor]:
+) -> tuple[Tensor, list[Tensor], list[Tensor], Tensor]:
     """Forward pass with pixel reconstruction.
 
     Returns:
         loss: Averaged MSE across all timesteps
         reconstructions: List of reconstructed images per timestep
+        glimpses: List of extracted glimpse images per timestep
         final_hidden: Hidden state after all viewpoints
     """
     B = images.shape[0]
@@ -201,6 +219,7 @@ def forward_recon(
 
     losses = []
     reconstructions = []
+    glimpses = []
 
     for vp in viewpoints:
         out = avp.forward_step(images, vp, hidden, None, None)
@@ -208,10 +227,11 @@ def forward_recon(
         scene = out.scene  # [B, N, D]
         recon = decoder(scene)  # [B, 3, H, W]
         reconstructions.append(recon)
+        glimpses.append(out.glimpse)  # [B, 3, G, G]
         losses.append(nn.functional.mse_loss(recon, images))
 
     loss = torch.stack(losses).mean()
-    return loss, reconstructions, hidden
+    return loss, reconstructions, glimpses, hidden
 
 
 def eval_and_log(
@@ -240,7 +260,7 @@ def eval_and_log(
     ]
 
     with torch.inference_mode():
-        _, reconstructions, _ = forward_recon(avp, decoder, images, viewpoints, None)
+        _, reconstructions, glimpses, _ = forward_recon(avp, decoder, images, viewpoints, None)
 
         # Per-timestep MSE
         mses = [
@@ -254,7 +274,7 @@ def eval_and_log(
         exp.log_metric("val/loss", val_loss, step=step)
 
         # Visualization
-        fig = plot_pixel_recon(images, reconstructions, viewpoints, sample_idx=0)
+        fig = plot_pixel_recon(images, reconstructions, glimpses, viewpoints, sample_idx=0)
         log_figure(exp, fig, "val/recon", step)
 
     return val_loss
@@ -350,7 +370,7 @@ def train(cfg: Config) -> None:
         ]
 
         # Forward + loss
-        loss, _, _ = forward_recon(avp, decoder, images, viewpoints, None)
+        loss, _, _, _ = forward_recon(avp, decoder, images, viewpoints, None)
 
         optimizer.zero_grad()
         loss.backward()
