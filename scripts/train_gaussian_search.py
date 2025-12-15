@@ -285,7 +285,7 @@ class ViewpointPolicy(nn.Module):
         self.context_embed = nn.Linear(3, embed_dim)
 
         # Learnable initial context for first viewpoint (before any scene info)
-        self.ctx_init = nn.Parameter(torch.randn(1, 1, embed_dim) / (embed_dim ** 0.5))
+        self.ctx_init = nn.Parameter(torch.randn(1, 1, embed_dim) / (embed_dim**0.5))
 
         # Decode from context token
         self.norm = nn.LayerNorm(embed_dim)
@@ -337,8 +337,12 @@ class ViewpointPolicy(nn.Module):
             noisy_center = center_logits
             noisy_scale_logit = scale_logit
         else:
-            noisy_center = center_logits + torch.randn_like(center_logits) * self.noise_std
-            noisy_scale_logit = scale_logit + torch.randn_like(scale_logit) * self.noise_std
+            noisy_center = (
+                center_logits + torch.randn_like(center_logits) * self.noise_std
+            )
+            noisy_scale_logit = (
+                scale_logit + torch.randn_like(scale_logit) * self.noise_std
+            )
 
         # Center: tanh bounds to valid range (independent of scale)
         max_center_offset = 1 - self.min_scale
@@ -790,29 +794,29 @@ class Config:
         default_factory=lambda: AVPConfig(
             scene_grid_size=16,  # 16*14=224px scene
             glimpse_grid_size=4,  # 4*14=56px glimpse, min_scale=0.25
-            gate_init=1e-5,
+            gate_init=1e-4,
             use_output_proj=True,
-            use_scene_registers=False,
+            use_scene_registers=True,
             gradient_checkpointing=False,
         )
     )
     policy_mlp_hidden: int = 256
     policy_noise_std: float = 0.1
-    policy_center_head_init_scale: float = 0.1
+    policy_center_head_init_scale: float = 0.01
     policy_scale_head_init_scale: float = 0.01
     policy_fixed_scale: float | None = None
     # Training
     n_steps_per_episode: int = 4
     n_steps: int = 10000
     batch_size: int = 64
-    ref_lr: float = 6.25e-6  # per-sample LR, peak_lr = ref_lr * batch_size
-    weight_decay: float = 0.0
+    ref_lr: float = 1e-5
+    weight_decay: float = 1e-4
     warmup_steps: int = 5000
     grad_clip: float = 1.0
     adam_beta1: float = 0.85
     adam_beta2: float = 0.995
     # Task
-    n_blobs: int = 4
+    n_blobs: int = 2
     blob_margin: float = 0.3
     blob_sigma_min: float = 0.08
     blob_sigma_max: float = 0.12
