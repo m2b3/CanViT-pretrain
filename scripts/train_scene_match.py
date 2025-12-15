@@ -1,10 +1,9 @@
 """Train AVP scene representation to match frozen teacher backbone patches."""
 
-from collections.abc import Callable
-
 import copy
 import io
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -55,7 +54,9 @@ class TargetNorm(torch.nn.Module):
     mean: Tensor
     var: Tensor
 
-    def __init__(self, n_tokens: int, embed_dim: int, momentum: float = 0.1, eps: float = 1e-5):
+    def __init__(
+        self, n_tokens: int, embed_dim: int, momentum: float = 0.1, eps: float = 1e-5
+    ):
         super().__init__()
         self.momentum = momentum
         self.eps = eps
@@ -67,7 +68,9 @@ class TargetNorm(torch.nn.Module):
         """Update running stats and normalize. x: [B, N, D] -> [B, N, D]."""
         with torch.no_grad():
             batch_mean = x.mean(dim=0)  # [N, D]
-            batch_var = x.var(dim=0, unbiased=True)  # [N, D], unbiased for population estimate
+            batch_var = x.var(
+                dim=0, unbiased=True
+            )  # [N, D], unbiased for population estimate
 
             if not self.initialized:
                 self.mean.copy_(batch_mean)
@@ -80,7 +83,7 @@ class TargetNorm(torch.nn.Module):
         return (x - self.mean) / (self.var + self.eps).sqrt()
 
 
-LOSS_FN = l1_loss
+LOSS_FN = mse_loss
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -328,7 +331,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         compile_avp(avp)
 
     # Target normalization: position-aware running stats
-    n_tokens = cfg.avp.scene_grid_size ** 2
+    n_tokens = cfg.avp.scene_grid_size**2
     target_norm = TargetNorm(n_tokens, teacher.embed_dim).to(cfg.device)
 
     def get_targets(images: Tensor) -> Tensor:
