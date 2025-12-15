@@ -170,12 +170,13 @@ def plot_multistep_pca(
     Row 0 = "init": learned spatial_init projected through output_proj, BEFORE any glimpses
     Row 1+ = "t=0, t=1, ...": scene state AFTER processing each glimpse
 
-    Columns: Trajectory | Glimpse | Teacher | Scene | Local (AVP) | Local (Teacher) | Delta | Error
+    Columns: Trajectory | Glimpse | Teacher | Scene | Scene (self) | Local (AVP) | Local (Teacher) | Delta | Error
 
     - Trajectory: Full image with cumulative viewpoint boxes
     - Glimpse: Actual glimpse image (empty for init row)
     - Teacher: PCA of teacher features (reference)
-    - Scene: PCA of scene representation
+    - Scene: PCA of scene representation (using teacher PCA)
+    - Scene (self): PCA of scene representation (using final scene's PCA)
     - Local (AVP): PCA of glimpse features from AVP's TRAINABLE backbone
     - Local (Teacher): PCA of glimpse features from FROZEN teacher backbone
     - Delta: Spatial MSE change from previous row
@@ -213,10 +214,12 @@ def plot_multistep_pca(
     n_rows = n_views + 1  # +1 for init row
     colors = timestep_colors(n_views)
 
-    # Fit PCA on teacher
+    # Fit PCA on teacher and on final scene (two views of same data)
     pca = fit_pca(teacher)
+    pca_self = fit_pca(scenes[-1])
     teacher_rgb = pca_rgb(pca, teacher, S, S)
     initial_rgb = pca_rgb(pca, initial_scene, S, S)
+    initial_rgb_self = pca_rgb(pca_self, initial_scene, S, S)
 
     # Precompute error maps (including initial)
     initial_error = ((initial_scene - teacher) ** 2).mean(axis=-1).reshape(S, S)
@@ -233,7 +236,7 @@ def plot_multistep_pca(
         delta_maps.append(delta)
         prev = scene
 
-    n_cols = 8  # Trajectory | Glimpse | Teacher | Scene | Local(AVP) | Local(Teacher) | Delta | Error
+    n_cols = 9  # Trajectory | Glimpse | Teacher | Scene | Scene(self) | Local(AVP) | Local(Teacher) | Delta | Error
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
 
     # Row 0: Initial state (before any glimpses)
@@ -253,22 +256,27 @@ def plot_multistep_pca(
     axes[row, 3].set_title("Scene (init)")
     axes[row, 3].axis("off")
 
-    axes[row, 4].axis("off")  # No local yet
+    axes[row, 4].imshow(initial_rgb_self)
+    axes[row, 4].set_title("Scene/self (init)")
+    axes[row, 4].axis("off")
+
     axes[row, 5].axis("off")  # No local yet
+    axes[row, 6].axis("off")  # No local yet
 
-    axes[row, 6].axis("off")  # No delta for init
-    axes[row, 6].set_title("(no Δ)")
+    axes[row, 7].axis("off")  # No delta for init
+    axes[row, 7].set_title("(no Δ)")
 
-    im_err = axes[row, 7].imshow(error_maps[0], cmap="hot", vmin=0, vmax=error_vmax)
+    im_err = axes[row, 8].imshow(error_maps[0], cmap="hot", vmin=0, vmax=error_vmax)
     mse = float(error_maps[0].mean())
-    axes[row, 7].set_title(f"Err ({mse:.4f})")
-    axes[row, 7].axis("off")
-    fig.colorbar(im_err, ax=axes[row, 7], fraction=0.046, pad=0.04)
+    axes[row, 8].set_title(f"Err ({mse:.4f})")
+    axes[row, 8].axis("off")
+    fig.colorbar(im_err, ax=axes[row, 8], fraction=0.046, pad=0.04)
 
     # Rows 1+: After each glimpse (t=0, t=1, ...)
     for t in range(n_views):
         row = t + 1
         scene_rgb = pca_rgb(pca, scenes[t], S, S)
+        scene_rgb_self = pca_rgb(pca_self, scenes[t], S, S)
         local_avp_rgb = pca_rgb(pca, locals_avp[t], G, G)
         local_teacher_rgb = pca_rgb(pca, locals_teacher[t], G, G)
 
@@ -302,33 +310,38 @@ def plot_multistep_pca(
         axes[row, 2].imshow(teacher_rgb)
         axes[row, 2].axis("off")
 
-        # Col 3: Scene PCA
+        # Col 3: Scene PCA (teacher basis)
         axes[row, 3].imshow(scene_rgb)
         axes[row, 3].set_title(f"Scene t={t}")
         axes[row, 3].axis("off")
 
-        # Col 4: Local (AVP) - from TRAINABLE backbone
-        axes[row, 4].imshow(local_avp_rgb)
-        axes[row, 4].set_title(f"Local AVP t={t}" if t == 0 else "")
+        # Col 4: Scene PCA (self basis - final scene)
+        axes[row, 4].imshow(scene_rgb_self)
+        axes[row, 4].set_title(f"Scene/self t={t}" if t == 0 else "")
         axes[row, 4].axis("off")
 
-        # Col 5: Local (Teacher) - from FROZEN teacher
-        axes[row, 5].imshow(local_teacher_rgb)
-        axes[row, 5].set_title(f"Local Teacher t={t}" if t == 0 else "")
+        # Col 5: Local (AVP) - from TRAINABLE backbone
+        axes[row, 5].imshow(local_avp_rgb)
+        axes[row, 5].set_title(f"Local AVP t={t}" if t == 0 else "")
         axes[row, 5].axis("off")
 
-        # Col 6: Delta
-        im_delta = axes[row, 6].imshow(delta_maps[row], cmap="viridis")
-        axes[row, 6].set_title(f"Δ t={t}")
+        # Col 6: Local (Teacher) - from FROZEN teacher
+        axes[row, 6].imshow(local_teacher_rgb)
+        axes[row, 6].set_title(f"Local Teacher t={t}" if t == 0 else "")
         axes[row, 6].axis("off")
-        fig.colorbar(im_delta, ax=axes[row, 6], fraction=0.046, pad=0.04)
 
-        # Col 7: Error
-        im_err = axes[row, 7].imshow(error_maps[row], cmap="hot", vmin=0, vmax=error_vmax)
-        mse = float(error_maps[row].mean())
-        axes[row, 7].set_title(f"Err ({mse:.4f})")
+        # Col 7: Delta
+        im_delta = axes[row, 7].imshow(delta_maps[row], cmap="viridis")
+        axes[row, 7].set_title(f"Δ t={t}")
         axes[row, 7].axis("off")
-        fig.colorbar(im_err, ax=axes[row, 7], fraction=0.046, pad=0.04)
+        fig.colorbar(im_delta, ax=axes[row, 7], fraction=0.046, pad=0.04)
+
+        # Col 8: Error
+        im_err = axes[row, 8].imshow(error_maps[row], cmap="hot", vmin=0, vmax=error_vmax)
+        mse = float(error_maps[row].mean())
+        axes[row, 8].set_title(f"Err ({mse:.4f})")
+        axes[row, 8].axis("off")
+        fig.colorbar(im_err, ax=axes[row, 8], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     return fig
