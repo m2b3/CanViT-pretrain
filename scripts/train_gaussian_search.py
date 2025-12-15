@@ -120,8 +120,13 @@ def generate_multi_blob_batch(
     device: torch.device,
     margin: float = 0.3,
     sigma_range: tuple[float, float] = (0.08, 0.12),
+    marker_size: int = 6,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Generate batch of canvases with multiple colored gaussian blobs (vectorized).
+    """Generate batch of canvases with gray gaussian blobs + tiny colored markers.
+
+    The colored markers at blob centers are small enough to be indistinguishable
+    at full resolution (~0.4 patches) but visible when zoomed to min_scale (~1.7 patches).
+    This forces active vision: model must zoom into blobs to identify colors.
 
     Uses grid-based placement with jitter for guaranteed separation.
 
@@ -132,6 +137,7 @@ def generate_multi_blob_batch(
         device: Target device
         margin: Keep blob centers away from edges
         sigma_range: (min, max) sigma
+        marker_size: Size of colored marker in pixels (default 6)
 
     Returns:
         images: [B, 3, size, size] in ImageNet-normalized space
@@ -146,7 +152,6 @@ def generate_multi_blob_batch(
     colors = hsv_to_rgb(hues, saturation, value)  # [n_blobs, 3]
 
     # Grid-based placement: arrange blobs on a grid with jitter
-    # This guarantees separation without rejection sampling
     grid_size = int((n_blobs**0.5) + 0.999)  # ceil
     valid_range = 1 - margin
     cell_size = 2 * valid_range / grid_size
@@ -164,8 +169,7 @@ def generate_multi_blob_batch(
             break
     base_pos = torch.tensor(base_positions[:n_blobs], device=device)  # [n_blobs, 2]
 
-    # Add random jitter within cell (same jitter pattern replicated for batch,
-    # then permuted per-batch for variety)
+    # Add random jitter within cell
     jitter_range = cell_size * 0.3
     jitter = (torch.rand(B, n_blobs, 2, device=device) * 2 - 1) * jitter_range
     all_centers = base_pos.unsqueeze(0) + jitter  # [B, n_blobs, 2]
@@ -191,14 +195,37 @@ def generate_multi_blob_batch(
     ) ** 2
     gaussians = torch.exp(-dist_sq / (2 * sig**2 + 1e-8))  # [B, n_blobs, size, size]
 
+    # Sum gaussians to grayscale, then expand to RGB
+    gray = gaussians.sum(dim=1, keepdim=True).clamp(0, 1)  # [B, 1, H, W]
+    images = gray.expand(-1, 3, -1, -1).clone()  # [B, 3, H, W]
+
     # Shuffle color-to-position mapping per batch sample
-    # Otherwise policy learns "red = top-left" shortcut
-    color_perm = torch.stack([torch.randperm(n_blobs, device=device) for _ in range(B)])  # [B, n_blobs]
+    color_perm = torch.stack([torch.randperm(n_blobs, device=device) for _ in range(B)])
     colors_shuffled = colors[color_perm]  # [B, n_blobs, 3]
 
-    # Color the gaussians: [B, 3, size, size]
-    colored = colors_shuffled.view(B, n_blobs, 3, 1, 1) * gaussians.unsqueeze(2)
-    images = colored.sum(dim=1).clamp(0, 1)  # [B, 3, size, size]
+    # Paint tiny colored cross at blob centers BEFORE noise (so markers get noised too)
+    # Cross is 1px thick, marker_size//2 px arms
+    cross_arm = marker_size // 2
+    for b in range(B):
+        for i in range(n_blobs):
+            py = int((all_centers[b, i, 0].item() + 1) / 2 * size)
+            px = int((all_centers[b, i, 1].item() + 1) / 2 * size)
+            color = colors_shuffled[b, i]  # [3]
+            # Vertical arm (1px wide)
+            y0, y1 = max(0, py - cross_arm), min(size, py + cross_arm + 1)
+            if 0 <= px < size:
+                for yy in range(y0, y1):
+                    images[b, :, yy, px] = color
+            # Horizontal arm (1px tall)
+            x0, x1 = max(0, px - cross_arm), min(size, px + cross_arm + 1)
+            if 0 <= py < size:
+                for xx in range(x0, x1):
+                    images[b, :, py, xx] = color
+
+    # Add gaussian color noise AFTER markers - makes them blend in at full res
+    noise_std = 0.15
+    color_noise = torch.randn(B, 3, size, size, device=device) * noise_std
+    images = (images + color_noise).clamp(0, 1)
 
     # Random target selection: [B]
     target_idx = torch.randint(n_blobs, (B,), device=device)
