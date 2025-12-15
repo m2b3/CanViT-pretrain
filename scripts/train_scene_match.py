@@ -1,5 +1,7 @@
 """Train AVP scene representation to match frozen teacher backbone patches."""
 
+from collections.abc import Callable
+
 import copy
 import io
 import logging
@@ -38,6 +40,44 @@ from avp_vit.train import (
     val_transform,
     warmup_cosine_scheduler,
 )
+
+
+class TargetNorm(torch.nn.Module):
+    """Position-aware running normalization for [B, N, D] targets.
+
+    Always updates AND uses running stats - no train/eval mode distinction.
+    First batch initializes stats directly (no warmup period with wrong stats).
+    All ops are in-place on GPU buffers (no sync).
+
+    Stats shape: [N, D] - one mean/std per token position per dimension.
+    """
+
+    mean: Tensor
+    var: Tensor
+
+    def __init__(self, n_tokens: int, embed_dim: int, momentum: float = 0.1, eps: float = 1e-5):
+        super().__init__()
+        self.momentum = momentum
+        self.eps = eps
+        self.register_buffer("mean", torch.zeros(n_tokens, embed_dim))
+        self.register_buffer("var", torch.ones(n_tokens, embed_dim))
+        self.initialized = False  # Python bool, not tensor - no GPU sync on check
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Update running stats and normalize. x: [B, N, D] -> [B, N, D]."""
+        with torch.no_grad():
+            batch_mean = x.mean(dim=0)  # [N, D]
+            batch_var = x.var(dim=0, unbiased=True)  # [N, D], unbiased for population estimate
+
+            if not self.initialized:
+                self.mean.copy_(batch_mean)
+                self.var.copy_(batch_var)
+                self.initialized = True
+            else:
+                self.mean.lerp_(batch_mean, self.momentum)
+                self.var.lerp_(batch_var, self.momentum)
+
+        return (x - self.mean) / (self.var + self.eps).sqrt()
 
 
 LOSS_FN = l1_loss
@@ -227,6 +267,7 @@ def eval_and_log(
     step: int,
     avp: AVPViT,
     teacher: DINOv3Backbone,
+    get_targets: Callable[[Tensor], Tensor],
     images: Tensor,
 ) -> float:
     """Evaluate on one batch with fixed viewpoints. Returns final L1 loss."""
@@ -234,7 +275,7 @@ def eval_and_log(
     viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
-        target = teacher.forward_norm_patches(images)
+        target = get_targets(images)
 
     l1_losses, mse_losses = viz_and_log(
         exp, step, "val", avp, teacher, images, viewpoints, target, None
@@ -283,6 +324,14 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     avp = create_avp(teacher, cfg)
     if cfg.compile:
         compile_avp(avp)
+
+    # Target normalization: position-aware running stats
+    n_tokens = cfg.avp.scene_grid_size ** 2
+    target_norm = TargetNorm(n_tokens, teacher.embed_dim).to(cfg.device)
+
+    def get_targets(images: Tensor) -> Tensor:
+        """Get normalized teacher targets for images."""
+        return target_norm(teacher.forward_norm_patches(images))
 
     # Fresh ratio: only load/compute teacher for this many images per step
     fresh_count = max(1, int(cfg.fresh_ratio * cfg.batch_size))
@@ -343,7 +392,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     # Initial eval
     log.info("Running initial validation...")
     val_images = val_loader.next_batch().to(cfg.device)
-    val_loss = eval_and_log(exp, 0, avp, teacher, val_images)
+    val_loss = eval_and_log(exp, 0, avp, teacher, get_targets, val_images)
     log.info(f"Initial val_loss: {val_loss:.4f}")
     save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
     best_val_loss = val_loss
@@ -356,8 +405,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         for _ in range(n_init_batches):
             batch = train_loader.next_batch().to(cfg.device)
             init_imgs_list.append(batch)
-            raw_targets = teacher.forward_norm_patches(batch)
-            init_targets_list.append(raw_targets)
+            init_targets_list.append(get_targets(batch))
     init_imgs = torch.cat(init_imgs_list, dim=0)[: cfg.batch_size]
     init_targets = torch.cat(init_targets_list, dim=0)[: cfg.batch_size]
     hidden_init_full = avp._init_hidden(cfg.batch_size, None)
@@ -378,7 +426,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         # Load only fresh_count images (the speedup!)
         fresh_imgs = train_loader.next_batch().to(cfg.device)
         with torch.no_grad():
-            fresh_targets = teacher.forward_norm_patches(fresh_imgs)
+            fresh_targets = get_targets(fresh_imgs)
 
         # Inner loop: multiple viewpoints per optimizer step
         viewpoints = [
@@ -446,7 +494,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             # Validation viz: fresh batch, fixed viewpoints
             val_images = val_loader.next_batch().to(cfg.device)
-            val_loss = eval_and_log(exp, step, avp, teacher, val_images)
+            val_loss = eval_and_log(exp, step, avp, teacher, get_targets, val_images)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
             if step % cfg.ckpt_every == 0 and best_val_loss < ckpt_val_loss:
@@ -474,7 +522,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         )
 
     val_images = val_loader.next_batch().to(cfg.device)
-    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, val_images)
+    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, get_targets, val_images)
     if val_loss < best_val_loss:
         best_val_loss = val_loss
     if best_val_loss < ckpt_val_loss:
