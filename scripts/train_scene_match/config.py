@@ -8,6 +8,7 @@ import torch
 from ytch.device import get_sensible_device
 
 from avp_vit import AVPConfig
+from avp_vit.attention import AttentionConfig
 
 
 @dataclass
@@ -30,6 +31,7 @@ class Config:
             gradient_checkpointing=True,
             use_convex_gating=True,
             use_local_temporal=True,
+            attention=AttentionConfig(write_v_expansion=2),
         )
     )
     freeze_inner_backbone: bool = False
