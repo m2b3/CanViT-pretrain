@@ -1,4 +1,4 @@
-"""Smoke tests for curriculum training module."""
+"""Smoke tests for scene matching training module."""
 
 from avp_vit import AVPConfig
 
@@ -10,8 +10,7 @@ def test_config_defaults() -> None:
     """Config defaults are valid."""
     cfg = Config()
     assert cfg.max_grid_size == 64
-    assert cfg.probe_steps == int(cfg.n_steps * cfg.probe_ratio)
-    assert cfg.main_steps == cfg.n_steps - cfg.probe_steps
+    assert cfg.warmup_steps == 1000
 
 
 def test_curriculum_stages_creation() -> None:
@@ -51,23 +50,3 @@ def test_batch_sizes_scale_quadratically() -> None:
     assert stages[64].batch_size == 32
     assert stages[32].batch_size == 128
     assert stages[16].batch_size == 512
-
-
-def test_schedule_integrity() -> None:
-    """Schedule covers all steps with no gaps."""
-    cfg = Config(n_steps=10000, probe_ratio=0.1, grid_sizes=(16, 32, 64))
-    schedule = cfg.get_schedule()
-
-    # Check contiguous
-    for i in range(1, len(schedule)):
-        assert schedule[i].start_step == schedule[i - 1].end_step + 1
-
-    # Check full coverage
-    assert schedule[0].start_step == 0
-    assert schedule[-1].end_step == cfg.n_steps - 1
-
-    # Check phases
-    probe_entries = [e for e in schedule if e.phase == "probe"]
-    main_entries = [e for e in schedule if e.phase == "main"]
-    assert len(probe_entries) == len(cfg.grid_sizes)
-    assert len(main_entries) == len(cfg.grid_sizes)

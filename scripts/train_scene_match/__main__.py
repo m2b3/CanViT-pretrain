@@ -1,4 +1,4 @@
-"""Entry point for curriculum scene matching training."""
+"""Entry point for scene matching training."""
 
 import logging
 from dataclasses import replace
@@ -19,22 +19,13 @@ def main() -> None:
     cfg = tyro.cli(Config)
 
     log.info("=" * 60)
-    log.info("Scene Matching Training with Curriculum")
+    log.info("Scene Matching Training")
     log.info("=" * 60)
     log.info(f"Config: {cfg}")
     log.info(f"Device: {cfg.device}")
     log.info(f"Total steps: {cfg.n_steps:,}")
-
-    # Log schedule
-    log.info(f"PROBE: {cfg.probe_steps:,} steps (largest→smallest, {cfg.probe_ramp_ratio:.0%} ramp)")
-    log.info(f"MAIN: {cfg.main_steps:,} steps (smallest→largest, {cfg.main_ramp_steps} ramp steps)")
-    for entry in cfg.get_schedule():
-        log.info(
-            f"  [{entry.phase:5}] G={entry.grid_size}: "
-            f"steps {entry.start_step:,}-{entry.end_step:,} "
-            f"(ramp={entry.lr_ramp_steps}, decay={entry.lr_decay_steps})"
-        )
-
+    log.info(f"Grid sizes: {cfg.grid_sizes} (random each step)")
+    log.info(f"Warmup: {cfg.warmup_steps} steps")
     log.info("=" * 60)
 
     def objective(trial: optuna.Trial) -> float:

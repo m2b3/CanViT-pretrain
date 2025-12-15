@@ -1,4 +1,4 @@
-"""LR scheduling for curriculum training using PyTorch built-ins."""
+"""LR scheduling: linear warmup + cosine decay."""
 
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -6,22 +6,17 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from .config import Config
 
 
-def create_curriculum_scheduler(optimizer: Optimizer, cfg: Config) -> SequentialLR:
-    """Chain LinearLR (ramp) + CosineAnnealingLR (decay) for each schedule entry."""
-    schedulers = []
-    milestones = []
-    step = 0
-
-    for entry in cfg.get_schedule():
-        assert entry.lr_ramp_steps > 0 or entry.lr_decay_steps > 0
-        if entry.lr_ramp_steps > 0:
-            schedulers.append(LinearLR(optimizer, 1 / entry.lr_ramp_steps, 1.0, entry.lr_ramp_steps))
-            step += entry.lr_ramp_steps
-            milestones.append(step)
-        if entry.lr_decay_steps > 0:
-            schedulers.append(CosineAnnealingLR(optimizer, entry.lr_decay_steps, 0))
-            step += entry.lr_decay_steps
-            milestones.append(step)
-
-    assert step == cfg.n_steps, f"Schedule covers {step} steps, expected {cfg.n_steps}"
-    return SequentialLR(optimizer, schedulers, milestones[:-1])
+def create_scheduler(optimizer: Optimizer, cfg: Config) -> SequentialLR:
+    """Linear warmup + cosine decay to zero."""
+    warmup = LinearLR(
+        optimizer,
+        start_factor=1 / cfg.warmup_steps,
+        end_factor=1.0,
+        total_iters=cfg.warmup_steps,
+    )
+    decay = CosineAnnealingLR(
+        optimizer,
+        T_max=cfg.n_steps - cfg.warmup_steps,
+        eta_min=0,
+    )
+    return SequentialLR(optimizer, [warmup, decay], milestones=[cfg.warmup_steps])

@@ -1,6 +1,7 @@
-"""Main training loop with two-phase curriculum learning."""
+"""Main training loop with random grid size sampling."""
 
 import logging
+import random
 from collections.abc import Callable
 
 import comet_ml
@@ -18,10 +19,10 @@ from avp_vit.train.curriculum import CurriculumStage, log_curriculum_stage
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
 
-from .config import Config, ScheduleEntry
+from .config import Config
 from .data import create_curriculum_stages, create_loaders_for_curriculum
 from .model import compile_avp, compile_teacher, create_avp, load_teacher
-from .scheduler import create_curriculum_scheduler
+from .scheduler import create_scheduler
 from .viz import eval_and_log, save_checkpoint, viz_and_log
 
 log = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ def init_survival_batch(
 
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
-    """Train AVP model with two-phase curriculum and return best val_loss."""
+    """Train AVP model with random grid size sampling. Returns best val_loss."""
     log.info(f"Starting trial {trial.number}")
     log.info(f"Device: {cfg.device}")
 
@@ -130,36 +131,33 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
     optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
-    scheduler = create_curriculum_scheduler(optimizer, cfg)
+    scheduler = create_scheduler(optimizer, cfg)
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}_best.pt"
     best_val_loss = float("inf")
     ckpt_val_loss = float("inf")
 
-    schedule = cfg.get_schedule()
+    def make_target_fn(norm: PositionAwareNorm) -> Callable[[Tensor], Tensor]:
+        def compute_targets(images: Tensor) -> Tensor:
+            with torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16):
+                teacher_patches = teacher.forward_norm_patches(images)
+            return norm(teacher_patches.float())
+        return compute_targets
 
-    # State tracking (all set on first iteration via phase transition)
-    current_phase: str | None = None
-    current_G: int | None = None
-    state: SurvivalBatch | None = None
-    norm: PositionAwareNorm | None = None
-    stage: CurriculumStage | None = None
-    train_loader: InfiniteLoader | None = None
-    val_loader: InfiniteLoader | None = None
-
-    def get_current_entry(step: int) -> ScheduleEntry:
-        for entry in schedule:
-            if entry.start_step <= step <= entry.end_step:
-                return entry
-        raise ValueError(f"Step {step} not in schedule")
-
-    def compute_normalized_targets(images: Tensor) -> Tensor:
-        """Extract teacher patches and apply position-aware running normalization."""
-        assert norm is not None
-        with torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16):
-            teacher_patches = teacher.forward_norm_patches(images)
-        return norm(teacher_patches.float())
+    # Initialize all survival batches upfront
+    log.info("Initializing survival batches for all grid sizes...")
+    states: dict[int, SurvivalBatch] = {}
+    for G, stage in stages.items():
+        avp.set_scene_grid_size(G)
+        states[G] = init_survival_batch(
+            avp,
+            train_loaders[G],
+            make_target_fn(norms[G]),
+            stage.batch_size,
+            stage.fresh_count,
+            cfg.device,
+        )
 
     ema_loss_t = torch.tensor(0.0, device=cfg.device)
     alpha = 2 / (cfg.log_every + 1)
@@ -168,49 +166,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
 
     for step in pbar:
-        entry = get_current_entry(step)
-        G = entry.grid_size
-
-        if entry.phase != current_phase or G != current_G:
-            log.info(f"Step {step}: [{entry.phase}] Transitioning to G={G}")
-            current_phase = entry.phase
-            current_G = G
-
-            stage = stages[G]
-            train_loader = train_loaders[G]
-            val_loader = val_loaders[G]
-            norm = norms[G]
-            avp.set_scene_grid_size(G)
-            log_curriculum_stage(stage, log)
-
-            # Baseline eval BEFORE training on this stage
-            val_images = val_loader.next_batch().to(cfg.device)
-            norm.eval()
-            eval_and_log(
-                exp, step, avp, teacher, compute_normalized_targets, val_images, norm, f"grid{G}/init"
-            )
-            norm.train()
-
-            # Initialize survival batch for this stage
-            state = init_survival_batch(
-                avp,
-                train_loader,
-                compute_normalized_targets,
-                stage.batch_size,
-                stage.fresh_count,
-                cfg.device,
-            )
-
-        assert state is not None
-        assert norm is not None
-        assert stage is not None
-        assert train_loader is not None
-        assert val_loader is not None
+        G = random.choice(cfg.grid_sizes)
+        stage = stages[G]
+        state = states[G]
+        norm = norms[G]
+        train_loader = train_loaders[G]
+        val_loader = val_loaders[G]
+        avp.set_scene_grid_size(G)
+        compute_targets = make_target_fn(norm)
 
         # Load fresh images
         fresh_imgs = train_loader.next_batch().to(cfg.device)
         with torch.no_grad():
-            fresh_targets = compute_normalized_targets(fresh_imgs)
+            fresh_targets = compute_targets(fresh_imgs)
 
         # Viewpoint scale bounds for current grid size
         min_scale = stage.min_viewpoint_scale
@@ -258,12 +226,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     "train/grad_norm": grad_norm,
                     "train/lr": lr,
                     "train/grid_size": G,
-                    "train/phase": 0 if entry.phase == "probe" else 1,
                 },
                 step=step,
             )
             pbar.set_postfix_str(
-                f"[{entry.phase}] G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}"
+                f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}"
             )
 
         if step > 0 and step % cfg.val_every == 0:
@@ -287,7 +254,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             val_images = val_loader.next_batch().to(cfg.device)
             norm.eval()
             val_loss = eval_and_log(
-                exp, step, avp, teacher, compute_normalized_targets, val_images, norm, f"grid{G}/val"
+                exp, step, avp, teacher, compute_targets, val_images, norm, f"grid{G}/val"
             )
             norm.train()
 
@@ -310,7 +277,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             if avp.local_init is not None
             else None
         )
-        state = state.step(
+        states[G] = state.step(
             fresh_imgs,
             fresh_targets,
             final_hidden,
@@ -319,20 +286,22 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             local_init,
         )
 
-    # Final evaluation
-    assert norm is not None
-    assert val_loader is not None  # Always set on first iteration (step 0)
-    assert current_G is not None  # Always set on first iteration (step 0)
+    # Final evaluation (use max grid size)
+    G = cfg.max_grid_size
+    avp.set_scene_grid_size(G)
+    norm = norms[G]
+    val_loader = val_loaders[G]
+    compute_targets = make_target_fn(norm)
     val_images = val_loader.next_batch().to(cfg.device)
     norm.eval()
     val_loss = eval_and_log(
-        exp, cfg.n_steps, avp, teacher, compute_normalized_targets, val_images, norm, f"grid{current_G}/val"
+        exp, cfg.n_steps, avp, teacher, compute_targets, val_images, norm, f"grid{G}/val"
     )
     norm.train()
     if val_loss < best_val_loss:
         best_val_loss = val_loss
     if best_val_loss < ckpt_val_loss:
-        save_checkpoint(avp, norms, ckpt_path, exp, cfg.n_steps, best_val_loss, current_G)
+        save_checkpoint(avp, norms, ckpt_path, exp, cfg.n_steps, best_val_loss, G)
 
     log.info(
         f"Final: train_ema={ema_loss_t.item():.4f}, val={val_loss:.4f}, "
