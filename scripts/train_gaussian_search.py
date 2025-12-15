@@ -734,9 +734,8 @@ def compute_policy_grad_norms(policy: ViewpointPolicy) -> dict[str, float]:
     return {
         "grad_policy_total": module_grad_norm(policy),
         "grad_scene_proj": module_grad_norm(policy.scene_proj),
-        "grad_color_embed": module_grad_norm(policy.color_embed),
-        "grad_transformer": sum(module_grad_norm(b) for b in policy.blocks),
-        "grad_output_mlp": module_grad_norm(policy.output_mlp),
+        "grad_color_proj": module_grad_norm(policy.color_proj),
+        "grad_mlp": module_grad_norm(policy.mlp),
         "grad_center_head": module_grad_norm(policy.center_head),
         "grad_scale_head": module_grad_norm(policy.scale_head),
     }
