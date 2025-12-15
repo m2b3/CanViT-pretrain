@@ -55,9 +55,15 @@ class TargetNorm(torch.nn.Module):
     var: Tensor
 
     def __init__(
-        self, n_tokens: int, embed_dim: int, momentum: float = 0.1, eps: float = 1e-5
+        self,
+        n_tokens: int,
+        embed_dim: int,
+        scene_grid_size: int,
+        momentum: float = 0.1,
+        eps: float = 1e-5,
     ):
         super().__init__()
+        self.scene_grid_size = scene_grid_size
         self.momentum = momentum
         self.eps = eps
         self.register_buffer("mean", torch.zeros(n_tokens, embed_dim))
@@ -80,6 +86,55 @@ class TargetNorm(torch.nn.Module):
                     self.var.lerp_(batch_var, self.momentum)
 
         return (x - self.mean) / (self.var + self.eps).sqrt()
+
+    def normalize_local(
+        self, x: Tensor, viewpoint: Viewpoint, glimpse_grid_size: int
+    ) -> Tensor:
+        """Normalize glimpse features using interpolated scene stats.
+
+        Interpolates scene-level mean/std to glimpse positions, then normalizes.
+        Uses std interpolation (more principled for correlated adjacent tokens).
+
+        Args:
+            x: [G², D] glimpse features (single sample, no batch dim)
+            viewpoint: Viewpoint defining glimpse position/scale
+            glimpse_grid_size: G
+
+        Returns:
+            [G², D] normalized features
+        """
+        from avp_vit.rope import grid_offsets
+
+        S, G = self.scene_grid_size, glimpse_grid_size
+        D = self.mean.shape[1]
+
+        # Reshape stats to [1, D, S, S] for grid_sample
+        mean_grid = self.mean.view(S, S, D).permute(2, 0, 1).unsqueeze(0)
+        std_grid = (self.var + self.eps).sqrt().view(S, S, D).permute(2, 0, 1).unsqueeze(0)
+
+        # Build glimpse sampling grid (same coords as extract_glimpse)
+        offsets = grid_offsets(G, G, self.mean.device, dtype=torch.float32)
+        offsets = offsets.view(G, G, 2).unsqueeze(0)  # [1, G, G, 2]
+
+        # Single sample: viewpoint.centers[0], viewpoint.scales[0]
+        center = viewpoint.centers[0:1].view(1, 1, 1, 2)  # [1, 1, 1, 2]
+        scale = viewpoint.scales[0:1].view(1, 1, 1, 1)  # [1, 1, 1, 1]
+        grid = center + scale * offsets
+        grid = grid.flip(-1)  # (y, x) -> (x, y) for grid_sample
+
+        # Interpolate stats
+        mean_local = torch.nn.functional.grid_sample(
+            mean_grid, grid, mode="bilinear", align_corners=False
+        )
+        std_local = torch.nn.functional.grid_sample(
+            std_grid, grid, mode="bilinear", align_corners=False
+        )
+
+        # Reshape back to [G², D]
+        mean_local = mean_local.squeeze(0).permute(1, 2, 0).reshape(G * G, D)
+        std_local = std_local.squeeze(0).permute(1, 2, 0).reshape(G * G, D)
+
+        return (x - mean_local) / std_local
 
 
 LOSS_FN = l1_loss
@@ -192,14 +247,20 @@ def viz_and_log(
     viewpoints: list[Viewpoint],
     target: Tensor,
     hidden: Tensor | None,
+    target_norm: TargetNorm | None = None,
 ) -> tuple[list[float], list[float]]:
     """Run forward trajectory and log visualization.
 
     This is the core visualization function used by both validation and training viz.
     Returns (l1_losses, mse_losses) per timestep.
+
+    Args:
+        target_norm: If provided, normalizes local features using interpolated stats
+                     for consistent visualization with scene-level targets.
     """
     assert isinstance(avp.backbone, DINOv3Backbone)
     avp_backbone = avp.backbone
+    G = avp.cfg.glimpse_grid_size
 
     with torch.inference_mode():
         outputs, _, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
@@ -222,22 +283,32 @@ def viz_and_log(
         initial_np = initial_scene.cpu().float().numpy()
 
         scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
-        locals_avp = [
+
+        # Local features - normalize with interpolated stats if available
+        locals_avp_raw = [
             avp_backbone.output_norm(out.local[sample_idx : sample_idx + 1, n_prefix:])
             .squeeze(0)
-            .cpu()
-            .float()
-            .numpy()
             for out in outputs
         ]
-        locals_teacher = [
+        locals_teacher_raw = [
             teacher.forward_norm_patches(out.glimpse[sample_idx : sample_idx + 1])
             .squeeze(0)
-            .cpu()
-            .float()
-            .numpy()
             for out in outputs
         ]
+
+        if target_norm is not None and target_norm.initialized:
+            locals_avp = [
+                target_norm.normalize_local(feat, vp, G).cpu().float().numpy()
+                for feat, vp in zip(locals_avp_raw, viewpoints, strict=True)
+            ]
+            locals_teacher = [
+                target_norm.normalize_local(feat, vp, G).cpu().float().numpy()
+                for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
+            ]
+        else:
+            locals_avp = [feat.cpu().float().numpy() for feat in locals_avp_raw]
+            locals_teacher = [feat.cpu().float().numpy() for feat in locals_teacher_raw]
+
         glimpses = [
             imagenet_denormalize(out.glimpse[sample_idx].cpu()).numpy()
             for out in outputs
@@ -273,6 +344,7 @@ def eval_and_log(
     teacher: DINOv3Backbone,
     get_targets: Callable[[Tensor], Tensor],
     images: Tensor,
+    target_norm: TargetNorm | None = None,
 ) -> float:
     """Evaluate on one batch with fixed viewpoints. Returns final L1 loss."""
     B = images.shape[0]
@@ -282,7 +354,7 @@ def eval_and_log(
         target = get_targets(images)
 
     l1_losses, mse_losses = viz_and_log(
-        exp, step, "val", avp, teacher, images, viewpoints, target, None
+        exp, step, "val", avp, teacher, images, viewpoints, target, None, target_norm
     )
 
     for t, (l1, mse) in enumerate(zip(l1_losses, mse_losses, strict=True)):
@@ -331,7 +403,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Target normalization: position-aware running stats
     n_tokens = cfg.avp.scene_grid_size**2
-    target_norm = TargetNorm(n_tokens, teacher.embed_dim).to(cfg.device)
+    target_norm = TargetNorm(
+        n_tokens, teacher.embed_dim, cfg.avp.scene_grid_size
+    ).to(cfg.device)
 
     def get_targets(images: Tensor) -> Tensor:
         """Get normalized teacher targets for images."""
@@ -397,7 +471,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info("Running initial validation...")
     val_images = val_loader.next_batch().to(cfg.device)
     target_norm.eval()
-    val_loss = eval_and_log(exp, 0, avp, teacher, get_targets, val_images)
+    val_loss = eval_and_log(exp, 0, avp, teacher, get_targets, val_images, target_norm)
     target_norm.train()
     log.info(f"Initial val_loss: {val_loss:.4f}")
     save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
@@ -494,6 +568,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 viewpoints,
                 state.targets,
                 state.hidden,
+                target_norm,
             )
             exp.log_metric("train/viz_l1", train_l1[-1], step=step)
             exp.log_metric("train/viz_mse", train_mse[-1], step=step)
@@ -501,7 +576,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             # Validation viz: fresh batch, fixed viewpoints
             val_images = val_loader.next_batch().to(cfg.device)
             target_norm.eval()
-            val_loss = eval_and_log(exp, step, avp, teacher, get_targets, val_images)
+            val_loss = eval_and_log(exp, step, avp, teacher, get_targets, val_images, target_norm)
             target_norm.train()
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -531,7 +606,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     val_images = val_loader.next_batch().to(cfg.device)
     target_norm.eval()
-    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, get_targets, val_images)
+    val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, get_targets, val_images, target_norm)
     target_norm.train()
     if val_loss < best_val_loss:
         best_val_loss = val_loss
