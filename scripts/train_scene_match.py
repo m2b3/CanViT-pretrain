@@ -98,10 +98,12 @@ class Config:
         default_factory=lambda: AVPConfig(
             scene_grid_size=32,
             glimpse_grid_size=7,
-            layer_scale_init=1e-5,
+            layer_scale_init=1e-3,
             use_output_proj=True,
             use_scene_registers=True,
             gradient_checkpointing=True,
+            use_convex_gating=True,
+            use_local_temporal=True,
         )
     )
     freeze_inner_backbone: bool = False
@@ -113,7 +115,7 @@ class Config:
     n_steps: int = 200000
     batch_size: int = 64
     num_workers: int = 8
-    ref_lr: float = 1e-5
+    ref_lr: float = 2.5e-5
     weight_decay: float = 1e-5
     warmup_ratio: float = 0.01
     grad_clip: float = 1.0
