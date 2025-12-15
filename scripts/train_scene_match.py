@@ -173,7 +173,7 @@ class Config:
     n_steps: int = 200000
     batch_size: int = 64
     num_workers: int = 8
-    ref_lr: float = 2.5e-5
+    ref_lr: float = 1e-5
     weight_decay: float = 1e-5
     warmup_ratio: float = 0.01
     grad_clip: float = 1.0
