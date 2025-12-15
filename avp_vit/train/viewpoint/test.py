@@ -2,7 +2,12 @@
 
 import torch
 
-from avp_vit.train.viewpoint import make_eval_viewpoints, random_viewpoint
+from avp_vit.train.viewpoint import (
+    _quadrants_at_depth,
+    make_curriculum_eval_viewpoints,
+    make_eval_viewpoints,
+    random_viewpoint,
+)
 
 
 class TestRandomViewpoint:
@@ -53,3 +58,57 @@ class TestMakeEvalViewpoints:
         vps = make_eval_viewpoints(4, torch.device("cpu"))
         for vp in vps[1:]:
             assert (vp.scales == 0.5).all()
+
+
+class TestQuadrantsAtDepth:
+    def test_depth1_count(self) -> None:
+        vps = _quadrants_at_depth(2, 1, torch.device("cpu"))
+        assert len(vps) == 4  # 2^1 x 2^1 = 4
+
+    def test_depth2_count(self) -> None:
+        vps = _quadrants_at_depth(2, 2, torch.device("cpu"))
+        assert len(vps) == 16  # 2^2 x 2^2 = 16
+
+    def test_depth1_scale(self) -> None:
+        vps = _quadrants_at_depth(2, 1, torch.device("cpu"))
+        for vp in vps:
+            assert (vp.scales == 0.5).all()
+
+    def test_depth2_scale(self) -> None:
+        vps = _quadrants_at_depth(2, 2, torch.device("cpu"))
+        for vp in vps:
+            assert (vp.scales == 0.25).all()
+
+    def test_centers_cover_grid(self) -> None:
+        vps = _quadrants_at_depth(1, 1, torch.device("cpu"))
+        centers = [vp.centers[0].tolist() for vp in vps]
+        # depth=1: scale=0.5, n=2, centers at -0.5 and 0.5 on each axis
+        expected = {(-0.5, -0.5), (-0.5, 0.5), (0.5, -0.5), (0.5, 0.5)}
+        actual = {(round(c[0], 1), round(c[1], 1)) for c in centers}
+        assert actual == expected
+
+
+class TestMakeCurriculumEvalViewpoints:
+    def test_g16_returns_5(self) -> None:
+        vps = make_curriculum_eval_viewpoints(2, G=16, g=7, device=torch.device("cpu"))
+        assert len(vps) == 5
+
+    def test_g32_returns_10(self) -> None:
+        vps = make_curriculum_eval_viewpoints(2, G=32, g=7, device=torch.device("cpu"))
+        assert len(vps) == 10
+
+    def test_g64_returns_20(self) -> None:
+        vps = make_curriculum_eval_viewpoints(2, G=64, g=7, device=torch.device("cpu"))
+        assert len(vps) == 20
+
+    def test_first_is_full(self) -> None:
+        vps = make_curriculum_eval_viewpoints(2, G=32, g=7, device=torch.device("cpu"))
+        assert vps[0].name == "full"
+        assert (vps[0].scales == 1.0).all()
+
+    def test_shapes(self) -> None:
+        B = 4
+        vps = make_curriculum_eval_viewpoints(B, G=32, g=7, device=torch.device("cpu"))
+        for vp in vps:
+            assert vp.centers.shape == (B, 2)
+            assert vp.scales.shape == (B,)
