@@ -203,7 +203,7 @@ class AVPViT(nn.Module):
             # Input has std~1/sqrt(D), default Linear preserves this, we need sqrt(D) boost
             with torch.no_grad():
                 self.output_proj.weight.mul_(embed_dim**0.5)
-                self.output_proj.bias.mul_(embed_dim**0.5)
+                self.output_proj.bias.zero_()
         else:
             self.output_proj = nn.Identity()
 
