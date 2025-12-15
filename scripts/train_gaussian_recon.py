@@ -37,8 +37,8 @@ class Config:
     # Model
     avp: AVPConfig = field(
         default_factory=lambda: AVPConfig(
-            scene_grid_size=16,
-            glimpse_grid_size=7,
+            scene_grid_size=16,  # 16*14=224px scene
+            glimpse_grid_size=4,  # 4*14=56px glimpse, min_scale=0.25
             gate_init=1e-4,
             use_output_proj=True,
             use_scene_registers=True,
@@ -52,13 +52,15 @@ class Config:
     batch_size: int = 64
     ref_lr: float = 1e-5
     weight_decay: float = 1e-4
-    warmup_ratio: float = 0.05
+    warmup_steps: int = 5000
     grad_clip: float = 1.0
+    adam_beta1: float = 0.85
+    adam_beta2: float = 0.995
     # Task
-    n_blobs: int = 3
+    n_blobs: int = 2
     blob_margin: float = 0.3
     blob_sigma_min: float = 0.08
-    blob_sigma_max: float = 0.15
+    blob_sigma_max: float = 0.12
     # Logging
     log_every: int = 20
     val_every: int = 100
@@ -216,10 +218,14 @@ def train(cfg: Config) -> None:
     exp.log_parameters({"trainable_params": n_trainable, "total_params": n_total})
 
     peak_lr = cfg.ref_lr * cfg.batch_size
-    warmup_steps = int(cfg.n_steps * cfg.warmup_ratio)
-    optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
-    scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, warmup_steps)
-    log.info(f"Optimizer: peak_lr={peak_lr:.2e}, warmup={warmup_steps}, decay={cfg.weight_decay:.2e}")
+    optimizer = torch.optim.AdamW(
+        trainable,
+        lr=peak_lr,
+        betas=(cfg.adam_beta1, cfg.adam_beta2),
+        weight_decay=cfg.weight_decay,
+    )
+    scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, cfg.warmup_steps)
+    log.info(f"Optimizer: peak_lr={peak_lr:.2e}, warmup={cfg.warmup_steps}, betas=({cfg.adam_beta1}, {cfg.adam_beta2})")
 
     # Initial eval
     log.info("Initial evaluation...")
