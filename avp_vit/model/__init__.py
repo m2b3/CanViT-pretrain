@@ -254,7 +254,7 @@ class AVPViT(nn.Module):
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
         """Initialize hidden state with gated residual.
 
-        hidden = base + gate * (prev_hidden - base)
+        hidden_out = base + gate * (norm(prev_hidden) - base)
 
         At init (gate≈0), each timestep starts from base regardless of prev_hidden.
         This enables stable single-step learning before recurrence kicks in.
@@ -264,7 +264,8 @@ class AVPViT(nn.Module):
         base = self._get_base_hidden(B)
         if hidden is None:
             return base
-        return base + self.scene_temporal_gate * (hidden - base)
+        normed = self.scene_input_norm(hidden)
+        return base + self.scene_temporal_gate * (normed - base)
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
         """Extract spatial tokens from hidden state.
@@ -369,8 +370,6 @@ class AVPViT(nn.Module):
         expected_hidden_t = n_ctx + n_ephemeral + n_persistent + n_spatial
         assert hidden_t.shape == (B, expected_hidden_t, D), \
             f"assembled hidden_t {hidden_t.shape} != expected ({B}, {expected_hidden_t}, {D})"
-
-        hidden_t = self.scene_input_norm(hidden_t)  # normalize all scene tokens together
 
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
         scene_pos = self.scene_positions.to(rope_dtype).unsqueeze(0).expand(B, -1, -1)
