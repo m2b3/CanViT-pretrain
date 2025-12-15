@@ -65,20 +65,19 @@ class TargetNorm(torch.nn.Module):
         self.initialized = False  # Python bool, not tensor - no GPU sync on check
 
     def forward(self, x: Tensor) -> Tensor:
-        """Update running stats and normalize. x: [B, N, D] -> [B, N, D]."""
-        with torch.no_grad():
-            batch_mean = x.mean(dim=0)  # [N, D]
-            batch_var = x.var(
-                dim=0, unbiased=True
-            )  # [N, D], unbiased for population estimate
+        """Normalize x: [B, N, D] -> [B, N, D]. Updates stats only in train mode."""
+        if self.training:
+            with torch.no_grad():
+                batch_mean = x.mean(dim=0)  # [N, D]
+                batch_var = x.var(dim=0, unbiased=True)  # [N, D]
 
-            if not self.initialized:
-                self.mean.copy_(batch_mean)
-                self.var.copy_(batch_var)
-                self.initialized = True
-            else:
-                self.mean.lerp_(batch_mean, self.momentum)
-                self.var.lerp_(batch_var, self.momentum)
+                if not self.initialized:
+                    self.mean.copy_(batch_mean)
+                    self.var.copy_(batch_var)
+                    self.initialized = True
+                else:
+                    self.mean.lerp_(batch_mean, self.momentum)
+                    self.var.lerp_(batch_var, self.momentum)
 
         return (x - self.mean) / (self.var + self.eps).sqrt()
 
@@ -397,7 +396,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     # Initial eval
     log.info("Running initial validation...")
     val_images = val_loader.next_batch().to(cfg.device)
+    target_norm.eval()
     val_loss = eval_and_log(exp, 0, avp, teacher, get_targets, val_images)
+    target_norm.train()
     log.info(f"Initial val_loss: {val_loss:.4f}")
     save_checkpoint(avp, ckpt_path, exp, 0, val_loss)
     best_val_loss = val_loss
@@ -499,7 +500,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             # Validation viz: fresh batch, fixed viewpoints
             val_images = val_loader.next_batch().to(cfg.device)
+            target_norm.eval()
             val_loss = eval_and_log(exp, step, avp, teacher, get_targets, val_images)
+            target_norm.train()
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
             if step % cfg.ckpt_every == 0 and best_val_loss < ckpt_val_loss:
@@ -527,7 +530,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         )
 
     val_images = val_loader.next_batch().to(cfg.device)
+    target_norm.eval()
     val_loss = eval_and_log(exp, cfg.n_steps, avp, teacher, get_targets, val_images)
+    target_norm.train()
     if val_loss < best_val_loss:
         best_val_loss = val_loss
     if best_val_loss < ckpt_val_loss:
