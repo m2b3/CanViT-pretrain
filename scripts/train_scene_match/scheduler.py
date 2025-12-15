@@ -15,7 +15,7 @@ def create_curriculum_scheduler(optimizer: Optimizer, cfg: Config) -> Sequential
     for entry in cfg.get_schedule():
         assert entry.lr_ramp_steps > 0 or entry.lr_decay_steps > 0
         if entry.lr_ramp_steps > 0:
-            schedulers.append(LinearLR(optimizer, 0.0, 1.0, entry.lr_ramp_steps))
+            schedulers.append(LinearLR(optimizer, 1 / entry.lr_ramp_steps, 1.0, entry.lr_ramp_steps))
             step += entry.lr_ramp_steps
             milestones.append(step)
         if entry.lr_decay_steps > 0:
