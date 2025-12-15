@@ -33,9 +33,9 @@ def test_write_shapes():
 
 
 def test_write_v_identity_init():
-    """V projection starts as identity when identity_init_v=True."""
+    """V projection starts as identity when vo_identity_init=True."""
     D = 64
-    cfg = AttentionConfig(identity_init_v=True)
+    cfg = AttentionConfig(vo_identity_init=True)
     attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=cfg)
     v = attn.v_transform
     assert isinstance(v, nn.Linear)
@@ -44,13 +44,22 @@ def test_write_v_identity_init():
 
 
 def test_write_v_default_init():
-    """V projection uses default init when identity_init_v=False."""
+    """V projection uses default init when vo_identity_init=False."""
     D = 64
-    cfg = AttentionConfig(identity_init_v=False)
+    cfg = AttentionConfig(vo_identity_init=False)
     attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=cfg)
     v = attn.v_transform
     assert isinstance(v, nn.Linear)
     assert not torch.allclose(v.weight, torch.eye(D))
+
+
+def test_read_o_identity_init():
+    """O projection starts as identity when vo_identity_init=True."""
+    D = 64
+    cfg = AttentionConfig(vo_identity_init=True)
+    attn = RoPEReadCrossAttention(D, num_heads=4, cfg=cfg)
+    assert torch.allclose(attn.out_transform.weight, torch.eye(D))
+    assert torch.allclose(attn.out_transform.bias, torch.zeros(D))
 
 
 def test_flops_read():

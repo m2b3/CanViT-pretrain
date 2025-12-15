@@ -57,8 +57,9 @@ def compile_teacher(teacher: DINOv3Backbone) -> None:
 def compile_avp(avp: AVPViT) -> None:
     """Wrap AVP DINOv3 blocks and cross-attention with torch.compile(dynamic=True)."""
     n_blocks = avp.backbone.n_blocks
+    n_adapters = avp.n_adapters
     log.info(
-        f"Compiling AVP: {n_blocks} backbone blocks + {n_blocks} read/write attention pairs"
+        f"Compiling AVP: {n_blocks} backbone blocks + {n_adapters} read/write attention pairs"
     )
 
     assert isinstance(avp.backbone, DINOv3Backbone)
@@ -66,7 +67,7 @@ def compile_avp(avp: AVPViT) -> None:
     for i in range(n_blocks):
         blocks[i] = torch.compile(blocks[i], dynamic=True)  # type: ignore[assignment]
 
-    for i in range(n_blocks):
+    for i in range(n_adapters):
         avp.read_attn[i] = torch.compile(avp.read_attn[i], dynamic=True)  # type: ignore[assignment]
         avp.write_attn[i] = torch.compile(avp.write_attn[i], dynamic=True)  # type: ignore[assignment]
 

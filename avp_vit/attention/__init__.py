@@ -17,7 +17,7 @@ class AttentionConfig:
 
     use_ewa_transforms: bool = True  # EWA instead of Identity for unprojected streams
     use_post_rope_ewa: bool = False  # EWA after RoPE on Q/K
-    identity_init_v: bool = False  # Identity-init V projection (write attn only)
+    vo_identity_init: bool = True  # Identity-init V and O projections (content path, not Q/K)
     write_v_expansion: int | None = None  # None = Linear, int = MLP with SiLU and given expansion
 
 
@@ -105,6 +105,9 @@ class RoPEReadCrossAttention(RoPECrossAttention):
         self.k_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.v_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.out_transform = nn.Linear(dim, dim)
+        if cfg.vo_identity_init:
+            nn.init.eye_(self.out_transform.weight)
+            nn.init.zeros_(self.out_transform.bias)
 
 
 class _ResidualMLP(nn.Module):
@@ -131,7 +134,7 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
         super().__init__(dim, num_heads, cfg)
         self.q_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.k_transform = nn.Linear(dim, dim)
-        self.v_transform = self._make_v_proj(dim, cfg.identity_init_v, cfg.write_v_expansion)
+        self.v_transform = self._make_v_proj(dim, cfg.vo_identity_init, cfg.write_v_expansion)
         self.out_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
 
     @staticmethod
