@@ -31,6 +31,26 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
 
+def get_avp_gate_stats(avp: AVPViT) -> dict[str, float]:
+    """Get LayerScale and temporal gate statistics from AVP model."""
+    stats: dict[str, float] = {}
+
+    # LayerScale norms (read/write cross-attention)
+    if avp.read_scale is not None:
+        read_norms = [s.scale.norm().item() for s in avp.read_scale]
+        stats["gate/read_scale_norm"] = sum(read_norms) / len(read_norms)
+    if avp.write_scale is not None:
+        write_norms = [s.scale.norm().item() for s in avp.write_scale]
+        stats["gate/write_scale_norm"] = sum(write_norms) / len(write_norms)
+
+    # Scene temporal gate (inter-step recurrence)
+    if avp.scene_temporal_gate is not None:
+        stats["gate/scene_temporal_norm"] = avp.scene_temporal_gate.norm().item()
+        stats["gate/scene_temporal_mean"] = avp.scene_temporal_gate.mean().item()
+
+    return stats
+
+
 class PixelDecoder(nn.Module):
     """Decode scene embeddings to pixel space."""
 
@@ -382,11 +402,13 @@ def train(cfg: Config) -> None:
 
         if step % cfg.log_every == 0:
             lr = scheduler.get_last_lr()[0]
+            gate_stats = get_avp_gate_stats(avp)
             exp.log_metrics(
                 {
                     "train/loss": ema_loss,
                     "train/grad_norm": grad_norm.item(),
                     "train/lr": lr,
+                    **gate_stats,
                 },
                 step=step,
             )

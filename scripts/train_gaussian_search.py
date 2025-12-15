@@ -232,6 +232,26 @@ def summarize_policy_stats(stats: dict[str, Tensor]) -> dict[str, float]:
     }
 
 
+def get_avp_gate_stats(avp: AVPViT) -> dict[str, float]:
+    """Get LayerScale and temporal gate statistics from AVP model."""
+    stats: dict[str, float] = {}
+
+    # LayerScale norms (read/write cross-attention)
+    if avp.read_scale is not None:
+        read_norms = [s.scale.norm().item() for s in avp.read_scale]
+        stats["gate/read_scale_norm"] = sum(read_norms) / len(read_norms)
+    if avp.write_scale is not None:
+        write_norms = [s.scale.norm().item() for s in avp.write_scale]
+        stats["gate/write_scale_norm"] = sum(write_norms) / len(write_norms)
+
+    # Scene temporal gate (inter-step recurrence)
+    if avp.scene_temporal_gate is not None:
+        stats["gate/scene_temporal_norm"] = avp.scene_temporal_gate.norm().item()
+        stats["gate/scene_temporal_mean"] = avp.scene_temporal_gate.mean().item()
+
+    return stats
+
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -559,6 +579,7 @@ def train(cfg: Config) -> None:
             assert grad_norms is not None
             assert first_stats is not None
             policy_stats = summarize_policy_stats(first_stats)
+            gate_stats = get_avp_gate_stats(avp)
 
             # Log detailed grad breakdown on first step
             if step == 0:
@@ -569,6 +590,7 @@ def train(cfg: Config) -> None:
                     "loss": ema_loss.item(),
                     "grad_norm": grad_norm.item(),
                     **grad_norms,
+                    **gate_stats,
                     "lr": scheduler.get_last_lr()[0],
                     "batch_spread_logits": policy_stats["batch_spread_logits"],
                     "scale_mean": policy_stats["scale_mean"],
