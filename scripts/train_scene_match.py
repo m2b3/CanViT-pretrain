@@ -176,7 +176,7 @@ class Config:
     warmup_ratio: float = 0.01
     grad_clip: float = 1.0
     crop_scale_min: float = 0.4
-    loss: Literal["l1", "mse"] = "l1"
+    loss: Literal["l1", "mse"] = "mse"
     # Logging
     log_every: int = 20
     val_every: int = 50
