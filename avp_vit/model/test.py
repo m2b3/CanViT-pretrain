@@ -630,7 +630,7 @@ def test_local_temporal_gating_gradient_flow():
     centers = torch.zeros(B, 2)
     scales = torch.ones(B)
 
-    out = avp._process_glimpse(glimpse, centers, scales, None, local_prev)
+    out = avp._process_glimpse(glimpse, centers, scales, None, local_prev, None)
 
     # Backward pass
     loss = out.scene.sum()
@@ -752,3 +752,90 @@ def test_local_temporal_forward_parametrized(has_cls: bool, n_registers: int):
     # Forward with local_prev from previous step
     out2 = avp.forward_step(images, vp, out1.hidden, out1.local)
     assert out2.local.shape == (B, n_local, embed_dim)
+
+
+# ==================== Context Tests ====================
+
+
+def test_context_none_returns_none():
+    """When context is None, context_out should be None."""
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
+    backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+
+    out = avp.forward_step(images, vp, None, None, context=None)
+    assert out.context_out is None
+
+
+def test_context_shapes():
+    """Context tokens are transformed and returned with correct shape."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    n_ctx = 3
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+    context = torch.randn(B, n_ctx, embed_dim)
+
+    out = avp.forward_step(images, vp, None, None, context=context)
+
+    assert out.context_out is not None
+    assert out.context_out.shape == (B, n_ctx, embed_dim)
+    # Hidden should not include context (same shape as without context)
+    n_spatial = cfg.scene_grid_size ** 2
+    assert out.hidden.shape == (B, n_spatial, embed_dim)
+
+
+def test_context_gradient_flow():
+    """Gradients flow through context tokens."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=1.0)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    n_ctx = 2
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+    context = torch.randn(B, n_ctx, embed_dim, requires_grad=True)
+
+    out = avp.forward_step(images, vp, None, None, context=context)
+    assert out.context_out is not None
+
+    loss = out.context_out.sum() + out.scene.sum()
+    loss.backward()
+
+    assert context.grad is not None
+    assert context.grad.abs().sum() > 0
+
+
+def test_context_influences_scene():
+    """Different context produces different scene output."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, gate_init=1.0)
+    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+    n_ctx = 2
+    torch.manual_seed(42)
+    images = torch.randn(B, 3, 64, 64)
+    vp = Viewpoint.full_scene(B, images.device)
+
+    ctx1 = torch.randn(B, n_ctx, embed_dim)
+    ctx2 = torch.randn(B, n_ctx, embed_dim)
+
+    with torch.no_grad():
+        out1 = avp.forward_step(images, vp, None, None, context=ctx1)
+        out2 = avp.forward_step(images, vp, None, None, context=ctx2)
+
+    # Different context should produce different scenes (with non-zero gates)
+    diff = (out1.scene - out2.scene).abs().mean()
+    assert diff > 0.01, f"Context should influence scene output, but diff={diff}"

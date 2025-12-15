@@ -41,6 +41,7 @@ class StepOutput(NamedTuple):
     local: Tensor  # [B, N, D] local features (CLS + patches)
     hidden: Tensor  # [B, n_persistent + G*G, D] internal state for CONTINUATION
     scene: Tensor  # [B, G*G, D] projected spatial for LOSS and VISUALIZATION
+    context_out: Tensor | None  # [B, N_ctx, D] transformed context tokens (if context provided)
 
 
 @final
@@ -254,6 +255,7 @@ class AVPViT(nn.Module):
         scales: Tensor,
         hidden: Tensor | None,
         local_prev: Tensor | None,
+        context: Tensor | None,
     ) -> StepOutput:
         """Process one glimpse: read from hidden, forward through backbone, write to hidden.
 
@@ -263,10 +265,14 @@ class AVPViT(nn.Module):
             scales: Viewpoint scales [B]
             hidden: Previous hidden state [B, n_persistent + G*G, D] or None for fresh start
             local_prev: Previous local state [B, N, D] or None (when use_local_temporal)
+            context: External context tokens [B, N_ctx, D] or None. Participates in attention,
+                     returned transformed but NOT persisted in hidden state.
 
         Returns:
             StepOutput with both hidden (for continuation) and scene (for loss/viz)
         """
+        D = self.backbone.embed_dim
+
         # Tokenize inside checkpoint so patch embedding activations aren't stored
         local_fresh, H, W = self.backbone.prepare_tokens(glimpse)
         G = self.cfg.glimpse_grid_size
@@ -276,6 +282,14 @@ class AVPViT(nn.Module):
         rope_dtype = self.backbone.rope_dtype
         periods = self.backbone.rope_periods
         n_ephemeral = self.n_ephemeral_registers
+
+        # Validate context shape if provided
+        n_ctx = 0
+        if context is not None:
+            assert context.ndim == 3, f"context must be [B, N_ctx, D], got {context.shape}"
+            assert context.shape[0] == B, f"context batch {context.shape[0]} != glimpse batch {B}"
+            assert context.shape[2] == D, f"context dim {context.shape[2]} != embed_dim {D}"
+            n_ctx = context.shape[1]
 
         # Temporal gating on local stream: local = fresh + gate * LN(prev)
         # Gate has shape (n_prefix + 1, D): one per prefix token, one broadcast for patches
@@ -294,10 +308,26 @@ class AVPViT(nn.Module):
         else:
             local = local_fresh
 
-        # hidden_t: persistent + spatial, then prepend ephemeral, then normalize all together
+        # Build hidden_t: [context, ephemeral, persistent, spatial]
+        # Context is prepended first so it's at position 0:n_ctx after processing
         hidden_t = self._init_hidden(B, hidden)
+        n_persistent = self.n_persistent_registers
+        n_spatial = self.cfg.scene_grid_size ** 2
+        assert hidden_t.shape == (B, n_persistent + n_spatial, D), \
+            f"hidden shape {hidden_t.shape} != expected ({B}, {n_persistent + n_spatial}, {D})"
+
         if self.ephemeral_registers is not None:
             hidden_t = torch.cat([self.ephemeral_registers.expand(B, -1, -1), hidden_t], dim=1)
+
+        if n_ctx > 0:
+            assert context is not None
+            hidden_t = torch.cat([context, hidden_t], dim=1)
+
+        # Verify assembled shape before norm
+        expected_hidden_t = n_ctx + n_ephemeral + n_persistent + n_spatial
+        assert hidden_t.shape == (B, expected_hidden_t, D), \
+            f"assembled hidden_t {hidden_t.shape} != expected ({B}, {expected_hidden_t}, {D})"
+
         hidden_t = self.scene_input_norm(hidden_t)  # normalize all scene tokens together
 
         local_pos = glimpse_positions(centers, scales, H, W, dtype=rope_dtype)
@@ -318,13 +348,27 @@ class AVPViT(nn.Module):
                 assert self.write_scale is not None
                 hidden_t = hidden_t + self.write_scale[i](self.write_attn[i](hidden_t, local, scene_rope, local_rope))
 
+        # Verify shape unchanged after attention
+        assert hidden_t.shape == (B, expected_hidden_t, D), \
+            f"hidden_t after attention {hidden_t.shape} != expected ({B}, {expected_hidden_t}, {D})"
+
+        # Extract transformed context (if provided)
+        context_out: Tensor | None = None
+        if n_ctx > 0:
+            context_out = hidden_t[:, :n_ctx]
+            hidden_t = hidden_t[:, n_ctx:]
+            assert context_out.shape == (B, n_ctx, D), \
+                f"context_out {context_out.shape} != expected ({B}, {n_ctx}, {D})"
+
         # Strip ephemeral registers -> persistent + spatial
         hidden_out = hidden_t[:, n_ephemeral:]
+        assert hidden_out.shape == (B, n_persistent + n_spatial, D), \
+            f"hidden_out {hidden_out.shape} != expected ({B}, {n_persistent + n_spatial}, {D})"
 
         # Scene output is spatial-only (exclude persistent registers)
         scene_out = self.compute_scene(hidden_out)
 
-        return StepOutput(glimpse, local, hidden_out, scene_out)
+        return StepOutput(glimpse, local, hidden_out, scene_out, context_out)
 
     def forward_step(
         self,
@@ -332,6 +376,7 @@ class AVPViT(nn.Module):
         viewpoint: Viewpoint,
         hidden: Tensor | None = None,
         local_prev: Tensor | None = None,
+        context: Tensor | None = None,
     ) -> StepOutput:
         """Process a single viewpoint.
 
@@ -340,6 +385,8 @@ class AVPViT(nn.Module):
             viewpoint: Where to look in the images
             hidden: Previous hidden state [B, G*G, D] for CONTINUATION, or None for fresh start
             local_prev: Previous local state [B, N, D] for CONTINUATION (when use_local_temporal)
+            context: External context tokens [B, N_ctx, D] or None. Pre-embedded by caller.
+                     Participates in attention, returned transformed in context_out.
 
         Returns:
             StepOutput containing:
@@ -347,6 +394,7 @@ class AVPViT(nn.Module):
             - local: Local features (use for CONTINUATION when use_local_temporal)
             - hidden: Updated hidden state (use for CONTINUATION)
             - scene: Projected output (use for LOSS/VIZ)
+            - context_out: Transformed context tokens (if context provided)
         """
         B = images.shape[0]
         glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
@@ -364,9 +412,10 @@ class AVPViT(nn.Module):
                 viewpoint.scales,
                 hidden,
                 local_prev,
+                context,
                 use_reentrant=False,
             ))
-        return self._process_glimpse(glimpse, viewpoint.centers, viewpoint.scales, hidden, local_prev)
+        return self._process_glimpse(glimpse, viewpoint.centers, viewpoint.scales, hidden, local_prev, context)
 
     # ==================== General Primitive ====================
 
@@ -378,6 +427,7 @@ class AVPViT(nn.Module):
         init: T,
         hidden: Tensor | None = None,
         local_prev: Tensor | None = None,
+        context: Tensor | None = None,
     ) -> tuple[T, Tensor, Tensor | None]:
         """Process viewpoints sequentially, reducing with a custom function.
 
@@ -388,10 +438,11 @@ class AVPViT(nn.Module):
             images: Input images [B, C, H, W]
             viewpoints: Sequence of viewpoints to process
             reducer: Function (accumulator, step_output) -> new_accumulator
-                     Receives full StepOutput with glimpse, local, hidden, scene.
+                     Receives full StepOutput with glimpse, local, hidden, scene, context_out.
             init: Initial accumulator value
             hidden: Initial hidden state [B, G*G, D] or None for fresh start
             local_prev: Initial local state [B, N, D] or None (when use_local_temporal)
+            context: External context tokens [B, N_ctx, D] or None. Passed to each step.
 
         Returns:
             (final_accumulator, final_hidden, final_local) where:
@@ -402,7 +453,7 @@ class AVPViT(nn.Module):
         B = images.shape[0]
         acc = init
         for vp in viewpoints:
-            out = self.forward_step(images, vp, hidden, local_prev)
+            out = self.forward_step(images, vp, hidden, local_prev, context)
             hidden = out.hidden
             local_prev = out.local if self.cfg.use_local_temporal else None
             acc = reducer(acc, out)
@@ -424,6 +475,7 @@ class AVPViT(nn.Module):
         target: Tensor,
         hidden: Tensor | None = None,
         local_prev: Tensor | None = None,
+        context: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor | None]:
         """Standard training: compute MSE loss against target at each step.
 
@@ -440,6 +492,7 @@ class AVPViT(nn.Module):
             target: Target to compare against [B, G*G, D] (e.g., teacher patches)
             hidden: Initial hidden state or None
             local_prev: Initial local state or None (when use_local_temporal)
+            context: External context tokens [B, N_ctx, D] or None
 
         Returns:
             (average_loss, final_hidden, final_local) where:
@@ -462,8 +515,9 @@ class AVPViT(nn.Module):
         total, final_hidden, final_local = self.forward_reduce(
             images, viewpoints, reducer,
             init=init_loss,
-            hidden=hidden,  # Let _init_hidden handle initialization
+            hidden=hidden,
             local_prev=local_prev,
+            context=context,
         )
         return total / (len(viewpoints) + 1), final_hidden, final_local
 
@@ -473,6 +527,7 @@ class AVPViT(nn.Module):
         viewpoints: list[Viewpoint],
         hidden: Tensor | None = None,
         local_prev: Tensor | None = None,
+        context: Tensor | None = None,
     ) -> tuple[list[Tensor], Tensor, Tensor | None]:
         """Standard visualization: collect projected scenes at each step.
 
@@ -481,6 +536,7 @@ class AVPViT(nn.Module):
             viewpoints: Sequence of viewpoints to process
             hidden: Initial hidden state or None
             local_prev: Initial local state or None (when use_local_temporal)
+            context: External context tokens [B, N_ctx, D] or None
 
         Returns:
             (scenes, final_hidden, final_local) where:
@@ -491,7 +547,7 @@ class AVPViT(nn.Module):
         def reducer(acc: list[Tensor], out: StepOutput) -> list[Tensor]:
             return [*acc, out.scene]
 
-        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden, local_prev=local_prev)
+        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden, local_prev=local_prev, context=context)
 
     def forward_trajectory_full(
         self,
@@ -499,6 +555,7 @@ class AVPViT(nn.Module):
         viewpoints: list[Viewpoint],
         hidden: Tensor | None = None,
         local_prev: Tensor | None = None,
+        context: Tensor | None = None,
     ) -> tuple[list[StepOutput], Tensor, Tensor | None]:
         """Full visualization: collect complete StepOutput at each step.
 
@@ -507,17 +564,18 @@ class AVPViT(nn.Module):
             viewpoints: Sequence of viewpoints to process
             hidden: Initial hidden state or None
             local_prev: Initial local state or None (when use_local_temporal)
+            context: External context tokens [B, N_ctx, D] or None
 
         Returns:
             (outputs, final_hidden, final_local) where:
-            - outputs: List of StepOutput (glimpse, local, hidden, scene) at each timestep
+            - outputs: List of StepOutput (glimpse, local, hidden, scene, context_out) at each timestep
             - final_hidden: For CONTINUATION if needed
             - final_local: For CONTINUATION when use_local_temporal
         """
         def reducer(acc: list[StepOutput], out: StepOutput) -> list[StepOutput]:
             return [*acc, out]
 
-        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden, local_prev=local_prev)
+        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden, local_prev=local_prev, context=context)
 
     @override
     def forward(
@@ -526,6 +584,7 @@ class AVPViT(nn.Module):
         viewpoints: list[Viewpoint],
         hidden: Tensor | None = None,
         local_prev: Tensor | None = None,
+        context: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor | None]:
         """Standard inference: return final projected scene.
 
@@ -534,6 +593,7 @@ class AVPViT(nn.Module):
             viewpoints: Sequence of viewpoints to process
             hidden: Initial hidden state or None
             local_prev: Initial local state or None (when use_local_temporal)
+            context: External context tokens [B, N_ctx, D] or None
 
         Returns:
             (final_scene, final_hidden, final_local) where:
@@ -547,6 +607,6 @@ class AVPViT(nn.Module):
         # Use a dummy initial tensor (will be overwritten by first step)
         dummy = torch.empty(0, device=images.device)
         scene, final_hidden, final_local = self.forward_reduce(
-            images, viewpoints, reducer, init=dummy, hidden=hidden, local_prev=local_prev
+            images, viewpoints, reducer, init=dummy, hidden=hidden, local_prev=local_prev, context=context
         )
         return scene, final_hidden, final_local

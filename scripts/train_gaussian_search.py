@@ -1006,7 +1006,8 @@ def evaluate_policy(
         glimpses: list[Tensor] = []
         scales_det: list[Tensor] = []
         dists_t: list[Tensor] = []
-        hiddens_for_viz: list[Tensor] = [hidden.clone()]  # Include init
+        # Normalize init hidden for fair PCA comparison (model normalizes at each step)
+        hiddens_for_viz: list[Tensor] = [avp.scene_input_norm(hidden.clone())]
 
         for t in range(cfg.n_steps_per_episode):
             vp, stats = policy(hidden, target_colors, deterministic=True)
