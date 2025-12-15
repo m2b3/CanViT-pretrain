@@ -144,6 +144,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     current_G: int | None = None
     state: SurvivalBatch | None = None
     norm: PositionAwareNorm | None = None
+    stage: CurriculumStage | None = None
+    train_loader: InfiniteLoader | None = None
     val_loader: InfiniteLoader | None = None
 
     def get_current_entry(step: int) -> ScheduleEntry:
@@ -201,9 +203,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         assert state is not None
         assert norm is not None
-        stage = stages[G]
-        train_loader = train_loaders[G]
-        val_loader = val_loaders[G]
+        assert stage is not None
+        assert train_loader is not None
+        assert val_loader is not None
 
         # Load fresh images
         fresh_imgs = train_loader.next_batch().to(cfg.device)
