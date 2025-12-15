@@ -241,6 +241,7 @@ def summarize_policy_stats(stats: dict[str, Tensor]) -> dict[str, float]:
 class Config:
     # Paths
     teacher_ckpt: Path = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
+    avp_ckpt: Path | None = None  # Pretrained AVP (e.g., from train_gaussian_recon)
     # Model
     # scene_size = scene_grid_size * patch_size (14), glimpse similarly
     # min_scale = glimpse_grid_size / scene_grid_size
@@ -448,6 +449,9 @@ def train(cfg: Config) -> None:
 
     log.info("Creating AVP model...")
     avp = create_avp(backbone, cfg)
+    if cfg.avp_ckpt is not None:
+        log.info(f"Loading pretrained AVP from {cfg.avp_ckpt}")
+        avp.load_state_dict(torch.load(cfg.avp_ckpt, map_location=cfg.device, weights_only=True))
     if cfg.compile:
         compile_model(avp)
 

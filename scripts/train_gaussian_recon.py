@@ -66,6 +66,7 @@ class PixelDecoder(nn.Module):
 class Config:
     # Paths
     teacher_ckpt: Path = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
+    ckpt_dir: Path = Path("checkpoints")
     # Model
     avp: AVPConfig = field(
         default_factory=lambda: AVPConfig(
@@ -159,9 +160,9 @@ def plot_pixel_recon(
     for t, vp in enumerate(viewpoints):
         box = vp.to_pixel_box(sample_idx, H, W)
         rect = plt.Rectangle(
-            (box[0], box[1]),
-            box[2] - box[0],
-            box[3] - box[1],
+            (box.left, box.top),
+            box.width,
+            box.height,
             fill=False,
             edgecolor=colors[t],
             linewidth=2,
@@ -377,6 +378,13 @@ def train(cfg: Config) -> None:
     # Final eval
     val_loss = eval_and_log(exp, cfg.n_steps, avp, decoder, cfg, image_size)
     log.info(f"Final: train_ema={ema_loss:.4f}, val={val_loss:.4f}")
+
+    # Save AVP checkpoint (just AVP, not decoder - for transfer to search)
+    cfg.ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = cfg.ckpt_dir / f"avp_recon_{exp.get_key()}.pt"
+    torch.save(avp.state_dict(), ckpt_path)
+    log.info(f"Saved AVP checkpoint: {ckpt_path}")
+
     exp.end()
 
 
