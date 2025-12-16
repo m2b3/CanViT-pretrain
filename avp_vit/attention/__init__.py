@@ -17,9 +17,15 @@ class AttentionConfig:
 
     use_ewa_transforms: bool = True  # EWA instead of Identity for unprojected streams
     use_post_rope_ewa: bool = False  # EWA after RoPE on Q/K
-    vo_identity_init: bool = True  # Identity-init V and O projections (content path, not Q/K)
-    write_v_expansion: int | None = 2  # None = Linear, int = MLP with SiLU and given expansion
-    layer_scale_init: float = 1e-4  # Init for LayerScale in _ResidualMLP (when write_v_expansion set)
+    vo_identity_init: bool = (
+        False  # Identity-init V and O projections (content path, not Q/K)
+    )
+    write_v_expansion: int | None = (
+        2  # None = Linear, int = MLP with SiLU and given expansion
+    )
+    layer_scale_init: float = (
+        1e-4  # Init for LayerScale in _ResidualMLP (when write_v_expansion set)
+    )
 
 
 class RoPECrossAttention(nn.Module):
@@ -147,5 +153,3 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
                 nn.init.zeros_(proj.bias)
             return proj
         return _ResidualMLP(dim, cfg.write_v_expansion, cfg.layer_scale_init)
-
-

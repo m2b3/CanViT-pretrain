@@ -37,7 +37,6 @@ class ConvexGatedAttention(nn.Module):
         self.gate_attn = gate_attn
 
         dim = proposal_attn.dim
-        self.gate_scale = nn.Parameter(torch.zeros(dim))
         bias_init = math.log(gate_init / (1 - gate_init))  # logit(gate_init)
         self.gate_bias = nn.Parameter(torch.full((dim,), bias_init))
 
@@ -50,7 +49,7 @@ class ConvexGatedAttention(nn.Module):
     ) -> Tensor:
         proposal = self.proposal_attn(x, kv, x_rope, kv_rope)
         gate_raw = self.gate_attn(x, kv, x_rope, kv_rope)
-        gate = torch.sigmoid(self.gate_scale * gate_raw + self.gate_bias)
+        gate = torch.sigmoid(gate_raw + self.gate_bias)
         return (1 - gate) * x + gate * proposal
 
     def flops(self, n_q: int, n_kv: int) -> int:
