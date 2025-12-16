@@ -80,12 +80,12 @@ class AVPConfig:
     scene_grid_size: int
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
-    layer_scale_init: float = 1e-4  # Init for LayerScale / gate_init
+    layer_scale_init: float = 0.01  # Init for LayerScale (reference: 0.01)
     use_output_proj: bool = True
     use_output_proj_norm: bool = False  # LayerNorm before Linear in output_proj
     gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries
-    gating: GatingMode = "cheap"  # none=LayerScale, cheap=1 attn+Linear, full=2 attn
-    adapter_stride: int = 2  # Apply read/write adapters every N backbone blocks
+    gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
+    adapter_stride: int = 1  # Adapters every N backbone blocks (reference: 1)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
 
@@ -104,8 +104,7 @@ class AVPViT(nn.Module):
 
     ## Initialization
 
-    - spatial_hidden_init: Zero (uniform write attention pulls in glimpse info)
-    - registers: Unit norm (randn / sqrt(D))
+    All learnable state tokens use unit-norm scaling: randn / sqrt(D).
     """
 
     backbone: ViTBackbone
@@ -151,12 +150,12 @@ class AVPViT(nn.Module):
         ) // self.cfg.adapter_stride
 
     def _init_state_tokens(self, embed_dim: int) -> None:
-        """Initialize learnable state tokens (zero spatial, unit-norm registers)."""
+        """Initialize learnable state tokens with unit-norm scaling (randn/sqrt(D))."""
         scale = 1.0 / math.sqrt(embed_dim)
         n_persistent = self.n_persistent_registers
         n_ephemeral = self.n_ephemeral_registers
 
-        self.spatial_hidden_init = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.spatial_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
         self.persistent_registers = (
             nn.Parameter(torch.randn(1, n_persistent, embed_dim) * scale)
             if n_persistent > 0

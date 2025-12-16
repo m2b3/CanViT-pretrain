@@ -20,12 +20,7 @@ class AttentionConfig:
     vo_identity_init: bool = (
         False  # Identity-init V and O projections (content path, not Q/K)
     )
-    write_v_expansion: int | None = (
-        2  # None = Linear, int = MLP with SiLU and given expansion
-    )
-    layer_scale_init: float = (
-        1e-4  # Init for LayerScale in _ResidualMLP (when write_v_expansion set)
-    )
+    write_v_expansion: int | None = None  # None = Linear, int = MLP with expansion
 
 
 class RoPECrossAttention(nn.Module):
@@ -152,7 +147,7 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
                 nn.init.eye_(proj.weight)
                 nn.init.zeros_(proj.bias)
             return proj
-        return _ResidualMLP(dim, cfg.write_v_expansion, cfg.layer_scale_init)
+        return _ResidualMLP(dim, cfg.write_v_expansion, layer_scale_init=1e-4)
 
 
 @final
