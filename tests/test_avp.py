@@ -37,12 +37,21 @@ def test_avp_forward_shapes(backbone: ViTBackbone) -> None:
 
     assert scene.shape == (B, 64, backbone.embed_dim)  # 8x8 = 64
     assert hidden.shape == (B, 64, backbone.embed_dim)
-    assert local is None  # use_local_temporal=False by default
+    # use_local_temporal=True by default, so local is returned
+    assert local is not None
+    assert local.shape == (B, backbone.n_prefix_tokens + 49, backbone.embed_dim)  # prefix + 7x7
 
 
 def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
-    """With γ=0, hidden should equal normalized spatial_init (write has no effect)."""
-    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, layer_scale_init=0.0, n_scene_registers=0)
+    """With γ=0 and no temporal gating, hidden should equal normalized spatial_init."""
+    cfg = AVPConfig(
+        scene_grid_size=8,
+        glimpse_grid_size=7,
+        layer_scale_init=0.0,
+        temporal_gate_init=0.0,  # No temporal mixing
+        n_scene_registers=0,
+        use_local_temporal=False,
+    )
     avp = AVPViT(backbone, cfg)
 
     B = 2
@@ -52,14 +61,14 @@ def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
     _, hidden, _ = avp(images, viewpoints)
 
     # With gates=0, write attention has no effect
-    # hidden = scene_input_norm(base_hidden) because norm is applied at start of each step
-    expected = avp.scene_input_norm(avp._get_base_hidden(B))
+    # hidden = base_hidden (no norm applied when hidden=None at first step)
+    expected = avp._get_base_hidden(B)
     assert torch.allclose(hidden, expected, atol=1e-5)
 
 
 def test_multi_viewpoint_forward(backbone: ViTBackbone) -> None:
     """Forward with multiple viewpoints processes all."""
-    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0)
+    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0, use_local_temporal=False)
     avp = AVPViT(backbone, cfg)
 
     B = 2
@@ -79,7 +88,7 @@ def test_multi_viewpoint_forward(backbone: ViTBackbone) -> None:
 
 def test_forward_loss(backbone: ViTBackbone) -> None:
     """forward_loss computes averaged MSE correctly."""
-    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0)
+    cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0, use_local_temporal=False)
     avp = AVPViT(backbone, cfg)
 
     B = 2

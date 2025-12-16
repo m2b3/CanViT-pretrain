@@ -65,7 +65,7 @@ class AVPConfig:
     gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries to save VRAM
     use_local_temporal: bool = True  # Temporal gating on local stream across glimpses
     use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
-    use_scene_input_norm: bool = True  # LayerNorm on hidden at start of each timestep
+    use_scene_input_norm: bool = False  # LayerNorm on hidden at start of each timestep
     adapter_stride: int = 2  # Apply read/write adapters every N backbone blocks
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
@@ -90,16 +90,14 @@ class AVPViT(nn.Module):
 
     ## Initialization Convention
 
-    All learnable state tokens (spatial_hidden_init, registers, local_init) are
-    initialized with unit norm per token: randn(shape) / sqrt(D).
-
-    This ensures the initial hidden/scene "looks like" what the network produces,
-    avoiding wasted capacity learning to scale down from sqrt(D) norm.
+    - spatial_hidden_init: Zero-init. With zero Q, write attention is uniform over
+      local features, so hidden naturally gains glimpse info scaled by LayerScale.
+    - registers and local_init: Unit norm (randn / sqrt(D)) for stable magnitudes.
     """
 
     backbone: ViTBackbone
     cfg: AVPConfig
-    # State token initializations (all unit-norm scaled, see _init_state_tokens)
+    # State token initializations (see _init_state_tokens)
     persistent_registers: nn.Parameter | None  # [1, n_persistent, D] - part of hidden
     ephemeral_registers: nn.Parameter | None  # [1, n_ephemeral, D] - NOT part of hidden
     spatial_hidden_init: nn.Parameter  # [1, 1, D] - broadcasted to [B, G*G, D]
@@ -148,21 +146,17 @@ class AVPViT(nn.Module):
         return (self.backbone.n_blocks + self.cfg.adapter_stride - 1) // self.cfg.adapter_stride
 
     def _init_state_tokens(self, embed_dim: int, use_local_temporal: bool) -> None:
-        """Initialize all learnable state tokens with unit-norm scaling.
+        """Initialize all learnable state tokens.
 
-        All tokens are initialized as randn / sqrt(D), giving expected norm ~1 per token.
-        This is colocated to ensure consistent scaling across:
-        - spatial_hidden_init: [1, 1, D] broadcasted to G*G spatial tokens
-        - persistent_registers: [1, n_persistent, D] carried across timesteps
-        - ephemeral_registers: [1, n_ephemeral, D] reinitialized each step
-        - local_init: [1, N_local, D] for local temporal stream (if enabled)
+        - spatial_hidden_init: zeros (uniform attention pulls in glimpse info)
+        - registers/local_init: unit-norm scaled (randn / sqrt(D))
         """
         scale = 1.0 / math.sqrt(embed_dim)
         n_persistent = self.n_persistent_registers
         n_ephemeral = self.n_ephemeral_registers
 
-        # Spatial hidden: single token broadcasted to G*G at runtime
-        self.spatial_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
+        # Spatial hidden: zero-init, gains info from glimpses via uniform attention
+        self.spatial_hidden_init = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
         # Persistent registers: part of hidden state, carried across timesteps
         if n_persistent > 0:
