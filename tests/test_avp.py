@@ -48,7 +48,7 @@ def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
         scene_grid_size=8,
         glimpse_grid_size=7,
         layer_scale_init=0.0,
-        temporal_gate_init=0.0,  # No temporal mixing
+        scene_temporal_gate_init=0.0,  # No temporal mixing
         n_scene_registers=0,
         use_local_temporal=False,
     )

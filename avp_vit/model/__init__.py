@@ -59,7 +59,8 @@ class AVPConfig:
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 1e-4  # Init for intra-step LayerScales (cross-attention)
-    temporal_gate_init: float = 1e-4  # Init for inter-step gates (scene/local temporal)
+    scene_temporal_gate_init: float = 1e-4  # Init for scene hidden temporal gate
+    local_temporal_gate_init: float = 1e-4  # Init for local stream temporal gate
     use_output_proj: bool = False
     use_output_proj_norm: bool = False  # LayerNorm before Linear in output_proj (if enabled)
     gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries to save VRAM
@@ -246,7 +247,7 @@ class AVPViT(nn.Module):
         if cfg.use_local_temporal:
             n_prefix = backbone.n_prefix_tokens
             self.local_temporal_norm = nn.LayerNorm(embed_dim)
-            logit_init = _inverse_sigmoid(cfg.temporal_gate_init)
+            logit_init = _inverse_sigmoid(cfg.local_temporal_gate_init)
             self.local_temporal_gate = nn.Parameter(
                 torch.full((n_prefix + 1, embed_dim), logit_init)
             )
@@ -255,7 +256,7 @@ class AVPViT(nn.Module):
             self.local_temporal_gate = None
 
         # Scene temporal gating: hidden = base + sigmoid(logit) * (prev_hidden - base)
-        logit_init = _inverse_sigmoid(cfg.temporal_gate_init)
+        logit_init = _inverse_sigmoid(cfg.scene_temporal_gate_init)
         self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), logit_init))
 
     def set_scene_grid_size(self, new_size: int) -> None:

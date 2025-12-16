@@ -577,7 +577,7 @@ def test_local_temporal_parameters_shapes():
         scene_grid_size=4,
         glimpse_grid_size=glimpse_grid_size,
         use_local_temporal=True,
-        temporal_gate_init=1e-5,
+        scene_temporal_gate_init=1e-5,
         n_scene_registers=0,
     )
     backbone = MockBackbone(embed_dim, 4, 2, n_registers, PATCH_SIZE)
@@ -613,7 +613,7 @@ def test_local_temporal_gating_gradient_flow():
         glimpse_grid_size=glimpse_grid_size,
         use_local_temporal=True,
         layer_scale_init=0.1,  # Nonzero so gradient flows through cross-attention
-        temporal_gate_init=0.1,  # Nonzero so gradient is meaningful
+        scene_temporal_gate_init=0.1,  # Nonzero so gradient is meaningful
         n_scene_registers=0,
     )
     backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
