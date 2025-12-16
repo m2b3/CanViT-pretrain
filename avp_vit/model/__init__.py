@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import NamedTuple, TypeVar, cast, final, override
@@ -75,28 +76,45 @@ class AVPViT(nn.Module):
 
     Takes full images + viewpoints, handles glimpse extraction and tokenization internally.
 
-    Scene registers (when enabled) are split into two types:
-    - Persistent: passed through between timesteps (like spatial tokens)
-    - Glimpse: reinitialized each step from learned parameters
+    ## Naming Conventions
+
+    **Hidden state** = [persistent_registers | spatial_hidden]
+    - persistent_registers: Learnable tokens carried across timesteps
+    - spatial_hidden: G*G grid tokens, broadcasted from spatial_hidden_init
+
+    **Ephemeral registers**: Prepended at start of processing, stripped at end.
+    NOT part of hidden state - reinitialized each step from learned parameters.
+
+    **Scene**: output_proj(spatial_hidden) - the spatial portion projected for loss/viz.
+    Does NOT include persistent registers.
+
+    ## Initialization Convention
+
+    All learnable state tokens (spatial_hidden_init, registers, local_init) are
+    initialized with unit norm per token: randn(shape) / sqrt(D).
+
+    This ensures the initial hidden/scene "looks like" what the network produces,
+    avoiding wasted capacity learning to scale down from sqrt(D) norm.
     """
 
     backbone: ViTBackbone
     cfg: AVPConfig
-    persistent_registers: nn.Parameter | None  # Passed through between steps
-    ephemeral_registers: nn.Parameter | None  # Reinitialized each step
-    spatial_init: nn.Parameter  # Learned initial spatial token [1, 1, D], broadcasted
+    # State token initializations (all unit-norm scaled, see _init_state_tokens)
+    persistent_registers: nn.Parameter | None  # [1, n_persistent, D] - part of hidden
+    ephemeral_registers: nn.Parameter | None  # [1, n_ephemeral, D] - NOT part of hidden
+    spatial_hidden_init: nn.Parameter  # [1, 1, D] - broadcasted to [B, G*G, D]
+    local_init: nn.Parameter | None  # [1, N_local, D] - for local temporal stream
+    # Buffers and modules
     scene_positions: Tensor
     scene_input_norm: nn.Module  # LayerNorm or Identity
-    read_attn: nn.ModuleList  # Raw attention (layerscale) or ConvexGatedAttention (convex)
+    read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     read_scale: nn.ModuleList | None  # LayerScale (layerscale mode) or None (convex)
     write_scale: nn.ModuleList | None
     output_proj: nn.Module
-    # Local temporal stream (when use_local_temporal=True)
-    local_init: nn.Parameter | None  # Learned initial local state [1, N, D]
+    # Temporal gating
     local_temporal_norm: nn.LayerNorm | None
     local_temporal_gate: nn.Parameter | None
-    # Scene temporal gating: hidden = base + gate * (prev_hidden - base)
     scene_temporal_gate: nn.Parameter
 
     @property
@@ -129,6 +147,41 @@ class AVPViT(nn.Module):
         """Number of read/write adapter pairs (one per adapter_stride backbone blocks)."""
         return (self.backbone.n_blocks + self.cfg.adapter_stride - 1) // self.cfg.adapter_stride
 
+    def _init_state_tokens(self, embed_dim: int, use_local_temporal: bool) -> None:
+        """Initialize all learnable state tokens with unit-norm scaling.
+
+        All tokens are initialized as randn / sqrt(D), giving expected norm ~1 per token.
+        This is colocated to ensure consistent scaling across:
+        - spatial_hidden_init: [1, 1, D] broadcasted to G*G spatial tokens
+        - persistent_registers: [1, n_persistent, D] carried across timesteps
+        - ephemeral_registers: [1, n_ephemeral, D] reinitialized each step
+        - local_init: [1, N_local, D] for local temporal stream (if enabled)
+        """
+        scale = 1.0 / math.sqrt(embed_dim)
+        n_persistent = self.n_persistent_registers
+        n_ephemeral = self.n_ephemeral_registers
+
+        # Spatial hidden: single token broadcasted to G*G at runtime
+        self.spatial_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
+
+        # Persistent registers: part of hidden state, carried across timesteps
+        if n_persistent > 0:
+            self.persistent_registers = nn.Parameter(torch.randn(1, n_persistent, embed_dim) * scale)
+        else:
+            self.persistent_registers = None
+
+        # Ephemeral registers: NOT part of hidden, reinitialized each step
+        if n_ephemeral > 0:
+            self.ephemeral_registers = nn.Parameter(torch.randn(1, n_ephemeral, embed_dim) * scale)
+        else:
+            self.ephemeral_registers = None
+
+        # Local stream init (if temporal gating enabled)
+        if use_local_temporal:
+            self.local_init = nn.Parameter(torch.randn(1, self.n_local_tokens, embed_dim) * scale)
+        else:
+            self.local_init = None
+
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
         super().__init__()
         self.backbone = backbone
@@ -139,21 +192,8 @@ class AVPViT(nn.Module):
         n_blocks = backbone.n_blocks
         n_adapters = (n_blocks + cfg.adapter_stride - 1) // cfg.adapter_stride
 
-        # Scene registers split into persistent (passed through) and ephemeral (reinit each step)
-        n_persistent = self.n_persistent_registers
-        n_ephemeral = self.n_ephemeral_registers
-        if n_persistent > 0:
-            self.persistent_registers = nn.Parameter(torch.randn(1, n_persistent, embed_dim))
-        else:
-            self.persistent_registers = None
-        if n_ephemeral > 0:
-            self.ephemeral_registers = nn.Parameter(torch.randn(1, n_ephemeral, embed_dim))
-        else:
-            self.ephemeral_registers = None
-
-        # Learned initial spatial token: single vector broadcasted to all grid positions.
-        # Shape [1, 1, D], expanded to [B, G*G, D] at runtime. Enables multi-resolution.
-        self.spatial_init = nn.Parameter(torch.randn(1, 1, embed_dim))
+        # Initialize all learnable state tokens with consistent unit-norm scaling
+        self._init_state_tokens(embed_dim, cfg.use_local_temporal)
 
         attn_cfg = cfg.attention
         if cfg.use_convex_gating:
@@ -185,7 +225,7 @@ class AVPViT(nn.Module):
             self.read_scale = nn.ModuleList([LayerScale(embed_dim, cfg.layer_scale_init) for _ in range(n_adapters)])
             self.write_scale = nn.ModuleList([LayerScale(embed_dim, cfg.layer_scale_init) for _ in range(n_adapters)])
 
-        device = self.spatial_init.device
+        device = self.spatial_hidden_init.device
         assert isinstance(device, torch.device)
         pos = make_grid_positions(
             cfg.scene_grid_size, cfg.scene_grid_size, device, dtype=backbone.rope_dtype
@@ -208,24 +248,19 @@ class AVPViT(nn.Module):
         else:
             self.output_proj = nn.Identity()
 
-        # Local temporal stream: gated addition across timesteps
-        # Gate shape: (n_prefix + 1, D) - one gate per prefix token, one for all patches
+        # Local temporal gating (gate params only - local_init is in _init_state_tokens)
         if cfg.use_local_temporal:
             n_prefix = backbone.n_prefix_tokens
-            self.local_init = nn.Parameter(torch.randn(1, self.n_local_tokens, embed_dim))
             self.local_temporal_norm = nn.LayerNorm(embed_dim)
-            # Store logit, apply sigmoid at runtime to bound gate to [0,1]
             logit_init = _inverse_sigmoid(cfg.temporal_gate_init)
             self.local_temporal_gate = nn.Parameter(
                 torch.full((n_prefix + 1, embed_dim), logit_init)
             )
         else:
-            self.local_init = None
             self.local_temporal_norm = None
             self.local_temporal_gate = None
 
         # Scene temporal gating: hidden = base + sigmoid(logit) * (prev_hidden - base)
-        # Store logit, apply sigmoid at runtime to bound gate to [0,1]
         logit_init = _inverse_sigmoid(cfg.temporal_gate_init)
         self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), logit_init))
 
@@ -242,12 +277,15 @@ class AVPViT(nn.Module):
         self.scene_positions = pos
 
     def _get_base_hidden(self, B: int) -> Tensor:
-        """Get base hidden state (learnable inits expanded to batch size)."""
+        """Get base hidden state (learnable inits expanded to batch size).
+
+        Returns: [B, n_persistent + G*G, D] = [persistent_registers | spatial_hidden]
+        """
         n_spatial = self.cfg.scene_grid_size ** 2
-        spatial = self.spatial_init.expand(B, n_spatial, -1)
+        spatial_hidden = self.spatial_hidden_init.expand(B, n_spatial, -1)
         if self.persistent_registers is not None:
-            return torch.cat([self.persistent_registers.expand(B, -1, -1), spatial], dim=1)
-        return spatial
+            return torch.cat([self.persistent_registers.expand(B, -1, -1), spatial_hidden], dim=1)
+        return spatial_hidden
 
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
         """Initialize hidden state with gated residual.
@@ -267,15 +305,28 @@ class AVPViT(nn.Module):
         return base + gate * (normed - base)
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
-        """Extract spatial tokens from hidden state.
+        """Extract spatial_hidden from full hidden state.
 
         Args:
             hidden: Full hidden state [B, n_persistent + G*G, D]
 
         Returns:
-            Spatial tokens [B, G*G, D]
+            Spatial hidden [B, G*G, D] (excludes persistent registers)
         """
         return hidden[:, self.n_persistent_registers:]
+
+    def get_initial_scene(self, B: int) -> Tensor:
+        """Get initial scene (before any viewpoint processing).
+
+        This is a "valid scene" - goes through same output_proj as processed scenes.
+        Useful for visualization and ensuring initial state looks like network output.
+
+        Returns:
+            [B, G*G, D] initial scene
+        """
+        n_spatial = self.cfg.scene_grid_size ** 2
+        spatial_hidden = self.spatial_hidden_init.expand(B, n_spatial, -1)
+        return self.output_proj(spatial_hidden)
 
     def compute_scene(self, hidden: Tensor) -> Tensor:
         """Compute projected scene from hidden state.

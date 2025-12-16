@@ -209,7 +209,7 @@ def test_convex_gate_value_affects_output():
         use_local_temporal=False, use_scene_input_norm=False,
     )
 
-    # Same seed for both → same spatial_init, attention weights
+    # Same seed for both → same spatial_hidden_init, attention weights
     torch.manual_seed(999)
     avp_lo = AVPViT(MockBackbone(64, 4, 2, 0, PATCH_SIZE), cfg_lo)
     torch.manual_seed(999)
@@ -513,7 +513,7 @@ def test_gradient_checkpointing_smoke():
     loss = scene.sum()
     loss.backward()
 
-    assert avp.spatial_init.grad is not None
+    assert avp.spatial_hidden_init.grad is not None
 
 
 def test_forward_loss_requires_viewpoints():
