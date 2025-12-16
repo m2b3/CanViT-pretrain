@@ -14,6 +14,7 @@ dependencies = [
     "omegaconf>=2.4.0.dev4",
     "comet-ml>=3.55.0",
     "tyro>=1.0.1",
+    "rich>=14.2.0",
 ]
 
 [build-system]
@@ -40,6 +41,10 @@ dev = [
 python_files = ["test.py", "test_*.py"]
 testpaths = ["avp_vit", "tests"]
 
+[tool.ruff]
+exclude = ["throwaway"]
+
 [tool.basedpyright]
 typeCheckingMode = "standard"
 stubPath = "stubs"
+# exclude = ["throwaway"]
