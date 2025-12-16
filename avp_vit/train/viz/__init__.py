@@ -4,6 +4,10 @@ IMPORTANT: Functions here take NUMPY ARRAYS, not tensors.
 Caller is responsible for .cpu(), .detach(), .numpy() as needed.
 """
 
+import matplotlib
+# Use non-interactive backend BEFORE importing pyplot to prevent GUI resource leaks
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure

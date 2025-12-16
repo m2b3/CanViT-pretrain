@@ -146,6 +146,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             return norm(teacher_patches.float())
         return compute_targets
 
+    # Cache target functions per grid size (avoid creating closures every step)
+    target_fns: dict[int, Callable[[Tensor], Tensor]] = {
+        G: make_target_fn(norms[G]) for G in cfg.grid_sizes
+    }
+
     # Initialize all survival batches upfront
     log.info("Initializing survival batches for all grid sizes...")
     states: dict[int, SurvivalBatch] = {}
@@ -154,7 +159,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         states[G] = init_survival_batch(
             avp,
             train_loaders[G],
-            make_target_fn(norms[G]),
+            target_fns[G],
             stage.batch_size,
             stage.fresh_count,
             cfg.device,
@@ -174,7 +179,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         train_loader = train_loaders[G]
         val_loader = val_loaders[G]
         avp.set_scene_grid_size(G)
-        compute_targets = make_target_fn(norm)
+        compute_targets = target_fns[G]
 
         # Load fresh images
         fresh_imgs = train_loader.next_batch().to(cfg.device)

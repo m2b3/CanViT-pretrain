@@ -1,5 +1,6 @@
 """Visualization and logging utilities."""
 
+import gc
 import io
 import logging
 from collections.abc import Callable
@@ -44,12 +45,18 @@ def compute_spatial_stats(x: Tensor) -> dict[str, float]:
 
 
 def log_figure(exp: comet_ml.Experiment, fig: Figure, name: str, step: int) -> None:
-    """Log matplotlib figure to Comet."""
+    """Log matplotlib figure to Comet. Aggressively cleans up to prevent memory leaks."""
     with io.BytesIO() as buf:
         fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
         buf.seek(0)
         exp.log_image(buf, name=name, step=step)
+    # Clear all axes before closing to release colorbar/patch references
+    for ax in fig.axes:
+        ax.clear()
+    fig.clf()
     plt.close(fig)
+    # Force garbage collection after complex figures
+    gc.collect()
 
 
 def viz_and_log(
