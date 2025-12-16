@@ -433,28 +433,6 @@ def test_forward_loss():
     assert final_hidden.shape == (B, 16, embed_dim)
 
 
-def test_forward_trajectory():
-    embed_dim = 64
-    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)
-    backbone = MockBackbone(embed_dim, 4, 2, 0, PATCH_SIZE)
-    avp = AVPViT(backbone, cfg)
-
-    B = 2
-    images = torch.randn(B, 3, 64, 64)
-    viewpoints = [
-        Viewpoint.full_scene(B, images.device),
-        Viewpoint.quadrant(B, images.device, 0, 0),
-        Viewpoint.quadrant(B, images.device, 1, 1),
-    ]
-
-    scenes, final_hidden = avp.forward_trajectory(images, viewpoints)
-
-    assert len(scenes) == 3
-    for s in scenes:
-        assert s.shape == (B, 16, embed_dim)
-    assert final_hidden.shape == (B, 16, embed_dim)
-
-
 def test_forward_reduce_custom():
     embed_dim = 64
     cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=0)

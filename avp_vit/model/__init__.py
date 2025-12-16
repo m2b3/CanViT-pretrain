@@ -524,12 +524,8 @@ class AVPViT(nn.Module):
         context: Tensor | None = None,
         loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
     ) -> tuple[Tensor, Tensor]:
-        """Compute average loss across initial scene (t=0) + all viewpoints. Returns (loss, final_hidden)."""
+        """Compute average loss across all viewpoints. Returns (loss, final_hidden)."""
         assert len(viewpoints) > 0
-        B = images.shape[0]
-
-        initial_hidden = self._init_hidden(B, hidden)
-        initial_loss = loss_fn(self.compute_scene(initial_hidden), target)
 
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
             return acc + loss_fn(out.scene, target)
@@ -539,19 +535,7 @@ class AVPViT(nn.Module):
             init=torch.tensor(0.0, device=images.device),
             hidden=hidden, context=context,
         )
-        return (initial_loss + total) / (len(viewpoints) + 1), final_hidden
-
-    def forward_trajectory(
-        self,
-        images: Tensor,
-        viewpoints: list[Viewpoint],
-        hidden: Tensor | None = None,
-        context: Tensor | None = None,
-    ) -> tuple[list[Tensor], Tensor]:
-        """Collect projected scenes at each step. Returns (scenes, final_hidden)."""
-        def reducer(acc: list[Tensor], out: StepOutput) -> list[Tensor]:
-            return [*acc, out.scene]
-        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden, context=context)
+        return total / len(viewpoints), final_hidden
 
     def forward_trajectory_full(
         self,
