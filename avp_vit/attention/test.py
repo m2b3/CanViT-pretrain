@@ -146,3 +146,31 @@ def test_post_rope_ewa_disabled():
     attn = RoPEReadCrossAttention(D, 4, cfg)
     assert isinstance(attn.post_rope_q, nn.Identity)
     assert isinstance(attn.post_rope_k, nn.Identity)
+
+
+# ==================== ScaledResidualAttention ====================
+
+
+def test_scaled_residual_attention():
+    from avp_vit.attention import ScaledResidualAttention
+
+    B, N_q, N_kv, D, heads = 2, 10, 20, 64, 4
+    head_dim = D // heads
+    scale_init = 0.1
+
+    attn = RoPEReadCrossAttention(D, heads, _default_cfg())
+    wrapped = ScaledResidualAttention(attn, scale_init)
+
+    x = torch.randn(B, N_q, D)
+    kv = torch.randn(B, N_kv, D)
+    x_rope = (torch.randn(B, 1, N_q, head_dim), torch.randn(B, 1, N_q, head_dim))
+    kv_rope = (torch.randn(B, 1, N_kv, head_dim), torch.randn(B, 1, N_kv, head_dim))
+
+    out = wrapped(x, kv, x_rope, kv_rope)
+    assert out.shape == (B, N_q, D)
+
+    # Verify it's x + scale * attn(...)
+    with torch.no_grad():
+        raw = attn(x, kv, x_rope, kv_rope)
+        expected = x + scale_init * raw
+        assert torch.allclose(out, expected, rtol=1e-4)

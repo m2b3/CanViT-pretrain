@@ -1,24 +1,47 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import NamedTuple, TypeVar, cast, final, override
+from typing import Literal, NamedTuple, TypeVar, cast, final, override
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 from ytch.nn import ElementwiseAffine
-from ytch.nn.layer_scale import LayerScale
 
 from avp_vit.attention import (
     AttentionConfig,
+    RoPECrossAttention,
     RoPEReadCrossAttention,
     RoPEWriteCrossAttention,
+    ScaledResidualAttention,
 )
-from avp_vit.attention.convex import ConvexGatedAttention
+from avp_vit.attention.convex import CheapConvexGatedAttention, ConvexGatedAttention
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint, extract_glimpse
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
+
+GatingMode = Literal["none", "cheap", "full"]
+
+
+def _make_gated_attn(
+    attn_cls: type[RoPECrossAttention],
+    dim: int,
+    num_heads: int,
+    attn_cfg: AttentionConfig,
+    scale_init: float,
+    gating: GatingMode,
+) -> nn.Module:
+    """Create attention module with appropriate gating/scaling."""
+    attn = attn_cls(dim, num_heads, attn_cfg)
+    if gating == "none":
+        return ScaledResidualAttention(attn, scale_init)
+    if gating == "cheap":
+        return CheapConvexGatedAttention(attn, scale_init)
+    if gating == "full":
+        gate_attn = attn_cls(dim, num_heads, attn_cfg)
+        return ConvexGatedAttention(attn, gate_attn, scale_init)
+    raise ValueError(f"Unknown gating mode: {gating!r}")
 
 # Type variable for forward_reduce accumulator
 T = TypeVar("T")
@@ -57,11 +80,11 @@ class AVPConfig:
     scene_grid_size: int
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
-    layer_scale_init: float = 1e-4  # Init for intra-step LayerScales (cross-attention)
+    layer_scale_init: float = 1e-4  # Init for LayerScale / gate_init
     use_output_proj: bool = False
     use_output_proj_norm: bool = False  # LayerNorm before Linear in output_proj
     gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries
-    use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
+    gating: GatingMode = "none"  # none=LayerScale, cheap=1 attn+Linear, full=2 attn
     adapter_stride: int = 2  # Apply read/write adapters every N backbone blocks
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
@@ -91,10 +114,8 @@ class AVPViT(nn.Module):
     ephemeral_registers: nn.Parameter | None  # [1, n_ephemeral, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
     scene_positions: Tensor
-    read_attn: nn.ModuleList
+    read_attn: nn.ModuleList  # Unified API: all handle residual/gating internally
     write_attn: nn.ModuleList
-    read_scale: nn.ModuleList | None
-    write_scale: nn.ModuleList | None
     output_proj: nn.Module
 
     @property
@@ -160,48 +181,20 @@ class AVPViT(nn.Module):
         self._init_state_tokens(embed_dim)
 
         attn_cfg = cfg.attention
-        if cfg.use_convex_gating:
-            self.read_attn = nn.ModuleList(
-                [
-                    ConvexGatedAttention(
-                        RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg),
-                        RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg),
-                        cfg.layer_scale_init,
-                    )
-                    for _ in range(n_adapters)
-                ]
+        self.read_attn = nn.ModuleList([
+            _make_gated_attn(
+                RoPEReadCrossAttention, embed_dim, num_heads,
+                attn_cfg, cfg.layer_scale_init, cfg.gating,
             )
-            self.write_attn = nn.ModuleList(
-                [
-                    ConvexGatedAttention(
-                        RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg),
-                        RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg),
-                        cfg.layer_scale_init,
-                    )
-                    for _ in range(n_adapters)
-                ]
+            for _ in range(n_adapters)
+        ])
+        self.write_attn = nn.ModuleList([
+            _make_gated_attn(
+                RoPEWriteCrossAttention, embed_dim, num_heads,
+                attn_cfg, cfg.layer_scale_init, cfg.gating,
             )
-            self.read_scale = None
-            self.write_scale = None
-        else:
-            self.read_attn = nn.ModuleList(
-                [
-                    RoPEReadCrossAttention(embed_dim, num_heads, attn_cfg)
-                    for _ in range(n_adapters)
-                ]
-            )
-            self.write_attn = nn.ModuleList(
-                [
-                    RoPEWriteCrossAttention(embed_dim, num_heads, attn_cfg)
-                    for _ in range(n_adapters)
-                ]
-            )
-            self.read_scale = nn.ModuleList(
-                [LayerScale(embed_dim, cfg.layer_scale_init) for _ in range(n_adapters)]
-            )
-            self.write_scale = nn.ModuleList(
-                [LayerScale(embed_dim, cfg.layer_scale_init) for _ in range(n_adapters)]
-            )
+            for _ in range(n_adapters)
+        ])
 
         device = self.spatial_hidden_init.device
         assert isinstance(device, torch.device)
@@ -360,25 +353,11 @@ class AVPViT(nn.Module):
         for i in range(self.backbone.n_blocks):
             if i % stride == 0:
                 a = i // stride
-                if self.cfg.use_convex_gating:
-                    local = self.read_attn[a](local, hidden_t, local_rope, scene_rope)
-                else:
-                    assert self.read_scale is not None
-                    local = local + self.read_scale[a](
-                        self.read_attn[a](local, hidden_t, local_rope, scene_rope)
-                    )
+                local = self.read_attn[a](local, hidden_t, local_rope, scene_rope)
             local = self.backbone.forward_block(i, local, local_rope)
             if i % stride == 0:
                 a = i // stride
-                if self.cfg.use_convex_gating:
-                    hidden_t = self.write_attn[a](
-                        hidden_t, local, scene_rope, local_rope
-                    )
-                else:
-                    assert self.write_scale is not None
-                    hidden_t = hidden_t + self.write_scale[a](
-                        self.write_attn[a](hidden_t, local, scene_rope, local_rope)
-                    )
+                hidden_t = self.write_attn[a](hidden_t, local, scene_rope, local_rope)
 
         # Verify shape unchanged after attention
         assert hidden_t.shape == (B, expected_hidden_t, D), (

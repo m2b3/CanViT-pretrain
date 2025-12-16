@@ -153,3 +153,32 @@ class RoPEWriteCrossAttention(RoPECrossAttention):
                 nn.init.zeros_(proj.bias)
             return proj
         return _ResidualMLP(dim, cfg.write_v_expansion, cfg.layer_scale_init)
+
+
+@final
+class ScaledResidualAttention(nn.Module):
+    """Attention with residual connection and LayerScale.
+
+    x_new = x + scale * attn(x, kv, ...).
+    Unifies API with ConvexGatedAttention variants.
+    """
+
+    attn: RoPECrossAttention
+    scale: LayerScale
+
+    def __init__(self, attn: RoPECrossAttention, scale_init: float) -> None:
+        super().__init__()
+        self.attn = attn
+        self.scale = LayerScale(attn.dim, init_values=scale_init)
+
+    def forward(
+        self,
+        x: Tensor,
+        kv: Tensor,
+        x_rope: tuple[Tensor, Tensor],
+        kv_rope: tuple[Tensor, Tensor],
+    ) -> Tensor:
+        return x + self.scale(self.attn(x, kv, x_rope, kv_rope))
+
+    def flops(self, n_q: int, n_kv: int) -> int:
+        return self.attn.flops(n_q, n_kv)

@@ -98,7 +98,7 @@ def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone) -> AVPStepFLOPs:
     )
 
     # Approximate breakdown (for display purposes)
-    convex_mult = 2 if cfg.use_convex_gating else 1
+    convex_mult = 2 if cfg.gating == "full" else 1
     sdpa_per_attn = convex_mult * n_blocks * 4 * n_local * n_scene * D
     read_attn = CrossAttnFLOPs(sdpa_per_attn, 0, 0, 0, 0, read_attn_total)
     write_attn = CrossAttnFLOPs(sdpa_per_attn, 0, 0, 0, 0, write_attn_total)
@@ -247,7 +247,6 @@ def main() -> None:
         avp_base = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS, use_output_proj=True,
-            use_convex_gating=False,
         ))
         a_base = avp_step_flops(avp_base, backbone)
 
@@ -255,7 +254,6 @@ def main() -> None:
         avp_mlp = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS, use_output_proj=True,
-            use_convex_gating=False,
             attention=AttentionConfig(write_v_expansion=2),
         ))
         a_mlp = avp_step_flops(avp_mlp, backbone)
@@ -264,7 +262,7 @@ def main() -> None:
         avp_cvx = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS, use_output_proj=True,
-            use_convex_gating=True, layer_scale_init=1e-3,
+            gating="full", layer_scale_init=1e-3,
         ))
         a_cvx = avp_step_flops(avp_cvx, backbone)
 
@@ -272,7 +270,7 @@ def main() -> None:
         avp_cvx_mlp = AVPViT(backbone, AVPConfig(
             scene_grid_size=scene_grid, glimpse_grid_size=GLIMPSE_GRID,
             n_scene_registers=N_REGISTERS, use_output_proj=True,
-            use_convex_gating=True, layer_scale_init=1e-3,
+            gating="full", layer_scale_init=1e-3,
             attention=AttentionConfig(write_v_expansion=2),
         ))
         a_cvx_mlp = avp_step_flops(avp_cvx_mlp, backbone)

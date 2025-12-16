@@ -73,7 +73,7 @@ def main(args: Args) -> None:
         n_scene_registers=32,
         use_output_proj=True,
         use_output_proj_norm=False,
-        use_convex_gating=True,
+        gating="full",
     )
     avp = AVPViT(copy.deepcopy(backbone), cfg).to(device)
     avp.load_state_dict(ckpt["avp"])

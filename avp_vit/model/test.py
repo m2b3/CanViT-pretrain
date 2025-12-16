@@ -3,8 +3,8 @@ from typing import override
 import pytest
 import torch
 from torch import Tensor, nn
-from ytch.nn.layer_scale import LayerScale
 
+from avp_vit.attention import ScaledResidualAttention
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint
 from avp_vit.model import AVPConfig, AVPViT, StepOutput
@@ -125,14 +125,12 @@ def test_layer_scale_init():
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
-    assert avp.read_scale is not None
-    assert avp.write_scale is not None
-    for scale in avp.read_scale:
-        assert isinstance(scale, LayerScale)
-        assert (scale.scale == 0.5).all()
-    for scale in avp.write_scale:
-        assert isinstance(scale, LayerScale)
-        assert (scale.scale == 0.5).all()
+    for attn in avp.read_attn:
+        assert isinstance(attn, ScaledResidualAttention)
+        assert (attn.scale.scale == 0.5).all()
+    for attn in avp.write_attn:
+        assert isinstance(attn, ScaledResidualAttention)
+        assert (attn.scale.scale == 0.5).all()
 
 
 def test_convex_gating_init():
@@ -144,20 +142,16 @@ def test_convex_gating_init():
     cfg = AVPConfig(
         scene_grid_size=4,
         layer_scale_init=gate_init,
-        use_convex_gating=True,
+        gating="full",
         n_scene_registers=0,
     )
     backbone = MockBackbone(64, 4, 2, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
 
-    assert avp.read_scale is None
-    assert avp.write_scale is None
-
     expected_bias = math.log(gate_init / (1 - gate_init))
     for cvx in avp.read_attn:
         assert isinstance(cvx, ConvexGatedAttention)
         assert torch.allclose(cvx.gate_bias, torch.full((64,), expected_bias))
-        assert torch.allclose(cvx.gate_scale, torch.zeros(64))
 
 
 def test_convex_init_passthrough():
@@ -170,7 +164,7 @@ def test_convex_init_passthrough():
         scene_grid_size=4,
         glimpse_grid_size=3,
         layer_scale_init=gate_init,
-        use_convex_gating=True,
+        gating="full",
         n_scene_registers=0,
     )
     backbone = MockBackbone(64, 4, n_blocks, 0, PATCH_SIZE)
@@ -209,13 +203,13 @@ def test_convex_gate_value_affects_output():
     cfg_lo = AVPConfig(
         scene_grid_size=4,
         layer_scale_init=1e-5,
-        use_convex_gating=True,
+        gating="full",
         n_scene_registers=0,
     )
     cfg_hi = AVPConfig(
         scene_grid_size=4,
         layer_scale_init=0.5,
-        use_convex_gating=True,
+        gating="full",
         n_scene_registers=0,
     )
 
