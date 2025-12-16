@@ -81,6 +81,7 @@ class AVPConfig:
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 0.01  # Init for LayerScale (reference: 0.01)
+    temporal_gate_init: float | None = None  # None=disabled, float=gate init (ref: 0.001)
     use_output_proj: bool = True
     use_output_proj_norm: bool = False  # LayerNorm before Linear in output_proj
     gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries
@@ -112,6 +113,7 @@ class AVPViT(nn.Module):
     persistent_registers: nn.Parameter | None  # [1, n_persistent, D]
     ephemeral_registers: nn.Parameter | None  # [1, n_ephemeral, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
+    scene_temporal_gate: nn.Parameter | None  # [D] gate, or None if disabled
     scene_positions: Tensor
     read_attn: nn.ModuleList  # Unified API: all handle residual/gating internally
     write_attn: nn.ModuleList
@@ -164,6 +166,12 @@ class AVPViT(nn.Module):
         self.ephemeral_registers = (
             nn.Parameter(torch.randn(1, n_ephemeral, embed_dim) * scale)
             if n_ephemeral > 0
+            else None
+        )
+        # Scene temporal gate: hidden = base + gate * (prev - base)
+        self.scene_temporal_gate = (
+            nn.Parameter(torch.full((embed_dim,), self.cfg.temporal_gate_init))
+            if self.cfg.temporal_gate_init is not None
             else None
         )
 
@@ -241,10 +249,17 @@ class AVPViT(nn.Module):
         return spatial_hidden
 
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
-        """Return hidden state, or base if None."""
+        """Initialize hidden state, optionally with gated residual.
+
+        If temporal_gate_init is set: hidden = base + gate * (prev - base)
+        Otherwise: direct passthrough (hidden if provided, else base)
+        """
         if hidden is None:
             return self._get_base_hidden(B)
-        return hidden
+        if self.scene_temporal_gate is None:
+            return hidden
+        base = self._get_base_hidden(B)
+        return base + self.scene_temporal_gate * (hidden - base)
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
         """Extract spatial_hidden from full hidden state.
