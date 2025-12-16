@@ -579,7 +579,11 @@ class AVPViT(nn.Module):
         """Standard training: compute loss against target at each step.
 
         Memory-efficient: does not store intermediate scenes.
-        Loss is computed only for viewpoint outputs, NOT for the initial scene.
+        Loss is computed for initial scene (t=0) AND all viewpoint outputs.
+
+        Including initial scene in loss provides direct gradient signal to
+        spatial_hidden_init, ensuring the starting point is close to target.
+        This stabilizes the recurrence by reducing the "correction" needed.
 
         Args:
             images: Input images [B, C, H, W]
@@ -591,11 +595,18 @@ class AVPViT(nn.Module):
 
         Returns:
             (average_loss, final_hidden, final_local) where:
-            - average_loss: Mean loss across all viewpoints (scalar)
+            - average_loss: Mean loss across initial + all viewpoints (scalar)
             - final_hidden: For CONTINUATION in Bernoulli survival
             - final_local: For CONTINUATION when use_local_temporal
         """
         assert len(viewpoints) > 0, "Need at least one viewpoint for loss"
+        B = images.shape[0]
+
+        # Loss at t=0: scene before any viewpoint processing
+        # Uses _init_hidden to respect temporal gating (mixes base with passed-in hidden)
+        initial_hidden = self._init_hidden(B, hidden)
+        initial_scene = self.compute_scene(initial_hidden)
+        initial_loss = loss_fn(initial_scene, target)
 
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
             return acc + loss_fn(out.scene, target)
@@ -607,7 +618,8 @@ class AVPViT(nn.Module):
             local_prev=local_prev,
             context=context,
         )
-        return total / len(viewpoints), final_hidden, final_local
+        # Average over initial (t=0) + viewpoints (t=1,2,...)
+        return (initial_loss + total) / (len(viewpoints) + 1), final_hidden, final_local
 
     def forward_trajectory(
         self,

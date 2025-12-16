@@ -363,6 +363,30 @@ def test_compute_scene_matches_step_output():
     assert torch.allclose(scene_from_helper, out.scene)
 
 
+def test_initial_scene_invariant():
+    """Initial scene goes through same output_proj as processed scenes."""
+    embed_dim = 64
+    cfg = AVPConfig(scene_grid_size=4, glimpse_grid_size=3, n_scene_registers=8, use_output_proj=True)
+    backbone = MockBackbone(embed_dim, 4, 2, 4, PATCH_SIZE)
+    avp = AVPViT(backbone, cfg)
+
+    B = 2
+
+    # Method 1: get_initial_scene (canonical)
+    scene1 = avp.get_initial_scene(B)
+
+    # Method 2: compute_scene(_get_base_hidden(...))
+    scene2 = avp.compute_scene(avp._get_base_hidden(B))
+
+    # Must be identical
+    assert torch.allclose(scene1, scene2), "get_initial_scene != compute_scene(_get_base_hidden)"
+
+    # Verify unit-norm scaling (~1 per token, not sqrt(D) ~8)
+    norm_per_token = scene1.norm(dim=-1).mean().item()
+    assert norm_per_token < 3.0, f"Initial scene norm {norm_per_token} too large (expected ~1)"
+    assert norm_per_token > 0.3, f"Initial scene norm {norm_per_token} too small (expected ~1)"
+
+
 def test_output_proj_is_always_module():
     """output_proj is always nn.Module (Identity or Linear), never None."""
     cfg_no_proj = AVPConfig(scene_grid_size=4, use_output_proj=False, n_scene_registers=0)
