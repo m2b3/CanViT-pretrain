@@ -21,12 +21,6 @@ from avp_vit.glimpse import Viewpoint, extract_glimpse
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 
 
-def _inverse_sigmoid(p: float) -> float:
-    """Compute logit (inverse sigmoid). Clamps to avoid inf."""
-    p = max(1e-6, min(1 - 1e-6, p))
-    return float(torch.tensor(p / (1 - p)).log())
-
-
 # Type variable for forward_reduce accumulator
 T = TypeVar("T")
 
@@ -65,12 +59,10 @@ class AVPConfig:
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 1e-4  # Init for intra-step LayerScales (cross-attention)
-    scene_temporal_gate_init: float = 1e-4  # Init for scene hidden temporal gate
     use_output_proj: bool = False
     use_output_proj_norm: bool = False  # LayerNorm before Linear in output_proj
     gradient_checkpointing: bool = True  # Checkpoint at timestep boundaries
     use_convex_gating: bool = False  # Dynamic per-token gating (vs static LayerScale)
-    use_scene_input_norm: bool = False  # LayerNorm on hidden at start of each timestep
     adapter_stride: int = 2  # Apply read/write adapters every N backbone blocks
     attention: AttentionConfig = field(default_factory=AttentionConfig)
 
@@ -100,13 +92,11 @@ class AVPViT(nn.Module):
     ephemeral_registers: nn.Parameter | None  # [1, n_ephemeral, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
     scene_positions: Tensor
-    scene_input_norm: nn.Module
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     read_scale: nn.ModuleList | None
     write_scale: nn.ModuleList | None
     output_proj: nn.Module
-    scene_temporal_gate: nn.Parameter
 
     @property
     def glimpse_size(self) -> int:
@@ -220,11 +210,6 @@ class AVPViT(nn.Module):
         self.register_buffer("scene_positions", pos)
         self.scene_positions = pos
 
-        if cfg.use_scene_input_norm:
-            self.scene_input_norm = nn.LayerNorm(embed_dim)
-        else:
-            self.scene_input_norm = nn.Identity()
-
         if cfg.use_output_proj:
             layers: list[nn.Module] = []
             if cfg.use_output_proj_norm:
@@ -234,9 +219,6 @@ class AVPViT(nn.Module):
             self.output_proj = nn.Sequential(*layers)
         else:
             self.output_proj = nn.Identity()
-
-        logit_init = _inverse_sigmoid(cfg.scene_temporal_gate_init)
-        self.scene_temporal_gate = nn.Parameter(torch.full((embed_dim,), logit_init))
 
     def set_scene_grid_size(self, new_size: int) -> None:
         """Update scene grid size for curriculum. Recomputes scene_positions buffer."""
@@ -266,21 +248,10 @@ class AVPViT(nn.Module):
         return spatial_hidden
 
     def _init_hidden(self, B: int, hidden: Tensor | None) -> Tensor:
-        """Initialize hidden state with gated residual.
-
-        hidden_out = base + sigmoid(gate_logit) * (norm(prev_hidden) - base)
-
-        At init (gate≈0), each timestep starts from base regardless of prev_hidden.
-        This enables stable single-step learning before recurrence kicks in.
-
-        Hidden state shape: [B, n_persistent + G*G, D]
-        """
-        base = self._get_base_hidden(B)
+        """Return hidden state, or base if None."""
         if hidden is None:
-            return base
-        normed = self.scene_input_norm(hidden)
-        gate = torch.sigmoid(self.scene_temporal_gate)
-        return base + gate * (normed - base)
+            return self._get_base_hidden(B)
+        return hidden
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
         """Extract spatial_hidden from full hidden state.

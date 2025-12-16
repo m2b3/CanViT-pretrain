@@ -45,7 +45,6 @@ def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
         scene_grid_size=8,
         glimpse_grid_size=7,
         layer_scale_init=0.0,
-        scene_temporal_gate_init=0.0,
         n_scene_registers=0,
     )
     avp = AVPViT(backbone, cfg)

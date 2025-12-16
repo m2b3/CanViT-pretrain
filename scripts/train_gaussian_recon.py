@@ -43,10 +43,6 @@ def get_avp_gate_stats(avp: AVPViT) -> dict[str, float]:
         write_norms = [s.scale.norm().item() for s in avp.write_scale]
         stats["gate/write_scale_norm"] = sum(write_norms) / len(write_norms)
 
-    # Scene temporal gate (inter-step recurrence)
-    stats["gate/scene_temporal_norm"] = avp.scene_temporal_gate.norm().item()
-    stats["gate/scene_temporal_mean"] = avp.scene_temporal_gate.mean().item()
-
     return stats
 
 

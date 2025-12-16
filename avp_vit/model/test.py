@@ -160,7 +160,7 @@ def test_convex_init_passthrough():
     gate_init = 1e-5
     cfg = AVPConfig(
         scene_grid_size=4, glimpse_grid_size=3, layer_scale_init=gate_init,
-        use_convex_gating=True, n_scene_registers=0, use_scene_input_norm=False,
+        use_convex_gating=True, n_scene_registers=0,
     )
     backbone = MockBackbone(64, 4, n_blocks, 0, PATCH_SIZE)
     avp = AVPViT(backbone, cfg)
@@ -182,8 +182,7 @@ def test_convex_init_passthrough():
         # AVPViT forward (same seed for prepare_tokens)
         torch.manual_seed(123)
         out = avp.forward_step(images, vp)
-        normed_init = avp.scene_input_norm(avp._get_base_hidden(B))
-        initial_scene = avp.output_proj(normed_init)
+        initial_scene = avp.output_proj(avp._get_base_hidden(B))
 
     # Scene: write gate ≈ 0 → scene ≈ initial
     scene_diff = (out.scene - initial_scene).abs().mean()
@@ -198,11 +197,11 @@ def test_convex_gate_value_affects_output():
     """High gate breaks passthrough; low gate preserves it."""
     cfg_lo = AVPConfig(
         scene_grid_size=4, layer_scale_init=1e-5, use_convex_gating=True,
-        n_scene_registers=0, use_scene_input_norm=False,
+        n_scene_registers=0,
     )
     cfg_hi = AVPConfig(
         scene_grid_size=4, layer_scale_init=0.5, use_convex_gating=True,
-        n_scene_registers=0, use_scene_input_norm=False,
+        n_scene_registers=0,
     )
 
     torch.manual_seed(999)
@@ -220,8 +219,7 @@ def test_convex_gate_value_affects_output():
         out_lo = avp_lo.forward_step(images, vp)
         torch.manual_seed(123)
         out_hi = avp_hi.forward_step(images, vp)
-        normed_init = avp_lo.scene_input_norm(avp_lo._get_base_hidden(B))
-        initial = avp_lo.output_proj(normed_init)
+        initial = avp_lo.output_proj(avp_lo._get_base_hidden(B))
 
     diff_lo = (out_lo.scene - initial).abs().mean()
     diff_hi = (out_hi.scene - initial).abs().mean()
