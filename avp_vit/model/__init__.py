@@ -20,7 +20,6 @@ from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint, extract_glimpse
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 
-
 # Type variable for forward_reduce accumulator
 T = TypeVar("T")
 
@@ -139,11 +138,13 @@ class AVPViT(nn.Module):
         self.spatial_hidden_init = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.persistent_registers = (
             nn.Parameter(torch.randn(1, n_persistent, embed_dim) * scale)
-            if n_persistent > 0 else None
+            if n_persistent > 0
+            else None
         )
         self.ephemeral_registers = (
             nn.Parameter(torch.randn(1, n_ephemeral, embed_dim) * scale)
-            if n_ephemeral > 0 else None
+            if n_ephemeral > 0
+            else None
         )
 
     def __init__(self, backbone: ViTBackbone, cfg: AVPConfig) -> None:
@@ -263,19 +264,6 @@ class AVPViT(nn.Module):
             Spatial hidden [B, G*G, D] (excludes persistent registers)
         """
         return hidden[:, self.n_persistent_registers :]
-
-    def get_initial_scene(self, B: int) -> Tensor:
-        """Get initial scene (before any viewpoint processing).
-
-        This is a "valid scene" - goes through same output_proj as processed scenes.
-        Useful for visualization and ensuring initial state looks like network output.
-
-        Returns:
-            [B, G*G, D] initial scene
-        """
-        n_spatial = self.cfg.scene_grid_size**2
-        spatial_hidden = self.spatial_hidden_init.expand(B, n_spatial, -1)
-        return self.output_proj(spatial_hidden)
 
     def compute_scene(self, hidden: Tensor) -> Tensor:
         """Compute projected scene from hidden state.
@@ -502,9 +490,12 @@ class AVPViT(nn.Module):
             return acc + loss_fn(out.scene, target)
 
         total, final_hidden = self.forward_reduce(
-            images, viewpoints, reducer,
+            images,
+            viewpoints,
+            reducer,
             init=torch.tensor(0.0, device=images.device),
-            hidden=hidden, context=context,
+            hidden=hidden,
+            context=context,
         )
         return total / len(viewpoints), final_hidden
 
@@ -516,9 +507,13 @@ class AVPViT(nn.Module):
         context: Tensor | None = None,
     ) -> tuple[list[StepOutput], Tensor]:
         """Collect full StepOutput at each step. Returns (outputs, final_hidden)."""
+
         def reducer(acc: list[StepOutput], out: StepOutput) -> list[StepOutput]:
             return [*acc, out]
-        return self.forward_reduce(images, viewpoints, reducer, init=[], hidden=hidden, context=context)
+
+        return self.forward_reduce(
+            images, viewpoints, reducer, init=[], hidden=hidden, context=context
+        )
 
     @override
     def forward(
@@ -529,7 +524,11 @@ class AVPViT(nn.Module):
         context: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Process viewpoints, return final scene. Returns (scene, final_hidden)."""
+
         def reducer(acc: Tensor, out: StepOutput) -> Tensor:
             return out.scene
+
         dummy = torch.empty(0, device=images.device)
-        return self.forward_reduce(images, viewpoints, reducer, init=dummy, hidden=hidden, context=context)
+        return self.forward_reduce(
+            images, viewpoints, reducer, init=dummy, hidden=hidden, context=context
+        )
