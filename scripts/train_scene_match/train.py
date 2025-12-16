@@ -85,13 +85,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     exp = comet_ml.Experiment(
         project_name="avp-vit-scene-match", auto_metric_logging=False
     )
-    exp.log_parameters(
-        {
-            k: str(v) if isinstance(v, (torch.device,)) else v
-            for k, v in cfg.__dict__.items()
-            if not k.startswith("_")
-        }
-    )
+    from dataclasses import asdict
+
+    def flatten_dict(d: dict, prefix: str = "") -> dict[str, object]:
+        flat: dict[str, object] = {}
+        for k, v in d.items():
+            key = f"{prefix}{k}" if prefix else k
+            if isinstance(v, dict):
+                flat.update(flatten_dict(v, f"{key}."))
+            else:
+                flat[key] = str(v) if not isinstance(v, (int, float, bool, str, type(None))) else v
+        return flat
+
+    exp.log_parameters(flatten_dict(asdict(cfg)))
     exp.log_parameters({"trial_number": trial.number})
 
     log.info("Loading teacher...")
