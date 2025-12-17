@@ -426,9 +426,11 @@ def load_avp_checkpoint(path: Path, avp: AVPViT) -> None:
 def log_norm_stats(
     exp: comet_ml.Experiment,
     normalizers: dict[int, PositionAwareNorm],
+    cls_normalizer: PositionAwareNorm,
     step: int,
 ) -> None:
-    """Log normalizer running stats to Comet (per grid size): metrics and heatmaps."""
+    """Log normalizer running stats to Comet: metrics and spatial heatmaps."""
+    # Scene normalizers (per grid size)
     for G, norm in normalizers.items():
         exp.log_metrics(
             {
@@ -443,3 +445,12 @@ def log_norm_stats(
         std_np = norm.var.sqrt().cpu().float().numpy()
         fig = plot_norm_stats(mean_np, std_np, G)
         log_figure(exp, fig, f"norm/G{G}/spatial", step)
+
+    # CLS normalizer (single token, no spatial heatmap)
+    exp.log_metrics(
+        {
+            "norm/cls/mean_norm": cls_normalizer.mean.norm().item(),
+            "norm/cls/var_mean": cls_normalizer.var.mean().item(),
+        },
+        step=step,
+    )

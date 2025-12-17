@@ -39,7 +39,8 @@ def init_survival_batch(
     avp: AVPViT,
     train_loader: InfiniteLoader,
     compute_targets: Callable[[Tensor], NormFeatures],
-    normalizer: PositionAwareNorm,
+    scene_normalizer: PositionAwareNorm,
+    cls_normalizer: PositionAwareNorm,
     batch_size: int,
     fresh_count: int,
     scene_grid_size: int,
@@ -47,7 +48,7 @@ def init_survival_batch(
 ) -> SurvivalBatch:
     """Initialize survival batch by loading fresh_count images at a time.
 
-    Targets are normalized using the provided normalizer (expected to be in eval mode).
+    Targets are normalized using the provided normalizers (expected to be in eval mode).
     """
     n_init_batches = (batch_size + fresh_count - 1) // fresh_count
     log.info(f"Initializing survival batch: batch_size={batch_size}, fresh_count={fresh_count}")
@@ -59,10 +60,11 @@ def init_survival_batch(
         for _ in range(n_init_batches):
             batch = train_loader.next_batch().to(device)
             feats = compute_targets(batch)
-            norm_patches = normalizer(feats.patches)
+            norm_patches = scene_normalizer(feats.patches)
+            norm_cls = cls_normalizer(feats.cls.unsqueeze(1)).squeeze(1)  # [B,D]->[B,1,D]->[B,D]
             init_imgs_list.append(batch)
             init_patches_list.append(norm_patches)
-            init_cls_list.append(feats.cls)
+            init_cls_list.append(norm_cls)
 
     init_imgs = torch.cat(init_imgs_list, dim=0)[:batch_size]
     init_targets = torch.cat(init_patches_list, dim=0)[:batch_size]
@@ -82,18 +84,23 @@ def _log_stage(stage: ResolutionStage) -> None:
 
 
 def warmup_normalizers(
-    normalizers: dict[int, PositionAwareNorm],
+    scene_normalizers: dict[int, PositionAwareNorm],
+    cls_normalizer: PositionAwareNorm,
     train_loaders: dict[int, InfiniteLoader],
     compute_raw_targets: Callable[[Tensor], NormFeatures],
     warmup_images: int,
     device: torch.device,
 ) -> None:
-    """Warm up normalizer running stats by passing through warmup_images images per grid size.
+    """Warm up normalizer running stats before training begins.
 
-    After warmup, normalizers are switched to eval mode (frozen stats).
+    CLS normalizer is warmed up alongside the first scene normalizer (grid-size independent).
+    Normalizers stay in train mode - stats continue updating during training.
     """
-    for G, normalizer in normalizers.items():
+    cls_warmed_up = False
+    for G, normalizer in scene_normalizers.items():
         normalizer.train()
+        if not cls_warmed_up:
+            cls_normalizer.train()
         loader = train_loaders[G]
         images_seen = 0
         pbar = tqdm(total=warmup_images, desc=f"Warmup G={G}", unit="img", leave=False)
@@ -101,16 +108,24 @@ def warmup_normalizers(
             batch = loader.next_batch().to(device)
             with torch.no_grad():
                 feats = compute_raw_targets(batch)
-                normalizer(feats.patches)  # Updates running stats
+                normalizer(feats.patches)
+                if not cls_warmed_up:
+                    cls_normalizer(feats.cls.unsqueeze(1))  # [B, D] -> [B, 1, D]
             images_seen += batch.shape[0]
             pbar.update(batch.shape[0])
         pbar.close()
-        normalizer.eval()
         log.info(
             f"Warmup G={G}: {images_seen} images, "
             f"mean_norm={normalizer.mean.norm().item():.4f}, "
             f"var_mean={normalizer.var.mean().item():.4f}"
         )
+        if not cls_warmed_up:
+            log.info(
+                f"Warmup CLS: {images_seen} images, "
+                f"mean_norm={cls_normalizer.mean.norm().item():.4f}, "
+                f"var_mean={cls_normalizer.var.mean().item():.4f}"
+            )
+            cls_warmed_up = True
 
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
@@ -199,16 +214,24 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             momentum=cfg.norm_momentum,
         ).to(cfg.device)
 
+    # CLS normalizer (grid-size independent, single token)
+    cls_normalizer = PositionAwareNorm(
+        n_tokens=1,
+        embed_dim=teacher.embed_dim,
+        grid_size=1,
+        momentum=cfg.norm_momentum,
+    ).to(cfg.device)
+
     # Warm up normalizer stats before training
     log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images per grid size)...")
-    warmup_normalizers(normalizers, train_loaders, compute_raw_targets, cfg.norm_warmup_images, cfg.device)
+    warmup_normalizers(normalizers, cls_normalizer, train_loaders, compute_raw_targets, cfg.norm_warmup_images, cfg.device)
 
     # Initialize all survival batches upfront (with normalized targets)
     log.info("Initializing survival batches...")
     states: dict[int, SurvivalBatch] = {}
     for G, stage in stages.items():
         states[G] = init_survival_batch(
-            avp, train_loaders[G], compute_raw_targets, normalizers[G],
+            avp, train_loaders[G], compute_raw_targets, normalizers[G], cls_normalizer,
             stage.batch_size, stage.fresh_count, G, cfg.device,
         )
 
@@ -229,12 +252,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         train_loader = train_loaders[G]
         val_loader = val_loaders[G]
 
-        # Load fresh images and normalize targets
+        # Load fresh images and normalize targets (both scene patches and CLS)
         normalizer = normalizers[G]
         fresh_imgs = train_loader.next_batch().to(cfg.device)
         with torch.no_grad():
             fresh_feats = compute_raw_targets(fresh_imgs)
             fresh_patches_norm = normalizer(fresh_feats.patches)
+            fresh_cls_norm = cls_normalizer(fresh_feats.cls.unsqueeze(1)).squeeze(1)  # [B,D]->[B,1,D]->[B,D]
 
         # Viewpoint scale bounds for current grid size
         min_scale = stage.min_viewpoint_scale
@@ -349,14 +373,14 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 avp=avp, path=ckpt_path, exp=exp,
                 step=step, train_loss=ema_loss_t.item(), current_grid_size=G,
             )
-            log_norm_stats(exp, normalizers, step)
+            log_norm_stats(exp, normalizers, cls_normalizer, step)
 
         # Fresh ratio survival: permute batch, replace first K with fresh (normalized targets)
         hidden_init = avp.init_hidden(stage.fresh_count, G)
         states[G] = state.step(
             fresh_images=fresh_imgs,
             fresh_targets=fresh_patches_norm,
-            fresh_cls_targets=fresh_feats.cls,
+            fresh_cls_targets=fresh_cls_norm,
             next_hidden=final_hidden,
             hidden_init=hidden_init,
         )
