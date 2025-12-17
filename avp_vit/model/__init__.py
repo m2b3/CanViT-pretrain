@@ -77,7 +77,7 @@ class AVPConfig:
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 4  # Adapters every N backbone blocks (reference: 1)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
-    mean_map_grid_size: int = 96  # Learnable spatial mean map size
+    mean_map_grid_size: int = 128  # Learnable spatial mean map size
     use_local_loss: bool = True  # Enable local loss (supervise glimpse predictions)
 
 
