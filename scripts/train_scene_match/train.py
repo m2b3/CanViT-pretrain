@@ -7,7 +7,7 @@ from collections.abc import Callable
 import comet_ml
 import optuna
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 from torch.nn.functional import l1_loss, mse_loss
 from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
@@ -33,6 +33,21 @@ from .viz import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
+    """Gradient norms grouped by module path prefix."""
+    groups: dict[str, list[Tensor]] = {}
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            continue
+        parts = name.split(".")
+        prefix = ".".join(parts[:depth])
+        groups.setdefault(prefix, []).append(param.grad)
+    return {
+        prefix: torch.cat([g.flatten() for g in grads]).norm().item()
+        for prefix, grads in groups.items()
+    }
 
 
 def init_survival_batch(
@@ -348,6 +363,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 val_images, G, f"grid{G}/val",
             )
             exp.log_metric("val/loss", val_loss, step=step)
+
+            # Log gradient norms by module
+            for name, norm in grad_norms_by_module(avp, depth=1).items():
+                exp.log_metric(f"grad_norm/{name}", norm, step=step)
 
             if step > 0:
                 trial.report(ema_loss_t.item(), step)
