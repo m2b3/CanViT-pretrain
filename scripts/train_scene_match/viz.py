@@ -17,7 +17,7 @@ from torch import Tensor
 from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.glimpse import Viewpoint
-from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_trajectory
+from avp_vit.train import imagenet_denormalize, plot_mean_scale_maps, plot_multistep_pca, plot_trajectory
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
 log = logging.getLogger(__name__)
@@ -304,3 +304,25 @@ def save_checkpoint(
     size_mb = path.stat().st_size / (1024 * 1024)
     log.info(f"Saved checkpoint: {path} ({size_mb:.1f} MB), train_loss={train_loss:.4f}")
     exp.log_metric("ckpt/train_loss", train_loss, step=step)
+
+
+def log_mean_scale_maps(
+    exp: comet_ml.Experiment,
+    avp: AVPViT,
+    step: int,
+    prefix: str = "maps",
+) -> None:
+    """Log mean and scale map amplitude heatmaps to Comet."""
+    with torch.inference_mode():
+        # mean_scale_map is [1, 2*D, G, G]
+        ms = avp.mean_scale_map.detach()
+        D = avp.teacher_dim
+        G = avp.cfg.mean_map_grid_size
+
+        # Split and reshape to [G, G, D]
+        mean_map = ms[0, :D].permute(1, 2, 0).cpu().float().numpy()
+        scale_map = ms[0, D:].permute(1, 2, 0).cpu().float().numpy()
+        assert mean_map.shape == scale_map.shape == (G, G, D)
+
+    fig = plot_mean_scale_maps(mean_map, scale_map)
+    log_figure(exp, fig, f"{prefix}/mean_scale_amp", step)
