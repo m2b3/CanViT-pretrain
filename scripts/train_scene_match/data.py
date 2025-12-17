@@ -61,7 +61,7 @@ class ResolutionStage:
 
 def _n_eval_viewpoints(grid_size: int) -> int:
     """Expected viewpoints for evaluation. Linear in G since glimpses reuse hidden state."""
-    return max(2, round(grid_size / 16))
+    return max(4, round(grid_size / 16))
 
 
 def _batch_size_for_grid(
