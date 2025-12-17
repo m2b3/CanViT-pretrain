@@ -49,19 +49,15 @@ T = TypeVar("T")
 class StepOutput(NamedTuple):
     """Output from a single AVPViT forward step.
 
-    Two scene representations with distinct purposes:
-
-    - hidden: Internal state for CONTINUATION (unprojected, in student embed space)
-    - scene:  Projected output for LOSS/VIZ (scene_proj applied, in output_dim space)
-
-    hidden and scene have different dimensions when student != teacher architecture.
+    - hidden: Internal state for CONTINUATION (student embed space)
+    - scene:  Projected output for LOSS/VIZ (teacher_dim space)
     """
 
-    glimpse: Tensor  # [B, C, H, W] extracted glimpse image
-    local: Tensor  # [B, N, embed_dim] local features (CLS + patches)
-    hidden: Tensor  # [B, n_persistent + G*G, embed_dim] for CONTINUATION
-    scene: Tensor  # [B, G*G, output_dim] for LOSS/VIZ
-    context_out: Tensor | None  # [B, N_ctx, embed_dim] or None
+    glimpse: Tensor  # [B, C, H, W]
+    local: Tensor  # [B, N, student_embed_dim]
+    hidden: Tensor  # [B, n_persistent + G*G, student_embed_dim]
+    scene: Tensor  # [B, G*G, teacher_dim]
+    context_out: Tensor | None  # [B, N_ctx, student_embed_dim] or None
 
 
 @final
@@ -95,7 +91,7 @@ class AVPViT(nn.Module):
 
     backbone: ViTBackbone
     cfg: AVPConfig
-    output_dim: int  # Target dimension for scene projection (typically teacher embed_dim)
+    teacher_dim: int  # Dimension scene_proj projects to (for loss against teacher)
     persistent_registers: nn.Parameter | None  # [1, n_persistent, D]
     ephemeral_registers: nn.Parameter | None  # [1, n_ephemeral, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
@@ -103,7 +99,7 @@ class AVPViT(nn.Module):
     scene_positions: Tensor
     read_attn: nn.ModuleList  # Unified API: all handle residual/gating internally
     write_attn: nn.ModuleList
-    scene_proj: nn.Sequential  # LayerNorm + Linear: projects to output_dim
+    scene_proj: nn.Sequential  # LayerNorm + Linear: projects to teacher_dim
 
     @property
     def glimpse_size(self) -> int:
@@ -165,12 +161,12 @@ class AVPViT(nn.Module):
         self,
         backbone: ViTBackbone,
         cfg: AVPConfig,
-        output_dim: int | None = None,
+        teacher_dim: int,
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.cfg = cfg
-        self.output_dim = output_dim if output_dim is not None else backbone.embed_dim
+        self.teacher_dim = teacher_dim
 
         embed_dim = backbone.embed_dim
         num_heads = backbone.num_heads
@@ -203,10 +199,10 @@ class AVPViT(nn.Module):
         self.register_buffer("scene_positions", pos)
         self.scene_positions = pos
 
-        # Scene projection: LayerNorm + Linear (always present, projects to output_dim)
+        # Scene projection: LayerNorm + Linear (projects to teacher_dim for loss)
         self.scene_proj = nn.Sequential(
             nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, self.output_dim),
+            nn.Linear(embed_dim, self.teacher_dim),
         )
 
     def set_scene_grid_size(self, new_size: int) -> None:
@@ -261,16 +257,7 @@ class AVPViT(nn.Module):
         return hidden[:, self.n_persistent_registers :]
 
     def compute_scene(self, hidden: Tensor) -> Tensor:
-        """Compute projected scene from hidden state.
-
-        Extracts spatial tokens and applies scene_proj (LayerNorm + Linear).
-
-        Args:
-            hidden: [B, n_persistent + G*G, embed_dim]
-
-        Returns:
-            [B, G*G, output_dim]
-        """
+        """Extract spatial tokens from hidden, project to teacher_dim."""
         return self.scene_proj(self.get_spatial(hidden))
 
     def _process_glimpse(

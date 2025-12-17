@@ -80,10 +80,10 @@ def load_student_backbone(cfg: Config) -> DINOv3Backbone:
 
 def create_avp(
     student_backbone: DINOv3Backbone,
-    teacher_embed_dim: int,
+    teacher_dim: int,
     cfg: Config,
 ) -> AVPViT:
-    """Create AVP model wrapping student backbone, projecting to teacher dim."""
+    """Create AVP model wrapping student backbone, projecting to teacher_dim."""
     patch_size = student_backbone.patch_size
     scene_px = cfg.avp.scene_grid_size * patch_size
     glimpse_px = cfg.avp.glimpse_grid_size * patch_size
@@ -91,12 +91,12 @@ def create_avp(
     for p in student_backbone.parameters():
         p.requires_grad = not cfg.freeze_student_backbone
 
-    avp = AVPViT(student_backbone, cfg.avp, output_dim=teacher_embed_dim).to(cfg.device)
+    avp = AVPViT(student_backbone, cfg.avp, teacher_dim).to(cfg.device)
 
     log.info(
         f"AVP created: scene={cfg.avp.scene_grid_size}x{cfg.avp.scene_grid_size} ({scene_px}px), "
         f"glimpse={cfg.avp.glimpse_grid_size}x{cfg.avp.glimpse_grid_size} ({glimpse_px}px), "
-        f"student_dim={student_backbone.embed_dim} -> output_dim={teacher_embed_dim}, "
+        f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
         f"freeze_student_backbone={cfg.freeze_student_backbone}"
     )
     return avp

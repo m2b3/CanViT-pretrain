@@ -27,7 +27,7 @@ def backbone(request: pytest.FixtureRequest) -> ViTBackbone:
 def test_avp_forward_shapes(backbone: ViTBackbone) -> None:
     """AVP forward produces correct output shapes."""
     cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0)
-    avp = AVPViT(backbone, cfg)
+    avp = AVPViT(backbone, cfg, teacher_dim=backbone.embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 128, 128)
@@ -47,7 +47,7 @@ def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
         layer_scale_init=0.0,
         n_scene_registers=0,
     )
-    avp = AVPViT(backbone, cfg)
+    avp = AVPViT(backbone, cfg, teacher_dim=backbone.embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 128, 128)
@@ -62,7 +62,7 @@ def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
 def test_multi_viewpoint_forward(backbone: ViTBackbone) -> None:
     """Forward with multiple viewpoints processes all."""
     cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0)
-    avp = AVPViT(backbone, cfg)
+    avp = AVPViT(backbone, cfg, teacher_dim=backbone.embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 128, 128)
@@ -81,7 +81,7 @@ def test_multi_viewpoint_forward(backbone: ViTBackbone) -> None:
 def test_forward_loss(backbone: ViTBackbone) -> None:
     """forward_loss computes averaged MSE correctly."""
     cfg = AVPConfig(scene_grid_size=8, glimpse_grid_size=7, n_scene_registers=0)
-    avp = AVPViT(backbone, cfg)
+    avp = AVPViT(backbone, cfg, teacher_dim=backbone.embed_dim)
 
     B = 2
     images = torch.randn(B, 3, 128, 128)
