@@ -86,15 +86,17 @@ class AVPConfig:
 class AVPViT(nn.Module):
     """Active Visual Pondering ViT.
 
-    hidden = [scene_registers | spatial_hidden], shape [B, n_registers + G*G, D]
+    hidden = [cls | scene_registers | spatial_hidden], shape [B, n_cls + n_registers + G*G, D]
     scene = scene_proj(spatial_hidden), shape [B, G*G, teacher_dim]
     """
 
     backbone: ViTBackbone
     cfg: AVPConfig
     teacher_dim: int
+    cls_hidden_init: nn.Parameter  # [1, 1, D] for scene CLS token (always present)
     scene_registers: nn.Parameter | None  # [1, n_registers, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
+    cls_temporal_gate: nn.Parameter | None  # [D] per-dim
     register_temporal_gate: (
         nn.Parameter | None
     )  # [n_registers, D] per-position + per-dim
@@ -108,8 +110,18 @@ class AVPViT(nn.Module):
         return self.cfg.glimpse_grid_size * self.backbone.patch_size
 
     @property
+    def n_cls(self) -> int:
+        """Number of scene CLS tokens (always 1)."""
+        return 1
+
+    @property
     def n_registers(self) -> int:
         return self.cfg.n_scene_registers
+
+    @property
+    def n_prefix(self) -> int:
+        """Number of prefix tokens in hidden state (cls + registers)."""
+        return self.n_cls + self.n_registers
 
     @property
     def n_local_tokens(self) -> int:
@@ -120,12 +132,29 @@ class AVPViT(nn.Module):
         """Number of read/write adapter pairs (first after adapter_stride blocks, then every stride)."""
         return (self.backbone.n_blocks - 1) // self.cfg.adapter_stride
 
+    # === Hidden state indexing: [cls | registers | spatial] ===
+    # Use these properties for ALL indexing into hidden state
+
+    def _cls_slice(self) -> slice:
+        """Slice for CLS token(s) in hidden: [0:n_cls]."""
+        return slice(0, self.n_cls)
+
+    def _reg_slice(self) -> slice:
+        """Slice for registers in hidden: [n_cls:n_cls+n_reg]."""
+        return slice(self.n_cls, self.n_cls + self.n_registers)
+
+    def _spatial_slice(self) -> slice:
+        """Slice for spatial tokens in hidden: [n_cls+n_reg:]."""
+        return slice(self.n_prefix, None)
+
     def _init_state_tokens(self, embed_dim: int) -> None:
         """Initialize learnable state tokens with unit-norm scaling (randn/sqrt(D))."""
         scale = 1.0 / math.sqrt(embed_dim)
         n_reg = self.n_registers
         gate_init = self.cfg.temporal_gate_init
 
+        # Scene CLS token (always present)
+        self.cls_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
         self.spatial_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
         self.scene_registers = (
             nn.Parameter(torch.randn(1, n_reg, embed_dim) * scale)
@@ -133,6 +162,11 @@ class AVPViT(nn.Module):
             else None
         )
         # Temporal gates: hidden = base + gate * (prev - base)
+        self.cls_temporal_gate = (
+            nn.Parameter(torch.full((embed_dim,), gate_init))
+            if gate_init is not None
+            else None
+        )
         self.register_temporal_gate = (
             nn.Parameter(torch.full((n_reg, embed_dim), gate_init))
             if gate_init is not None and n_reg > 0
@@ -215,16 +249,23 @@ class AVPViT(nn.Module):
             self.cls_proj = None
 
     def _get_base_hidden(self, B: int, scene_grid_size: int) -> Tensor:
-        """Base hidden: [scene_registers | spatial], shape [B, n_registers + G*G, D]."""
+        """Base hidden: [cls | registers | spatial], shape [B, n_cls + n_registers + G*G, D]."""
         n_spatial = scene_grid_size**2
-        spatial = self.spatial_hidden_init.expand(B, n_spatial, -1)
+        cls = self.cls_hidden_init.expand(B, -1, -1)  # [B, 1, D]
+        spatial = self.spatial_hidden_init.expand(B, n_spatial, -1)  # [B, G*G, D]
+
         if self.scene_registers is not None:
-            return torch.cat([self.scene_registers.expand(B, -1, -1), spatial], dim=1)
-        return spatial
+            regs = self.scene_registers.expand(B, -1, -1)  # [B, n_reg, D]
+            hidden = torch.cat([cls, regs, spatial], dim=1)
+        else:
+            hidden = torch.cat([cls, spatial], dim=1)
+
+        assert hidden.shape == (B, self.n_prefix + n_spatial, hidden.shape[2])
+        return hidden
 
     def _infer_scene_grid_size(self, hidden: Tensor) -> int:
         """Infer scene grid size from hidden state shape."""
-        n_spatial = hidden.shape[1] - self.n_registers
+        n_spatial = hidden.shape[1] - self.n_prefix  # subtract cls + registers
         G = int(math.sqrt(n_spatial))
         assert G * G == n_spatial, (
             f"hidden spatial dim {n_spatial} is not a perfect square"
@@ -236,27 +277,62 @@ class AVPViT(nn.Module):
         return self._get_base_hidden(batch_size, scene_grid_size)
 
     def _apply_temporal_gate(self, hidden: Tensor) -> Tensor:
-        """Apply temporal gating: hidden = base + gate * (hidden - base)."""
+        """Apply temporal gating: hidden = base + gate * (hidden - base).
+
+        Gates are applied per-component: [cls | registers | spatial].
+        If a gate is None, that component passes through unchanged.
+        """
+        # Early exit if no gating configured
         if self.spatial_temporal_gate is None:
             return hidden
+
         B = hidden.shape[0]
         G = self._infer_scene_grid_size(hidden)
         base = self._get_base_hidden(B, G)
-        n_reg = self.n_registers
 
-        if n_reg > 0 and self.register_temporal_gate is not None:
-            reg_gate = self.register_temporal_gate  # [n_reg, D]
-            spatial_gate = self.spatial_temporal_gate  # [D]
-            reg_out = base[:, :n_reg] + reg_gate * (hidden[:, :n_reg] - base[:, :n_reg])
-            spatial_out = base[:, n_reg:] + spatial_gate * (
-                hidden[:, n_reg:] - base[:, n_reg:]
+        # Use slices for safe indexing
+        cls_s = self._cls_slice()
+        reg_s = self._reg_slice()
+        spatial_s = self._spatial_slice()
+
+        parts = []
+
+        # CLS: [B, 1, D]
+        if self.cls_temporal_gate is not None:
+            cls_out = base[:, cls_s] + self.cls_temporal_gate * (
+                hidden[:, cls_s] - base[:, cls_s]
             )
-            return torch.cat([reg_out, spatial_out], dim=1)
-        return base + self.spatial_temporal_gate * (hidden - base)
+        else:
+            cls_out = hidden[:, cls_s]
+        parts.append(cls_out)
+
+        # Registers: [B, n_reg, D] (if any)
+        if self.n_registers > 0:
+            if self.register_temporal_gate is not None:
+                reg_out = base[:, reg_s] + self.register_temporal_gate * (
+                    hidden[:, reg_s] - base[:, reg_s]
+                )
+            else:
+                reg_out = hidden[:, reg_s]
+            parts.append(reg_out)
+
+        # Spatial: [B, G*G, D]
+        spatial_out = base[:, spatial_s] + self.spatial_temporal_gate * (
+            hidden[:, spatial_s] - base[:, spatial_s]
+        )
+        parts.append(spatial_out)
+
+        result = torch.cat(parts, dim=1)
+        assert result.shape == hidden.shape
+        return result
+
+    def get_cls(self, hidden: Tensor) -> Tensor:
+        """Extract CLS from hidden: [B, n_cls + n_reg + G*G, D] -> [B, D]."""
+        return hidden[:, 0]  # CLS is always first
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
-        """Extract spatial from hidden: [B, n_registers + G*G, D] -> [B, G*G, D]."""
-        return hidden[:, self.n_registers :]
+        """Extract spatial from hidden: [B, n_cls + n_reg + G*G, D] -> [B, G*G, D]."""
+        return hidden[:, self._spatial_slice()]
 
     def compute_scene(self, hidden: Tensor) -> Tensor:
         """Extract spatial tokens from hidden, project to teacher_dim."""
@@ -271,12 +347,12 @@ class AVPViT(nn.Module):
         patch_tokens = local[:, n_prefix:]  # [B, G², D_student]
         return self.local_proj(patch_tokens)  # [B, G², D_teacher]
 
-    def compute_cls(self, local: Tensor) -> Tensor:
-        """Project CLS token to teacher_dim. Returns [B, D_teacher]."""
+    def compute_cls(self, hidden: Tensor) -> Tensor:
+        """Project scene CLS token to teacher_dim. Returns [B, D_teacher]."""
         assert self.cls_proj is not None, (
             "cls_proj not initialized (use_cls_loss=False)"
         )
-        cls_token = local[:, 0]  # [B, D_student]
+        cls_token = self.get_cls(hidden)  # [B, D_student]
         return self.cls_proj(cls_token)  # [B, D_teacher]
 
     def _process_glimpse(
@@ -291,7 +367,6 @@ class AVPViT(nn.Module):
         D = self.backbone.embed_dim
         B = hidden.shape[0]
         scene_grid_size = self._infer_scene_grid_size(hidden)
-        n_reg = self.n_registers
         n_spatial = scene_grid_size**2
 
         local, H, W = self.backbone.prepare_tokens(glimpse)
@@ -304,11 +379,11 @@ class AVPViT(nn.Module):
             assert context.shape == (B, context.shape[1], D)
             n_ctx = context.shape[1]
 
-        # Apply temporal gating: [registers | spatial]
+        # Apply temporal gating: [cls | registers | spatial]
         hidden_t = self._apply_temporal_gate(hidden)
-        assert hidden_t.shape == (B, n_reg + n_spatial, D)
+        assert hidden_t.shape == (B, self.n_prefix + n_spatial, D)
 
-        # Prepend context if provided: [context | registers | spatial]
+        # Prepend context if provided: [context | cls | registers | spatial]
         if n_ctx > 0:
             assert context is not None
             hidden_t = torch.cat([context, hidden_t], dim=1)
@@ -452,12 +527,12 @@ class AVPViT(nn.Module):
                     else local_loss_acc + step_local
                 )
 
-            # CLS loss (if enabled) - student's glimpse CLS vs teacher's full-image CLS
+            # CLS loss (if enabled) - scene CLS vs teacher's full-image CLS
             if self.cls_proj is not None:
                 assert cls_target is not None, (
                     "cls_target required when use_cls_loss=True"
                 )
-                cls_pred = self.compute_cls(out.local)
+                cls_pred = self.compute_cls(out.hidden)
                 step_cls = loss_fn(cls_pred, cls_target)
                 cls_loss_acc = (
                     step_cls if cls_loss_acc is None else cls_loss_acc + step_cls

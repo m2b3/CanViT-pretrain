@@ -96,7 +96,8 @@ def test_forward_shapes():
     scene, final_hidden = avp(images, [Viewpoint.full_scene(B, images.device)], hidden)
 
     assert scene.shape == (B, G * G, 64)
-    assert final_hidden.shape == (B, G * G, 64)
+    # hidden = [cls | registers | spatial], here n_cls=1, n_reg=0
+    assert final_hidden.shape == (B, avp.n_cls + G * G, 64)
 
 
 def test_registers_in_hidden():
@@ -109,12 +110,13 @@ def test_registers_in_hidden():
 
     B, G = 2, 4
     hidden = avp.init_hidden(B, G)
-    assert hidden.shape == (B, n_reg + G * G, 64)
+    # hidden = [cls | registers | spatial]
+    assert hidden.shape == (B, avp.n_cls + n_reg + G * G, 64)
 
     images = torch.randn(B, 3, 64, 64)
     out = avp.forward_step(images, Viewpoint.full_scene(B, images.device), hidden)
-    assert out.hidden.shape == (B, n_reg + G * G, 64)
-    assert out.scene.shape == (B, G * G, 64)  # Scene excludes registers
+    assert out.hidden.shape == (B, avp.n_cls + n_reg + G * G, 64)
+    assert out.scene.shape == (B, G * G, 64)  # Scene excludes cls and registers
 
 
 def test_registers_disabled_when_zero():
@@ -148,10 +150,11 @@ def test_get_spatial():
     avp = AVPViT(MockBackbone(), cfg, teacher_dim=64)
 
     B, G = 2, 4
-    hidden = torch.randn(B, n_reg + G * G, 64)
+    # hidden = [cls | registers | spatial]
+    hidden = torch.randn(B, avp.n_cls + n_reg + G * G, 64)
     spatial = avp.get_spatial(hidden)
     assert spatial.shape == (B, G * G, 64)
-    assert torch.equal(spatial, hidden[:, n_reg:])
+    assert torch.equal(spatial, hidden[:, avp.n_prefix:])
 
 
 def test_context_flow():
@@ -183,7 +186,8 @@ def test_different_grid_sizes():
         images = torch.randn(B, 3, G * 16, G * 16)
         out = avp.forward_step(images, Viewpoint.full_scene(B, images.device), hidden)
         assert out.scene.shape == (B, G * G, 64)
-        assert out.hidden.shape == (B, 4 + G * G, 64)
+        # hidden = [cls | registers | spatial]
+        assert out.hidden.shape == (B, avp.n_cls + 4 + G * G, 64)
 
 
 def test_forward_loss():
@@ -206,7 +210,8 @@ def test_forward_loss():
     assert losses.cls is not None
     assert losses.cls.shape == ()
     assert losses.cls.item() >= 0
-    assert final_hidden.shape == (B, G * G, D)
+    # hidden = [cls | registers | spatial]
+    assert final_hidden.shape == (B, avp.n_cls + G * G, D)
 
 
 def test_step_output_type():

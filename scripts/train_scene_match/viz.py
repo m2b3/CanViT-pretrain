@@ -330,7 +330,7 @@ def val_metrics_only(
         # CLS metrics (if enabled)
         if avp.cls_proj is not None:
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
-            cls_pred = avp.compute_cls(outputs[-1].local)
+            cls_pred = avp.compute_cls(outputs[-1].hidden)
             exp.log_metric(f"{prefix}/cls_l1", l1_loss(cls_pred, cls_target).item(), step=step)
             exp.log_metric(f"{prefix}/cls_mse", mse_loss(cls_pred, cls_target).item(), step=step)
 
@@ -403,7 +403,7 @@ def eval_and_log(
         # CLS metrics (if enabled)
         if avp.cls_proj is not None:
             cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
-            cls_pred = avp.compute_cls(outputs[-1].local)
+            cls_pred = avp.compute_cls(outputs[-1].hidden)
             exp.log_metric(f"{prefix}/cls_l1", l1_loss(cls_pred, cls_target).item(), step=step)
             exp.log_metric(f"{prefix}/cls_mse", mse_loss(cls_pred, cls_target).item(), step=step)
 

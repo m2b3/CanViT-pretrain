@@ -38,7 +38,8 @@ def test_avp_forward_shapes(backbone: ViTBackbone) -> None:
     scene, final_hidden = avp(images, viewpoints, hidden)
 
     assert scene.shape == (B, 64, backbone.embed_dim)
-    assert final_hidden.shape == (B, 64, backbone.embed_dim)
+    # hidden = [cls | registers | spatial]
+    assert final_hidden.shape == (B, avp.n_cls + 64, backbone.embed_dim)
 
 
 def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
@@ -80,7 +81,8 @@ def test_multi_viewpoint_forward(backbone: ViTBackbone) -> None:
     scene, final_hidden = avp(images, viewpoints, hidden)
 
     assert scene.shape == (B, 64, backbone.embed_dim)
-    assert final_hidden.shape == (B, 64, backbone.embed_dim)
+    # hidden = [cls | registers | spatial]
+    assert final_hidden.shape == (B, avp.n_cls + 64, backbone.embed_dim)
 
 
 def test_forward_loss(backbone: ViTBackbone) -> None:
@@ -105,4 +107,5 @@ def test_forward_loss(backbone: ViTBackbone) -> None:
     # use_local_loss=False by default, use_cls_loss=False in config
     assert losses.local is None
     assert losses.cls is None
-    assert final_hidden.shape == (B, 64, backbone.embed_dim)
+    # hidden = [cls | registers | spatial], CLS always present
+    assert final_hidden.shape == (B, avp.n_cls + 64, backbone.embed_dim)

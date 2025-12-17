@@ -325,6 +325,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 "train/lr": lr,
                 "train/grid_size": G,
                 "train/spatial_hidden_init_norm": avp.spatial_hidden_init.norm().item(),
+                "train/cls_hidden_init_norm": avp.cls_hidden_init.norm().item(),
             }
             if avp.cls_proj is not None:
                 cls_linear = avp.cls_proj[1]
