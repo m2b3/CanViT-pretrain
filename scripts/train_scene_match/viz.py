@@ -209,11 +209,11 @@ def viz_and_log(
         ]
 
         locals_avp = [
-            (feat - avp.sample_mean_map_at_viewpoint(vp)).cpu().float().numpy()
+            (feat - avp.sample_mean_scale_map_at_viewpoint(vp)[0][sample_idx]).cpu().float().numpy()
             for feat, vp in zip(locals_avp_raw, viewpoints, strict=True)
         ]
         locals_teacher = [
-            (feat - avp.sample_mean_map_at_viewpoint(vp)).cpu().float().numpy()
+            (feat - avp.sample_mean_scale_map_at_viewpoint(vp)[0][sample_idx]).cpu().float().numpy()
             for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
         ]
 

@@ -71,6 +71,7 @@ class AVPConfig:
     adapter_stride: int = 2  # Adapters every N backbone blocks (reference: 1)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     mean_map_grid_size: int = 96  # Learnable spatial mean map size
+    use_local_loss: bool = True  # Enable local loss (supervise glimpse predictions)
 
 
 @final
@@ -111,10 +112,8 @@ class AVPViT(nn.Module):
 
     @property
     def n_adapters(self) -> int:
-        """Number of read/write adapter pairs (one per adapter_stride backbone blocks)."""
-        return (
-            self.backbone.n_blocks + self.cfg.adapter_stride - 1
-        ) // self.cfg.adapter_stride
+        """Number of read/write adapter pairs (first after adapter_stride blocks, then every stride)."""
+        return (self.backbone.n_blocks - 1) // self.cfg.adapter_stride
 
     def _init_state_tokens(self, embed_dim: int) -> None:
         """Initialize learnable state tokens with unit-norm scaling (randn/sqrt(D))."""
@@ -154,7 +153,7 @@ class AVPViT(nn.Module):
         embed_dim = backbone.embed_dim
         num_heads = backbone.num_heads
         n_blocks = backbone.n_blocks
-        n_adapters = (n_blocks + cfg.adapter_stride - 1) // cfg.adapter_stride
+        n_adapters = (n_blocks - 1) // cfg.adapter_stride
 
         self._init_state_tokens(embed_dim)
 
@@ -191,6 +190,15 @@ class AVPViT(nn.Module):
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, self.teacher_dim),
         )
+
+        # Local projection (for local loss): mirrors scene_proj structure
+        if cfg.use_local_loss:
+            self.local_proj: nn.Sequential | None = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, self.teacher_dim),
+            )
+        else:
+            self.local_proj = None
 
         # Learnable spatial maps: scene = mean + scale * residual
         # Packed as [1, 2*D, G, G] - first D channels = mean (init 0), second D = scale (init 1)
@@ -267,39 +275,38 @@ class AVPViT(nn.Module):
         mean, _ = self.interpolate_mean_scale_map(scene_grid_size)
         return mean
 
-    def sample_mean_map_at_viewpoint(self, viewpoint: Viewpoint) -> Tensor:
-        """Sample mean portion of mean_scale_map at viewpoint positions. Returns [G_glimpse*G_glimpse, D].
+    def sample_mean_scale_map_at_viewpoint(
+        self, viewpoint: Viewpoint
+    ) -> tuple[Tensor, Tensor]:
+        """Sample mean and scale from mean_scale_map at viewpoint positions.
 
-        Used for centering glimpse features in visualization.
+        Returns (mean, scale) each [B, G_glimpse², D].
         """
-        from avp_vit.rope import grid_offsets
-
+        B = viewpoint.centers.shape[0]
         G = self.cfg.glimpse_grid_size
         D = self.teacher_dim
 
-        offsets = grid_offsets(G, G, self.mean_scale_map.device, dtype=torch.float32)
-        offsets = offsets.view(G, G, 2).unsqueeze(0)
-
-        center = viewpoint.centers[0:1].view(1, 1, 1, 2)
-        vp_scale = viewpoint.scales[0:1].view(1, 1, 1, 1)
-        grid = center + vp_scale * offsets
-        grid = grid.flip(-1)  # (y, x) -> (x, y) for grid_sample
-
-        # Sample full mean_scale_map then extract mean (first D channels)
-        ms_local = F.grid_sample(
-            self.mean_scale_map, grid, mode="bilinear", align_corners=False
-        )
-        assert ms_local.shape == (1, 2 * D, G, G)
-        mean_local = ms_local[:, :D]  # first D channels = mean
-        out = mean_local.squeeze(0).permute(1, 2, 0).reshape(G * G, D)
-        assert out.shape == (G * G, D)
-        return out
+        # Expand to batch size before sampling
+        ms_batch = self.mean_scale_map.expand(B, -1, -1, -1)
+        ms = sample_at_viewpoint(ms_batch, viewpoint, G)  # [B, 2*D, G, G]
+        ms = ms.permute(0, 2, 3, 1).reshape(B, G * G, 2 * D)  # [B, G², 2*D]
+        mean, scale = ms[..., :D], ms[..., D:]
+        return mean, scale
 
     def compute_scene(self, hidden: Tensor) -> Tensor:
         """Extract spatial tokens from hidden, project to teacher_dim: mean + scale * residual."""
         G = self._infer_scene_grid_size(hidden)
         residual = self.scene_proj(self.get_spatial(hidden))
         mean, scale = self.interpolate_mean_scale_map(G)
+        return mean + scale * residual
+
+    def compute_local(self, local: Tensor, viewpoint: Viewpoint) -> Tensor:
+        """Project local patch tokens to teacher_dim: mean + scale * residual."""
+        assert self.local_proj is not None, "local_proj not initialized (use_local_loss=False)"
+        n_prefix = self.backbone.n_prefix_tokens
+        patch_tokens = local[:, n_prefix:]  # [B, G², D_student]
+        residual = self.local_proj(patch_tokens)  # [B, G², D_teacher]
+        mean, scale = self.sample_mean_scale_map_at_viewpoint(viewpoint)
         return mean + scale * residual
 
     def _process_glimpse(
@@ -353,15 +360,15 @@ class AVPViT(nn.Module):
         local_rope = compute_rope(local_pos, self.backbone.rope_periods)
         scene_rope = compute_rope(scene_pos, self.backbone.rope_periods)
 
-        # Interleaved read/write attention
+        # Interleaved read/write attention (adapters start after stride blocks)
         stride = self.cfg.adapter_stride
         for i in range(self.backbone.n_blocks):
-            if i % stride == 0:
-                a = i // stride
+            if i >= stride and i % stride == 0:
+                a = i // stride - 1
                 local = self.read_attn[a](local, hidden_t, local_rope, scene_rope)
             local = self.backbone.forward_block(i, local, local_rope)
-            if i % stride == 0:
-                a = i // stride
+            if i >= stride and i % stride == 0:
+                a = i // stride - 1
                 hidden_t = self.write_attn[a](hidden_t, local, scene_rope, local_rope)
 
         # Extract context if provided
@@ -407,7 +414,7 @@ class AVPViT(nn.Module):
         images: Tensor,
         viewpoints: list[Viewpoint],
         hidden: Tensor,
-        reducer: Callable[[T, StepOutput], T],
+        reducer: Callable[[T, StepOutput, Viewpoint], T],
         init: T,
         *,
         context: Tensor | None = None,
@@ -417,7 +424,7 @@ class AVPViT(nn.Module):
         for vp in viewpoints:
             out = self.forward_step(images, vp, hidden, context)
             hidden = out.hidden
-            acc = reducer(acc, out)
+            acc = reducer(acc, out, vp)
         return acc, hidden
 
     # ==================== Standard Invocations ====================
@@ -432,21 +439,41 @@ class AVPViT(nn.Module):
         context: Tensor | None = None,
         loss_fn: Callable[[Tensor, Tensor], Tensor] = F.mse_loss,
     ) -> tuple[Tensor, Tensor]:
-        """Compute average loss across all viewpoints. Returns (loss, final_hidden)."""
+        """Compute average loss across all viewpoints. Returns (loss, final_hidden).
+
+        If use_local_loss is enabled, also computes local loss:
+        local_pred = mean + scale * local_proj(student_local)
+        local_loss = loss_fn(local_pred, cropped_teacher)
+        """
         assert len(viewpoints) > 0
+        n = len(viewpoints)
+        device = images.device
 
-        def reducer(acc: Tensor, out: StepOutput) -> Tensor:
-            return acc + loss_fn(out.scene, target)
+        scene_loss = torch.tensor(0.0, device=device)
+        local_loss = torch.tensor(0.0, device=device)
 
-        total, final_hidden = self.forward_reduce(
-            images,
-            viewpoints,
-            hidden,
-            reducer,
-            init=torch.tensor(0.0, device=images.device),
-            context=context,
-        )
-        return total / len(viewpoints), final_hidden
+        # Prepare target spatial for local loss (if enabled)
+        B, N_target, D = target.shape
+        G_scene = int(N_target**0.5)
+        target_spatial = target.view(B, G_scene, G_scene, D).permute(0, 3, 1, 2)
+
+        for vp in viewpoints:
+            out = self.forward_step(images, vp, hidden, context)
+            hidden = out.hidden
+
+            # Scene loss (always)
+            scene_loss = scene_loss + loss_fn(out.scene, target)
+
+            # Local loss (if enabled)
+            if self.local_proj is not None:
+                local_pred = self.compute_local(out.local, vp)
+                G_glimpse = self.cfg.glimpse_grid_size
+                cropped = sample_at_viewpoint(target_spatial, vp, G_glimpse)
+                cropped = cropped.permute(0, 2, 3, 1).reshape(B, -1, D)
+                local_loss = local_loss + loss_fn(local_pred, cropped)
+
+        total_loss = (scene_loss + local_loss) / n
+        return total_loss, hidden
 
     def forward_trajectory_full(
         self,
@@ -457,7 +484,7 @@ class AVPViT(nn.Module):
     ) -> tuple[list[StepOutput], Tensor]:
         """Collect full StepOutput at each step. Returns (outputs, final_hidden)."""
 
-        def reducer(acc: list[StepOutput], out: StepOutput) -> list[StepOutput]:
+        def reducer(acc: list[StepOutput], out: StepOutput, _vp: Viewpoint) -> list[StepOutput]:
             return [*acc, out]
 
         return self.forward_reduce(
@@ -474,7 +501,7 @@ class AVPViT(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         """Process viewpoints, return final scene. Returns (scene, final_hidden)."""
 
-        def reducer(acc: Tensor, out: StepOutput) -> Tensor:
+        def reducer(acc: Tensor, out: StepOutput, _vp: Viewpoint) -> Tensor:
             return out.scene
 
         dummy = torch.empty(0, device=images.device)
