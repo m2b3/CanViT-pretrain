@@ -68,7 +68,7 @@ class AVPConfig:
     )
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
-    adapter_stride: int = 1  # Adapters every N backbone blocks (reference: 1)
+    adapter_stride: int = 2  # Adapters every N backbone blocks (reference: 1)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     mean_map_grid_size: int = 48  # Learnable spatial mean map size
 
