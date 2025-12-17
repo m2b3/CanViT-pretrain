@@ -1,16 +1,11 @@
 import torch
 from torch import nn
 
-from avp_vit.attention import AttentionConfig, RoPEReadCrossAttention, RoPEWriteCrossAttention
+from avp_vit.attention import CrossAttentionConfig, RoPEReadCrossAttention, RoPEWriteCrossAttention
 
 
-def _default_cfg() -> AttentionConfig:
-    return AttentionConfig()
-
-
-def _simple_v_cfg() -> AttentionConfig:
-    """Config with simple Linear V (no MLP) for FLOPs tests."""
-    return AttentionConfig(write_v_expansion=None)
+def _default_cfg() -> CrossAttentionConfig:
+    return CrossAttentionConfig()
 
 
 def test_read_shapes():
@@ -37,36 +32,6 @@ def test_write_shapes():
     assert out.shape == (B, N_q, D)
 
 
-def test_write_v_linear_identity_init():
-    """V as Linear starts at identity when vo_identity_init=True, write_v_expansion=None."""
-    D = 64
-    cfg = AttentionConfig(vo_identity_init=True, write_v_expansion=None)
-    attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=cfg)
-    v = attn.v_transform
-    assert isinstance(v, nn.Linear)
-    assert torch.allclose(v.weight, torch.eye(D))
-    assert torch.allclose(v.bias, torch.zeros(D))
-
-
-def test_write_v_residual_mlp():
-    """V as ResidualMLP when write_v_expansion is set (default=2)."""
-    from avp_vit.attention import _ResidualMLP
-    D = 64
-    cfg = AttentionConfig(write_v_expansion=2)  # default
-    attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=cfg)
-    assert isinstance(attn.v_transform, _ResidualMLP)
-
-
-def test_read_o_identity_init():
-    """O projection starts as identity when vo_identity_init=True."""
-    D = 64
-    cfg = AttentionConfig(vo_identity_init=True)
-    attn = RoPEReadCrossAttention(D, num_heads=4, cfg=cfg)
-    assert isinstance(attn.out_transform, nn.Linear)
-    assert torch.allclose(attn.out_transform.weight, torch.eye(D))
-    assert torch.allclose(attn.out_transform.bias, torch.zeros(D))
-
-
 def test_flops_read():
     """Read attention: Q and O projections on queries."""
     D = 64
@@ -77,18 +42,18 @@ def test_flops_read():
 
 
 def test_flops_write():
-    """Write attention: K and V projections on keys/values (Linear V)."""
+    """Write attention: K and V projections on keys/values."""
     D = 64
-    attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=_simple_v_cfg())
+    attn = RoPEWriteCrossAttention(D, num_heads=4, cfg=_default_cfg())
     f = attn.flops(n_q=20, n_kv=10)
-    # attention + K proj + V proj (Linear)
+    # attention + K proj + V proj
     assert f == 4 * 20 * 10 * D + 2 * 10 * D * D + 2 * 10 * D * D
 
 
 def test_flops_projection_placement_matters():
     """Which tokens get projected affects FLOPs significantly."""
     D = 64
-    cfg = _simple_v_cfg()  # Use Linear V for predictable FLOPs
+    cfg = _default_cfg()
     read = RoPEReadCrossAttention(D, 4, cfg)
     write = RoPEWriteCrossAttention(D, 4, cfg)
     # Asymmetric: 10 queries, 100 keys/values
@@ -103,7 +68,7 @@ def test_ewa_transforms_enabled():
     from ytch.nn.elementwise_affine import ElementwiseAffine
 
     D = 64
-    cfg = AttentionConfig(use_ewa_transforms=True)
+    cfg = CrossAttentionConfig(use_ewa_transforms=True)
     read = RoPEReadCrossAttention(D, 4, cfg)
     write = RoPEWriteCrossAttention(D, 4, cfg)
     # Read: K and V unprojected
@@ -117,7 +82,7 @@ def test_ewa_transforms_enabled():
 def test_ewa_transforms_disabled():
     """Unprojected transforms are Identity when use_ewa_transforms=False."""
     D = 64
-    cfg = AttentionConfig(use_ewa_transforms=False)
+    cfg = CrossAttentionConfig(use_ewa_transforms=False)
     read = RoPEReadCrossAttention(D, 4, cfg)
     write = RoPEWriteCrossAttention(D, 4, cfg)
     # Read: K and V unprojected
@@ -128,24 +93,52 @@ def test_ewa_transforms_disabled():
     assert isinstance(write.out_transform, nn.Identity)
 
 
-def test_post_rope_ewa_enabled():
-    """Post-RoPE EWAs are ElementwiseAffine when use_post_rope_ewa=True."""
-    from ytch.nn.elementwise_affine import ElementwiseAffine
-
-    D, heads = 64, 4
-    cfg = AttentionConfig(use_post_rope_ewa=True)
-    attn = RoPEReadCrossAttention(D, heads, cfg)
-    assert isinstance(attn.post_rope_q, ElementwiseAffine)
-    assert isinstance(attn.post_rope_k, ElementwiseAffine)
-
-
-def test_post_rope_ewa_disabled():
-    """Post-RoPE EWAs are Identity when use_post_rope_ewa=False."""
+def test_normalize_q_enabled():
+    """Q normalization uses LayerNorm when enabled."""
     D = 64
-    cfg = AttentionConfig(use_post_rope_ewa=False)
+    cfg = CrossAttentionConfig(normalize_q=True)
     attn = RoPEReadCrossAttention(D, 4, cfg)
-    assert isinstance(attn.post_rope_q, nn.Identity)
-    assert isinstance(attn.post_rope_k, nn.Identity)
+    assert isinstance(attn.q_norm, nn.LayerNorm)
+
+
+def test_normalize_q_disabled():
+    """Q normalization is Identity when disabled."""
+    D = 64
+    cfg = CrossAttentionConfig(normalize_q=False)
+    attn = RoPEReadCrossAttention(D, 4, cfg)
+    assert isinstance(attn.q_norm, nn.Identity)
+
+
+def test_normalize_k_enabled():
+    """K normalization uses LayerNorm when enabled."""
+    D = 64
+    cfg = CrossAttentionConfig(normalize_k=True)
+    attn = RoPEReadCrossAttention(D, 4, cfg)
+    assert isinstance(attn.k_norm, nn.LayerNorm)
+
+
+def test_normalize_k_disabled():
+    """K normalization is Identity when disabled."""
+    D = 64
+    cfg = CrossAttentionConfig(normalize_k=False)
+    attn = RoPEReadCrossAttention(D, 4, cfg)
+    assert isinstance(attn.k_norm, nn.Identity)
+
+
+def test_normalize_v_enabled():
+    """V normalization uses LayerNorm when enabled."""
+    D = 64
+    cfg = CrossAttentionConfig(normalize_v=True)
+    attn = RoPEReadCrossAttention(D, 4, cfg)
+    assert isinstance(attn.v_norm, nn.LayerNorm)
+
+
+def test_normalize_v_disabled():
+    """V normalization is Identity when disabled."""
+    D = 64
+    cfg = CrossAttentionConfig(normalize_v=False)
+    attn = RoPEReadCrossAttention(D, 4, cfg)
+    assert isinstance(attn.v_norm, nn.Identity)
 
 
 # ==================== ScaledResidualAttention ====================

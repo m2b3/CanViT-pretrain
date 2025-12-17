@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
 from avp_vit.attention import (
-    AttentionConfig,
+    CrossAttentionConfig,
     RoPECrossAttention,
     RoPEReadCrossAttention,
     RoPEWriteCrossAttention,
@@ -27,7 +27,7 @@ def _make_gated_attn(
     attn_cls: type[RoPECrossAttention],
     dim: int,
     num_heads: int,
-    attn_cfg: AttentionConfig,
+    attn_cfg: CrossAttentionConfig,
     scale_init: float,
     gating: GatingMode,
 ) -> nn.Module:
@@ -75,7 +75,8 @@ class AVPConfig:
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "cheap"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 4  # Adapters every N backbone blocks (reference: 1)
-    attention: AttentionConfig = field(default_factory=AttentionConfig)
+    read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
+    write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     use_local_loss: bool = False  # Enable local loss (supervise glimpse predictions)
     use_cls_loss: bool = True  # Enable CLS token loss (supervise CLS predictions)
 
@@ -188,14 +189,13 @@ class AVPViT(nn.Module):
 
         self._init_state_tokens(embed_dim)
 
-        attn_cfg = cfg.attention
         self.read_attn = nn.ModuleList(
             [
                 _make_gated_attn(
                     RoPEReadCrossAttention,
                     embed_dim,
                     num_heads,
-                    attn_cfg,
+                    cfg.read_attention,
                     cfg.layer_scale_init,
                     cfg.gating,
                 )
@@ -208,7 +208,7 @@ class AVPViT(nn.Module):
                     RoPEWriteCrossAttention,
                     embed_dim,
                     num_heads,
-                    attn_cfg,
+                    cfg.write_attention,
                     cfg.layer_scale_init,
                     cfg.gating,
                 )

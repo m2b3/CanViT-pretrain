@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from avp_vit.attention import AttentionConfig, RoPEReadCrossAttention, RoPEWriteCrossAttention
+from avp_vit.attention import CrossAttentionConfig, RoPEReadCrossAttention, RoPEWriteCrossAttention
 from avp_vit.attention.convex import CheapConvexGatedAttention, ConvexGatedAttention
 
 
@@ -16,7 +16,7 @@ def _make_rope(B: int, N: int, head_dim: int) -> tuple[torch.Tensor, torch.Tenso
 def test_output_shape():
     B, N_x, N_kv, D, heads = 2, 10, 20, 64, 4
     head_dim = D // heads
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
 
     proposal = RoPEReadCrossAttention(D, heads, cfg)
     gate = RoPEReadCrossAttention(D, heads, cfg)
@@ -35,7 +35,7 @@ def test_gate_init_value():
     """At init, gate = sigmoid(bias) = gate_init (gate_attn output doesn't matter initially)."""
     D, heads = 64, 4
     gate_init = 1e-5
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
 
     proposal = RoPEReadCrossAttention(D, heads, cfg)
     gate_attn = RoPEReadCrossAttention(D, heads, cfg)
@@ -49,7 +49,7 @@ def test_gradient_flow():
     """Gradients flow through both proposal and gate paths."""
     B, N_x, N_kv, D, heads = 2, 5, 10, 32, 4
     head_dim = D // heads
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
 
     proposal = RoPEReadCrossAttention(D, heads, cfg)
     gate_attn = RoPEReadCrossAttention(D, heads, cfg)
@@ -71,7 +71,7 @@ def test_works_with_write_attention():
     """ConvexGatedAttention works with RoPEWriteCrossAttention too."""
     B, N_x, N_kv, D, heads = 2, 20, 10, 64, 4
     head_dim = D // heads
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
 
     proposal = RoPEWriteCrossAttention(D, heads, cfg)
     gate_attn = RoPEWriteCrossAttention(D, heads, cfg)
@@ -89,7 +89,7 @@ def test_works_with_write_attention():
 def test_flops_is_sum_of_inner():
     """ConvexGatedAttention.flops() = proposal.flops() + gate.flops()."""
     D, heads = 64, 4
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
 
     proposal = RoPEReadCrossAttention(D, heads, cfg)
     gate_attn = RoPEReadCrossAttention(D, heads, cfg)
@@ -106,7 +106,7 @@ def test_flops_is_sum_of_inner():
 def test_cheap_output_shape():
     B, N_x, N_kv, D, heads = 2, 10, 20, 64, 4
     head_dim = D // heads
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
 
     attn = RoPEReadCrossAttention(D, heads, cfg)
     cvx = CheapConvexGatedAttention(attn, gate_init=1e-5)
@@ -124,7 +124,7 @@ def test_cheap_gate_init():
     """At init: gate_proj.weight=0, bias=logit(gate_init)."""
     D, heads = 64, 4
     gate_init = 1e-3
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
 
     attn = RoPEReadCrossAttention(D, heads, cfg)
     cvx = CheapConvexGatedAttention(attn, gate_init=gate_init)
@@ -139,7 +139,7 @@ def test_cheap_init_behavior():
     B, N_x, N_kv, D, heads = 2, 10, 20, 64, 4
     head_dim = D // heads
     gate_init = 1e-3
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
 
     attn = RoPEReadCrossAttention(D, heads, cfg)
     cvx = CheapConvexGatedAttention(attn, gate_init=gate_init)
@@ -160,7 +160,7 @@ def test_cheap_gradient_flow():
     """Gradients flow to gate_proj and gate_bias."""
     B, N_x, N_kv, D, heads = 2, 5, 10, 32, 4
     head_dim = D // heads
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
 
     attn = RoPEReadCrossAttention(D, heads, cfg)
     cvx = CheapConvexGatedAttention(attn, gate_init=0.5)
@@ -181,7 +181,7 @@ def test_cheap_gradient_flow():
 def test_cheap_flops_less_than_full():
     """CheapConvexGatedAttention uses ~half the FLOPs of ConvexGatedAttention."""
     D, heads = 64, 4
-    cfg = AttentionConfig()
+    cfg = CrossAttentionConfig()
     n_q, n_kv = 50, 256
 
     attn = RoPEReadCrossAttention(D, heads, cfg)

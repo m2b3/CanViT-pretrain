@@ -12,17 +12,17 @@ from avp_vit.rope import rope_apply_with_prefix
 
 @final
 @dataclass
-class AttentionConfig:
-    """Ablation flags for cross-attention modules."""
+class CrossAttentionConfig:
+    """Config for a single cross-attention module (read OR write)."""
 
+    normalize_q: bool = True  # LayerNorm Q input before projection
+    normalize_k: bool = True  # LayerNorm K input before projection
+    normalize_v: bool = True  # LayerNorm V input before projection
     use_ewa_transforms: bool = True  # EWA instead of Identity for unprojected streams
-    use_post_rope_ewa: bool = False  # EWA after RoPE on Q/K
-    vo_identity_init: bool = (
-        False  # Identity-init V and O projections (content path, not Q/K)
-    )
-    write_v_expansion: int | None = None  # None = Linear, int = MLP with expansion
-    read_normalize_v: bool = True  # LayerNorm V input on read side
-    write_normalize_v: bool = True  # LayerNorm V input on write side (False = raw values)
+
+
+def _ln_or_identity(dim: int, normalize: bool) -> nn.Module:
+    return nn.LayerNorm(dim, elementwise_affine=False) if normalize else nn.Identity()
 
 
 class RoPECrossAttention(nn.Module):
@@ -30,28 +30,27 @@ class RoPECrossAttention(nn.Module):
 
     dim: int
     num_heads: int
-    cfg: AttentionConfig
-    normalize_v: bool
-    post_rope_q: nn.Module
-    post_rope_k: nn.Module
+    q_norm: nn.Module
+    k_norm: nn.Module
+    v_norm: nn.Module
     q_transform: nn.Module
     k_transform: nn.Module
     v_transform: nn.Module
     out_transform: nn.Module
 
-    def __init__(self, dim: int, num_heads: int, cfg: AttentionConfig, *, normalize_v: bool) -> None:
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        cfg: CrossAttentionConfig,
+    ) -> None:
         super().__init__()
         assert dim % num_heads == 0, f"dim {dim} not divisible by num_heads {num_heads}"
         self.dim = dim
         self.num_heads = num_heads
-        self.cfg = cfg
-        self.normalize_v = normalize_v
-
-        # Post-RoPE affines (operate on head_dim)
-        head_dim = dim // num_heads
-        post = ElementwiseAffine if cfg.use_post_rope_ewa else nn.Identity
-        self.post_rope_q = post(head_dim)
-        self.post_rope_k = post(head_dim)
+        self.q_norm = _ln_or_identity(dim, cfg.normalize_q)
+        self.k_norm = _ln_or_identity(dim, cfg.normalize_k)
+        self.v_norm = _ln_or_identity(dim, cfg.normalize_v)
 
     def forward(
         self,
@@ -60,16 +59,12 @@ class RoPECrossAttention(nn.Module):
         q_rope: tuple[Tensor, Tensor],
         kv_rope: tuple[Tensor, Tensor],
     ) -> Tensor:
-        q_normed = F.layer_norm(q_in, (self.dim,))
-        kv_normed = F.layer_norm(kv_in, (self.dim,))
+        q = to_multihead(self.q_transform(self.q_norm(q_in)), self.num_heads)
+        k = to_multihead(self.k_transform(self.k_norm(kv_in)), self.num_heads)
+        v = to_multihead(self.v_transform(self.v_norm(kv_in)), self.num_heads)
 
-        q = to_multihead(self.q_transform(q_normed), self.num_heads)
-        k = to_multihead(self.k_transform(kv_normed), self.num_heads)
-        v_input = kv_normed if self.normalize_v else kv_in
-        v = to_multihead(self.v_transform(v_input), self.num_heads)
-
-        q = self.post_rope_q(rope_apply_with_prefix(q, q_rope))
-        k = self.post_rope_k(rope_apply_with_prefix(k, kv_rope))
+        q = rope_apply_with_prefix(q, q_rope)
+        k = rope_apply_with_prefix(k, kv_rope)
 
         out = F.scaled_dot_product_attention(q, k, v)
         return self.out_transform(from_multihead(out))
@@ -84,8 +79,6 @@ class RoPECrossAttention(nn.Module):
                 for m in module
                 if isinstance(m, nn.Linear)
             )
-        if isinstance(module, _ResidualMLP):
-            return self._proj_flops(module.mlp, n_tokens)
         return 0
 
     def flops(self, n_q: int, n_kv: int) -> int:
@@ -106,53 +99,24 @@ def _ewa_or_identity(dim: int, use_ewa: bool) -> nn.Module:
 class RoPEReadCrossAttention(RoPECrossAttention):
     """For reading: Q and O projected, K and V use EWA (or Identity)."""
 
-    def __init__(self, dim: int, num_heads: int, cfg: AttentionConfig) -> None:
-        super().__init__(dim, num_heads, cfg, normalize_v=cfg.read_normalize_v)
+    def __init__(self, dim: int, num_heads: int, cfg: CrossAttentionConfig) -> None:
+        super().__init__(dim, num_heads, cfg)
         self.q_transform = nn.Linear(dim, dim)
         self.k_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.v_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.out_transform = nn.Linear(dim, dim)
-        if cfg.vo_identity_init:
-            nn.init.eye_(self.out_transform.weight)
-            nn.init.zeros_(self.out_transform.bias)
-
-
-class _ResidualMLP(nn.Module):
-    """MLP with residual connection and LayerScale gating."""
-
-    def __init__(self, dim: int, expansion: int, layer_scale_init: float) -> None:
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * expansion),
-            nn.SiLU(),
-            nn.Linear(dim * expansion, dim),
-        )
-        self.scale = LayerScale(dim, init_values=layer_scale_init)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return x + self.scale(self.mlp(x))
 
 
 @final
 class RoPEWriteCrossAttention(RoPECrossAttention):
     """For writing: K and V projected, Q and O use EWA (or Identity)."""
 
-    def __init__(self, dim: int, num_heads: int, cfg: AttentionConfig) -> None:
-        super().__init__(dim, num_heads, cfg, normalize_v=cfg.write_normalize_v)
+    def __init__(self, dim: int, num_heads: int, cfg: CrossAttentionConfig) -> None:
+        super().__init__(dim, num_heads, cfg)
         self.q_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
         self.k_transform = nn.Linear(dim, dim)
-        self.v_transform = self._make_v_proj(dim, cfg)
+        self.v_transform = nn.Linear(dim, dim)
         self.out_transform = _ewa_or_identity(dim, cfg.use_ewa_transforms)
-
-    @staticmethod
-    def _make_v_proj(dim: int, cfg: AttentionConfig) -> nn.Module:
-        if cfg.write_v_expansion is None:
-            proj = nn.Linear(dim, dim)
-            if cfg.vo_identity_init:
-                nn.init.eye_(proj.weight)
-                nn.init.zeros_(proj.bias)
-            return proj
-        return _ResidualMLP(dim, cfg.write_v_expansion, layer_scale_init=1e-4)
 
 
 @final

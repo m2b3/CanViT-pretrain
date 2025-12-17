@@ -132,6 +132,8 @@ def test_recurrence_ln_weight_init():
     avp = AVPViT(MockBackbone(), cfg, teacher_dim=64)
     expected = 1.0 / math.sqrt(64)
     assert isinstance(avp.cls_ln, torch.nn.LayerNorm)
+    assert isinstance(avp.reg_ln, torch.nn.LayerNorm)
+    assert isinstance(avp.spatial_ln, torch.nn.LayerNorm)
     assert torch.allclose(avp.cls_ln.weight, torch.full((64,), expected))
     assert torch.allclose(avp.reg_ln.weight, torch.full((64,), expected))
     assert torch.allclose(avp.spatial_ln.weight, torch.full((64,), expected))
