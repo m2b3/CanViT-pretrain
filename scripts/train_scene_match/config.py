@@ -23,7 +23,7 @@ class Config:
     avp: AVPConfig = field(default_factory=AVPConfig)
     grid_sizes: tuple[int, ...] = (32,)
     batch_size: int = 32  # Max batch size (at max grid size)
-    ref_lr: float = 4e-5
+    ref_lr: float = 1e-5
     weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
         4  # Inner loop viewpoints (>=2 for length generalization)
