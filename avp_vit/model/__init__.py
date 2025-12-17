@@ -85,7 +85,7 @@ class AVPViT(nn.Module):
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
     register_temporal_gate: nn.Parameter | None  # [n_registers, D] per-position + per-dim
     spatial_temporal_gate: nn.Parameter | None  # [D] per-dim only
-    mean_map: nn.Parameter  # [1, teacher_dim, G_proto, G_proto]
+    mean_scale_map: nn.Parameter  # [1, 2*teacher_dim, G_proto, G_proto] - first D = mean, second D = scale
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     scene_proj: nn.Sequential
@@ -171,9 +171,13 @@ class AVPViT(nn.Module):
             nn.Linear(embed_dim, self.teacher_dim),
         )
 
-        # Learnable spatial mean map: scene = interpolated_mean_map + scene_proj(hidden)
+        # Learnable spatial maps: scene = mean + scale * residual
+        # Packed as [1, 2*D, G, G] - first D channels = mean (init 0), second D = scale (init 1)
         G_proto = cfg.mean_map_grid_size
-        self.mean_map = nn.Parameter(torch.zeros(1, self.teacher_dim, G_proto, G_proto))
+        D = self.teacher_dim
+        mean_init = torch.zeros(1, D, G_proto, G_proto)
+        scale_init = torch.ones(1, D, G_proto, G_proto)
+        self.mean_scale_map = nn.Parameter(torch.cat([mean_init, scale_init], dim=1))
 
     def _get_base_hidden(self, B: int, scene_grid_size: int) -> Tensor:
         """Base hidden: [scene_registers | spatial], shape [B, n_registers + G*G, D]."""
@@ -215,24 +219,31 @@ class AVPViT(nn.Module):
         """Extract spatial from hidden: [B, n_registers + G*G, D] -> [B, G*G, D]."""
         return hidden[:, self.n_registers:]
 
-    def interpolate_mean_map(self, scene_grid_size: int) -> Tensor:
-        """Interpolate mean_map to target grid size. Returns [1, G*G, D]."""
+    def interpolate_mean_scale_map(self, scene_grid_size: int) -> tuple[Tensor, Tensor]:
+        """Interpolate mean_scale_map to target grid size. Returns (mean, scale) each [1, G*G, D]."""
         G_proto = self.cfg.mean_map_grid_size
         D = self.teacher_dim
         G = scene_grid_size
         if G == G_proto:
-            mean = self.mean_map
+            ms = self.mean_scale_map
         else:
-            mean = F.interpolate(
-                self.mean_map, size=(G, G), mode="bilinear", align_corners=False
+            ms = F.interpolate(
+                self.mean_scale_map, size=(G, G), mode="bilinear", align_corners=False
             )
-        assert mean.shape == (1, D, G, G)
-        out = mean.flatten(2).transpose(1, 2)
-        assert out.shape == (1, G * G, D)
-        return out
+        assert ms.shape == (1, 2 * D, G, G)
+        ms_flat = ms.flatten(2).transpose(1, 2)  # [1, G*G, 2*D]
+        assert ms_flat.shape == (1, G * G, 2 * D)
+        mean, scale = ms_flat.chunk(2, dim=-1)
+        assert mean.shape == scale.shape == (1, G * G, D)
+        return mean, scale
+
+    def interpolate_mean_map(self, scene_grid_size: int) -> Tensor:
+        """Interpolate mean_map to target grid size. Returns [1, G*G, D]."""
+        mean, _ = self.interpolate_mean_scale_map(scene_grid_size)
+        return mean
 
     def sample_mean_map_at_viewpoint(self, viewpoint: Viewpoint) -> Tensor:
-        """Sample mean_map at viewpoint positions. Returns [G_glimpse*G_glimpse, D].
+        """Sample mean portion of mean_scale_map at viewpoint positions. Returns [G_glimpse*G_glimpse, D].
 
         Used for centering glimpse features in visualization.
         """
@@ -241,26 +252,28 @@ class AVPViT(nn.Module):
         G = self.cfg.glimpse_grid_size
         D = self.teacher_dim
 
-        offsets = grid_offsets(G, G, self.mean_map.device, dtype=torch.float32)
+        offsets = grid_offsets(G, G, self.mean_scale_map.device, dtype=torch.float32)
         offsets = offsets.view(G, G, 2).unsqueeze(0)
 
         center = viewpoint.centers[0:1].view(1, 1, 1, 2)
-        scale = viewpoint.scales[0:1].view(1, 1, 1, 1)
-        grid = center + scale * offsets
+        vp_scale = viewpoint.scales[0:1].view(1, 1, 1, 1)
+        grid = center + vp_scale * offsets
         grid = grid.flip(-1)  # (y, x) -> (x, y) for grid_sample
 
-        mean_local = F.grid_sample(self.mean_map, grid, mode="bilinear", align_corners=False)
-        assert mean_local.shape == (1, D, G, G)
+        # Sample full mean_scale_map then extract mean (first D channels)
+        ms_local = F.grid_sample(self.mean_scale_map, grid, mode="bilinear", align_corners=False)
+        assert ms_local.shape == (1, 2 * D, G, G)
+        mean_local = ms_local[:, :D]  # first D channels = mean
         out = mean_local.squeeze(0).permute(1, 2, 0).reshape(G * G, D)
         assert out.shape == (G * G, D)
         return out
 
     def compute_scene(self, hidden: Tensor) -> Tensor:
-        """Extract spatial tokens from hidden, project to teacher_dim, add mean_map."""
+        """Extract spatial tokens from hidden, project to teacher_dim: mean + scale * residual."""
         G = self._infer_scene_grid_size(hidden)
         residual = self.scene_proj(self.get_spatial(hidden))
-        mean = self.interpolate_mean_map(G)
-        return mean + residual
+        mean, scale = self.interpolate_mean_scale_map(G)
+        return mean + scale * residual
 
     def _process_glimpse(
         self,
