@@ -42,8 +42,8 @@ def test_avp_forward_shapes(backbone: ViTBackbone) -> None:
     assert final_hidden.shape == (B, avp.n_cls + 64, backbone.embed_dim)
 
 
-def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
-    """With γ=0 and no temporal gating, hidden should equal normalized spatial_init."""
+def test_hidden_is_normalized_at_init(backbone: ViTBackbone) -> None:
+    """With layer_scale=0, hidden_out equals LN(hidden_in)."""
     scene_grid_size = 8
     cfg = AVPConfig(
         glimpse_grid_size=7,
@@ -59,7 +59,7 @@ def test_hidden_unchanged_at_init(backbone: ViTBackbone) -> None:
 
     _, final_hidden = avp(images, viewpoints, hidden)
 
-    expected = avp._get_base_hidden(B, scene_grid_size)
+    expected = avp._normalize_hidden(hidden)
     assert torch.allclose(final_hidden, expected, atol=1e-5)
 
 

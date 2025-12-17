@@ -123,25 +123,17 @@ def test_registers_disabled_when_zero():
     cfg = AVPConfig(n_scene_registers=0)
     avp = AVPViT(MockBackbone(), cfg, teacher_dim=64)
     assert avp.scene_registers is None
-    assert avp.register_temporal_gate is None
 
 
-def test_temporal_gate_shapes():
-    n_reg = 8
-    cfg = AVPConfig(n_scene_registers=n_reg, temporal_gate_init=0.01)
+def test_recurrence_ln_weight_init():
+    """LayerNorm weights should be 1/sqrt(D) to preserve magnitude."""
+    import math
+    cfg = AVPConfig(n_scene_registers=8)
     avp = AVPViT(MockBackbone(), cfg, teacher_dim=64)
-
-    assert avp.register_temporal_gate is not None
-    assert avp.register_temporal_gate.shape == (n_reg, 64)  # per-position + per-dim
-    assert avp.spatial_temporal_gate is not None
-    assert avp.spatial_temporal_gate.shape == (64,)  # per-dim only
-
-
-def test_temporal_gate_disabled():
-    cfg = AVPConfig(n_scene_registers=8, temporal_gate_init=None)
-    avp = AVPViT(MockBackbone(), cfg, teacher_dim=64)
-    assert avp.register_temporal_gate is None
-    assert avp.spatial_temporal_gate is None
+    expected = 1.0 / math.sqrt(64)
+    assert torch.allclose(avp.cls_ln.weight, torch.full((64,), expected))
+    assert torch.allclose(avp.reg_ln.weight, torch.full((64,), expected))
+    assert torch.allclose(avp.spatial_ln.weight, torch.full((64,), expected))
 
 
 def test_get_spatial():

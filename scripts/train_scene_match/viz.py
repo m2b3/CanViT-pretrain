@@ -107,7 +107,7 @@ def viz_and_log(
 
         # Compute hidden states for logging and visualization
         # t=0 = initial hidden before any viewpoint, t=1,2,... = after each viewpoint
-        initial_hidden = avp._apply_temporal_gate(hidden)
+        initial_hidden = avp._normalize_hidden(hidden)
 
         if log_curves:
             hiddens = [initial_hidden] + [out.hidden for out in outputs]

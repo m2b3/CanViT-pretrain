@@ -71,9 +71,6 @@ class AVPConfig:
     glimpse_grid_size: int = 8  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 1e-1  # Init for LayerScale (reference: 0.01)
-    temporal_gate_init: float | None = (
-        1e-1  # None=disabled, float=gate init (ref: 0.001)
-    )
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 4  # Adapters every N backbone blocks (reference: 1)
@@ -96,11 +93,9 @@ class AVPViT(nn.Module):
     cls_hidden_init: nn.Parameter  # [1, 1, D] for scene CLS token (always present)
     scene_registers: nn.Parameter | None  # [1, n_registers, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
-    cls_temporal_gate: nn.Parameter | None  # [D] per-dim
-    register_temporal_gate: (
-        nn.Parameter | None
-    )  # [n_registers, D] per-position + per-dim
-    spatial_temporal_gate: nn.Parameter | None  # [D] per-dim only
+    cls_ln: nn.LayerNorm  # Normalize CLS at recurrence boundary
+    reg_ln: nn.LayerNorm  # Normalize registers at recurrence boundary
+    spatial_ln: nn.LayerNorm  # Normalize spatial at recurrence boundary
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     scene_proj: nn.Sequential
@@ -148,12 +143,11 @@ class AVPViT(nn.Module):
         return slice(self.n_prefix, None)
 
     def _init_state_tokens(self, embed_dim: int) -> None:
-        """Initialize learnable state tokens with unit-norm scaling (randn/sqrt(D))."""
+        """Initialize learnable state tokens and recurrence LayerNorms."""
         scale = 1.0 / math.sqrt(embed_dim)
         n_reg = self.n_registers
-        gate_init = self.cfg.temporal_gate_init
 
-        # Scene CLS token (always present)
+        # Learnable initial hidden state components
         self.cls_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
         self.spatial_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
         self.scene_registers = (
@@ -161,22 +155,15 @@ class AVPViT(nn.Module):
             if n_reg > 0
             else None
         )
-        # Temporal gates: hidden = base + gate * (prev - base)
-        self.cls_temporal_gate = (
-            nn.Parameter(torch.full((embed_dim,), gate_init))
-            if gate_init is not None
-            else None
-        )
-        self.register_temporal_gate = (
-            nn.Parameter(torch.full((n_reg, embed_dim), gate_init))
-            if gate_init is not None and n_reg > 0
-            else None
-        )
-        self.spatial_temporal_gate = (
-            nn.Parameter(torch.full((embed_dim,), gate_init))
-            if gate_init is not None
-            else None
-        )
+
+        # Recurrence LayerNorms: normalize hidden at each timestep boundary
+        # Weight init 1/sqrt(D) to preserve magnitude after normalization
+        self.cls_ln = nn.LayerNorm(embed_dim)
+        self.reg_ln = nn.LayerNorm(embed_dim)
+        self.spatial_ln = nn.LayerNorm(embed_dim)
+        nn.init.constant_(self.cls_ln.weight, scale)
+        nn.init.constant_(self.reg_ln.weight, scale)
+        nn.init.constant_(self.spatial_ln.weight, scale)
 
     def __init__(
         self,
@@ -276,53 +263,16 @@ class AVPViT(nn.Module):
         """Create initial hidden state for given batch size and scene grid size."""
         return self._get_base_hidden(batch_size, scene_grid_size)
 
-    def _apply_temporal_gate(self, hidden: Tensor) -> Tensor:
-        """Apply temporal gating: hidden = base + gate * (hidden - base).
+    def _normalize_hidden(self, hidden: Tensor) -> Tensor:
+        """Normalize hidden at recurrence boundary: [cls | registers | spatial].
 
-        Gates are applied per-component: [cls | registers | spatial].
-        If a gate is None, that component passes through unchanged.
+        Each component is normalized separately with its own LayerNorm.
+        Works even when n_registers=0 (reg slice gives [B, 0, D]).
         """
-        # Early exit if no gating configured
-        if self.spatial_temporal_gate is None:
-            return hidden
-
-        B = hidden.shape[0]
-        G = self._infer_scene_grid_size(hidden)
-        base = self._get_base_hidden(B, G)
-
-        # Use slices for safe indexing
-        cls_s = self._cls_slice()
-        reg_s = self._reg_slice()
-        spatial_s = self._spatial_slice()
-
-        parts = []
-
-        # CLS: [B, 1, D]
-        if self.cls_temporal_gate is not None:
-            cls_out = base[:, cls_s] + self.cls_temporal_gate * (
-                hidden[:, cls_s] - base[:, cls_s]
-            )
-        else:
-            cls_out = hidden[:, cls_s]
-        parts.append(cls_out)
-
-        # Registers: [B, n_reg, D] (if any)
-        if self.n_registers > 0:
-            if self.register_temporal_gate is not None:
-                reg_out = base[:, reg_s] + self.register_temporal_gate * (
-                    hidden[:, reg_s] - base[:, reg_s]
-                )
-            else:
-                reg_out = hidden[:, reg_s]
-            parts.append(reg_out)
-
-        # Spatial: [B, G*G, D]
-        spatial_out = base[:, spatial_s] + self.spatial_temporal_gate * (
-            hidden[:, spatial_s] - base[:, spatial_s]
-        )
-        parts.append(spatial_out)
-
-        result = torch.cat(parts, dim=1)
+        cls = self.cls_ln(hidden[:, self._cls_slice()])
+        reg = self.reg_ln(hidden[:, self._reg_slice()])
+        spatial = self.spatial_ln(hidden[:, self._spatial_slice()])
+        result = torch.cat([cls, reg, spatial], dim=1)
         assert result.shape == hidden.shape
         return result
 
@@ -379,8 +329,8 @@ class AVPViT(nn.Module):
             assert context.shape == (B, context.shape[1], D)
             n_ctx = context.shape[1]
 
-        # Apply temporal gating: [cls | registers | spatial]
-        hidden_t = self._apply_temporal_gate(hidden)
+        # Normalize hidden at recurrence boundary
+        hidden_t = self._normalize_hidden(hidden)
         assert hidden_t.shape == (B, self.n_prefix + n_spatial, D)
 
         # Prepend context if provided: [context | cls | registers | spatial]
