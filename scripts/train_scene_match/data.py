@@ -38,11 +38,41 @@ class ResolutionStage:
     def min_viewpoint_scale(self) -> float:
         return self.glimpse_grid_size / self.scene_grid_size
 
+    @property
+    def n_eval(self) -> int:
+        return _n_eval_viewpoints(self.scene_grid_size)
+
+    @property
+    def fresh_ratio_desired(self) -> float:
+        return self.n_viewpoints_per_step / self.n_eval
+
+    @property
+    def fresh_ratio_actual(self) -> float:
+        return self.fresh_count / self.batch_size
+
+    @property
+    def e_glimpses_desired(self) -> float:
+        return self.n_viewpoints_per_step / self.fresh_ratio_desired
+
+    @property
+    def e_glimpses_actual(self) -> float:
+        return self.n_viewpoints_per_step / self.fresh_ratio_actual
+
+
+def _n_eval_viewpoints(grid_size: int) -> int:
+    """Expected viewpoints for evaluation. Linear in G since glimpses reuse hidden state."""
+    return max(2, round(5 * grid_size / 16))
+
 
 def _batch_size_for_grid(grid_size: int, max_grid_size: int, max_batch_size: int) -> int:
     """Batch size scales inversely with token count (∝ G²)."""
     ratio = max_grid_size // grid_size
     return max(1, max_batch_size * ratio * ratio)
+
+
+def _fresh_ratio(grid_size: int, n_viewpoints_per_step: int) -> float:
+    """Fresh ratio to achieve expected viewpoint count: E[glimpses] = n_vp / fresh_ratio."""
+    return n_viewpoints_per_step / _n_eval_viewpoints(grid_size)
 
 
 def create_resolution_stage(
@@ -53,9 +83,9 @@ def create_resolution_stage(
     max_batch_size: int,
     n_viewpoints_per_step: int,
 ) -> ResolutionStage:
-    """Create a resolution stage with computed batch size."""
+    """Create a resolution stage with computed batch size and fresh count."""
     batch_size = _batch_size_for_grid(scene_grid_size, max_grid_size, max_batch_size)
-    fresh_count = max(1, batch_size // 2)  # 50% fresh ratio
+    fresh_count = max(1, round(_fresh_ratio(scene_grid_size, n_viewpoints_per_step) * batch_size))
     return ResolutionStage(
         scene_grid_size=scene_grid_size,
         glimpse_grid_size=glimpse_grid_size,

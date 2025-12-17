@@ -67,6 +67,8 @@ def init_survival_batch(
 def _log_stage(stage: ResolutionStage) -> None:
     log.info(
         f"  G={stage.scene_grid_size}: batch={stage.batch_size}, fresh={stage.fresh_count}, "
+        f"ratio={stage.fresh_ratio_actual:.3f} (desired={stage.fresh_ratio_desired:.3f}), "
+        f"E[glimpses]={stage.e_glimpses_actual:.1f} (desired={stage.e_glimpses_desired:.1f}), "
         f"min_scale={stage.min_viewpoint_scale:.2f}"
     )
 
