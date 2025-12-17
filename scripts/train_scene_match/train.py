@@ -349,6 +349,23 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             )
             exp.log_metric("val/loss", val_loss, step=step)
 
+            # Log temporal gate statistics
+            gate_metrics: dict[str, float] = {}
+            if avp.cls_temporal_gate is not None:
+                cls_abs = avp.cls_temporal_gate.abs()
+                gate_metrics["gate/cls/abs_mean"] = cls_abs.mean().item()
+                gate_metrics["gate/cls/abs_std"] = cls_abs.std().item()
+            if avp.register_temporal_gate is not None:
+                reg_abs = avp.register_temporal_gate.abs()
+                gate_metrics["gate/reg/abs_mean"] = reg_abs.mean().item()
+                gate_metrics["gate/reg/abs_std"] = reg_abs.std().item()
+            if avp.spatial_temporal_gate is not None:
+                spatial_abs = avp.spatial_temporal_gate.abs()
+                gate_metrics["gate/spatial/abs_mean"] = spatial_abs.mean().item()
+                gate_metrics["gate/spatial/abs_std"] = spatial_abs.std().item()
+            if gate_metrics:
+                exp.log_metrics(gate_metrics, step=step)
+
             if step > 0:
                 trial.report(ema_loss_t.item(), step)
                 if trial.should_prune():
