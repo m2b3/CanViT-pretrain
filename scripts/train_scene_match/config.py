@@ -30,7 +30,7 @@ class Config:
     )
     warmup_steps: int = 10_000
     grad_clip: float = 1.0
-    n_steps: int = 200000
+    n_steps: int = 200_000
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
@@ -44,7 +44,7 @@ class Config:
     log_every: int = 20
     val_every: int = 50
     curve_every: int = 1000  # Curves less often than val (Comet limit: 1000/experiment)
-    ckpt_every: int = 500
+    ckpt_every: int = 1000
     log_spatial_stats: bool = True  # Log target/pred spatial mean/std
     # Compilation
     compile: bool = True
