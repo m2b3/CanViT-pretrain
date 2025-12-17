@@ -70,9 +70,9 @@ class LossOutputs(NamedTuple):
 class AVPConfig:
     glimpse_grid_size: int = 8  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
-    layer_scale_init: float = 1e-3  # Init for LayerScale (reference: 0.01)
+    layer_scale_init: float = 1e-1  # Init for LayerScale (reference: 0.01)
     temporal_gate_init: float | None = (
-        1e-5  # None=disabled, float=gate init (ref: 0.001)
+        1e-1  # None=disabled, float=gate init (ref: 0.001)
     )
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
