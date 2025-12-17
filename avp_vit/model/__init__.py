@@ -67,7 +67,7 @@ class LossOutputs(NamedTuple):
 @final
 @dataclass
 class AVPConfig:
-    glimpse_grid_size: int = 16  # 256px^2
+    glimpse_grid_size: int = 8  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 0.1  # Init for LayerScale (reference: 0.01)
     temporal_gate_init: float | None = (
