@@ -233,25 +233,26 @@ def plot_multistep_pca(
     initial_scene: NDArray[np.floating],
     hidden_spatials: list[NDArray[np.floating]] | None = None,
     initial_hidden_spatial: NDArray[np.floating] | None = None,
+    locals_teacher_cropped: list[NDArray[np.floating]] | None = None,
 ) -> Figure:
     """Full multi-row visualization with all diagnostic columns.
 
     Row 0 = "init": learned spatial_hidden_init projected through scene_proj, BEFORE any glimpses
     Row 1+ = "t=0, t=1, ...": scene state AFTER processing each glimpse
 
-    Columns: Trajectory | Glimpse | Teacher | Scene | Scene/local | [Hidden] | Local AVP | Local Teacher | [Δ Hidden] | Δ Scene | Error
+    Columns: Trajectory | Glimpse | Teacher | Scene | Scene/local | [Hidden] | Local AVP | Local Teacher | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
 
     PCA basis selection principle: use same basis to COMPARE, use own basis to see INTERNAL STRUCTURE.
     - Teacher, Scene, Scene/local: teacher's PCA (comparable colors)
     - Hidden: own PCA per timestep (different embedding space)
-    - Local AVP, Local Teacher: each uses own PCA per timestep (see internal structure)
+    - Local AVP, Local Teacher, Cropped Teacher: local teacher's PCA (compare local vs cropped)
 
     Args:
         full_img: [H, W, 3] full image in [0, 1]
         teacher: [S*S, D] teacher features
         scenes: List of [S*S, D] scene features per timestep (AFTER each glimpse)
         locals_avp: List of [G*G, D] glimpse features from AVP's TRAINABLE backbone
-        locals_teacher: List of [G*G, D] glimpse features from FROZEN teacher backbone
+        locals_teacher: List of [G*G, D] glimpse features from FROZEN teacher backbone (local context only)
         glimpses: List of [H', W', 3] glimpse images per timestep
         boxes: List of PixelBox in pixel coords per timestep
         names: List of viewpoint names per timestep
@@ -260,6 +261,7 @@ def plot_multistep_pca(
         initial_scene: [S*S, D] projected initial hidden (BEFORE any glimpses)
         hidden_spatials: Optional list of [S*S, D] raw hidden spatial per timestep (before scene_proj)
         initial_hidden_spatial: Optional [S*S, D] raw initial hidden spatial
+        locals_teacher_cropped: Optional list of [G*G, D] teacher features cropped from full image (full context)
 
     Returns:
         matplotlib Figure
@@ -275,6 +277,10 @@ def plot_multistep_pca(
     if show_hidden:
         assert len(hidden_spatials) == n_views
         assert initial_hidden_spatial is not None
+
+    show_cropped = locals_teacher_cropped is not None
+    if show_cropped:
+        assert len(locals_teacher_cropped) == n_views
 
     S, G = scene_grid_size, glimpse_grid_size
     n_rows = n_views + 1  # +1 for init row
@@ -316,8 +322,8 @@ def plot_multistep_pca(
             delta_hidden_maps.append(((h - prev_hidden) ** 2).mean(axis=-1).reshape(S, S))
             prev_hidden = h
 
-    # Column indices (removed Scene/self)
-    # Trajectory | Glimpse | Teacher | Scene | Scene/local | [Hidden] | Local AVP | Local Teacher | [Δ Hidden] | Δ Scene | Error
+    # Column indices
+    # Trajectory | Glimpse | Teacher | Scene | Scene/local | [Hidden] | Local AVP | Local Teacher | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
     C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE, C_SCENE_LOCAL = 0, 1, 2, 3, 4
     c = 5
     C_HIDDEN = c if show_hidden else None
@@ -325,6 +331,9 @@ def plot_multistep_pca(
         c += 1
     C_LOCAL_AVP, C_LOCAL_TEACHER = c, c + 1
     c += 2
+    C_CROPPED_TEACHER = c if show_cropped else None
+    if show_cropped:
+        c += 1
     C_DELTA_HIDDEN = c if show_hidden else None
     if show_hidden:
         c += 1
@@ -362,6 +371,10 @@ def plot_multistep_pca(
 
     axes[row, C_LOCAL_AVP].axis("off")
     axes[row, C_LOCAL_TEACHER].axis("off")
+
+    if show_cropped:
+        assert C_CROPPED_TEACHER is not None
+        axes[row, C_CROPPED_TEACHER].axis("off")
 
     if show_hidden:
         assert C_DELTA_HIDDEN is not None
@@ -453,6 +466,14 @@ def plot_multistep_pca(
         axes[row, C_LOCAL_TEACHER].imshow(local_teacher_rgb)
         axes[row, C_LOCAL_TEACHER].set_title("Local Teacher" if t == 0 else "")
         axes[row, C_LOCAL_TEACHER].axis("off")
+
+        # Col: Cropped Teacher (uses local teacher's PCA for direct comparison)
+        if show_cropped:
+            assert C_CROPPED_TEACHER is not None and locals_teacher_cropped is not None
+            cropped_rgb = pca_rgb(pca_local_teacher, locals_teacher_cropped[t], G, G)
+            axes[row, C_CROPPED_TEACHER].imshow(cropped_rgb)
+            axes[row, C_CROPPED_TEACHER].set_title("Cropped Teacher" if t == 0 else "")
+            axes[row, C_CROPPED_TEACHER].axis("off")
 
         # Col: Δ Hidden (if available)
         if show_hidden:

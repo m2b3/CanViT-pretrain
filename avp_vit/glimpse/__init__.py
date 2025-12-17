@@ -101,37 +101,32 @@ class Viewpoint:
         )
 
 
-def extract_glimpse(img: Tensor, viewpoint: Viewpoint, size: int) -> Tensor:
-    """Extract glimpse crop from image using grid_sample.
+def sample_at_viewpoint(spatial: Tensor, viewpoint: Viewpoint, out_size: int) -> Tensor:
+    """Sample from spatial tensor at viewpoint positions.
 
-    Uses grid_offsets from avp_vit.rope as the SINGLE SOURCE OF TRUTH for
-    coordinate computation. This ensures pixel sampling matches RoPE positions.
+    THE primitive for viewpoint-based sampling. Works for images [B,C,H,W]
+    or latent feature maps [B,D,G,G] — any spatial tensor.
 
     Args:
-        img: [B, C, H, W] scene image
+        spatial: [B, C, H, W] spatial tensor (images or feature maps)
         viewpoint: Viewpoint with centers [B, 2] and scales [B]
-        size: output size (size x size)
+        out_size: output spatial size (out_size x out_size)
 
     Returns:
-        [B, C, size, size] bilinearly interpolated crop
+        [B, C, out_size, out_size] bilinearly sampled crop
     """
-    B = img.shape[0]
-    device = img.device
+    B = viewpoint.centers.shape[0]
+    device = spatial.device
+
+    offsets = grid_offsets(out_size, out_size, device, dtype=torch.float32)
+    offsets = offsets.view(out_size, out_size, 2).unsqueeze(0)
+
     centers, scales = viewpoint.centers, viewpoint.scales
-
-    # Get grid offsets from the single source of truth
-    # Shape: [size*size, 2] with (y, x) coordinates
-    offsets = grid_offsets(size, size, device, dtype=torch.float32)
-
-    # Reshape to [1, size, size, 2]
-    offsets = offsets.view(size, size, 2).unsqueeze(0)
-
-    # Transform: positions = centers + scales * offsets
-    # centers: [B, 2], scales: [B], offsets: [1, size, size, 2]
     grid = centers.view(B, 1, 1, 2) + scales.view(B, 1, 1, 1) * offsets
 
-    # grid_sample expects (x, y) order, but our offsets are (y, x)
-    # Flip the last dimension: [..., 0] = y -> [..., 1], [..., 1] = x -> [..., 0]
+    # grid_sample expects (x, y), our offsets are (y, x)
     grid = grid.flip(-1)
 
-    return nn.functional.grid_sample(img, grid, mode="bilinear", align_corners=False)
+    return nn.functional.grid_sample(spatial, grid, mode="bilinear", align_corners=False)
+
+

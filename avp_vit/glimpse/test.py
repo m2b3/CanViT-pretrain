@@ -2,7 +2,7 @@
 
 import torch
 
-from avp_vit.glimpse import Viewpoint, extract_glimpse, normalized_to_pixel
+from avp_vit.glimpse import Viewpoint, sample_at_viewpoint, normalized_to_pixel
 from avp_vit.rope import glimpse_positions
 
 
@@ -108,44 +108,44 @@ def test_viewpoint_quadrants() -> None:
     assert (tl.scales == 0.5).all()
 
 
-def test_extract_glimpse_shape() -> None:
+def test_sample_at_viewpoint_shape() -> None:
     """Output has correct shape."""
     img = torch.randn(4, 3, 224, 224)
     vp = Viewpoint.full_scene(4, torch.device("cpu"))
-    out = extract_glimpse(img, vp, size=112)
+    out = sample_at_viewpoint(img, vp, out_size=112)
     assert out.shape == (4, 3, 112, 112)
 
 
-def test_extract_glimpse_br_quadrant() -> None:
+def test_sample_at_viewpoint_br_quadrant() -> None:
     """center=(0.5, 0.5), scale=0.5 extracts bottom-right quadrant."""
     # Create image: BR quadrant = 1, rest = 0
     img = torch.zeros(1, 1, 8, 8)
     img[0, 0, 4:, 4:] = 1.0  # BR only
 
     vp = Viewpoint.quadrant(1, torch.device("cpu"), 1, 1)  # BR
-    out = extract_glimpse(img, vp, size=4)
+    out = sample_at_viewpoint(img, vp, out_size=4)
 
     # Should get mostly 1s from BR quadrant
     assert out.mean() > 0.8, f"Expected high mean from BR quadrant, got {out.mean()}"
 
 
-def test_extract_glimpse_tl_quadrant() -> None:
+def test_sample_at_viewpoint_tl_quadrant() -> None:
     """center=(-0.5, -0.5), scale=0.5 extracts top-left quadrant."""
     # Create image: TL quadrant = 1, rest = 0
     img = torch.zeros(1, 1, 8, 8)
     img[0, 0, :4, :4] = 1.0  # TL only
 
     vp = Viewpoint.quadrant(1, torch.device("cpu"), 0, 0)  # TL
-    out = extract_glimpse(img, vp, size=4)
+    out = sample_at_viewpoint(img, vp, out_size=4)
 
     # Should get mostly 1s from TL quadrant
     assert out.mean() > 0.8, f"Expected high mean from TL quadrant, got {out.mean()}"
 
 
 def test_coordinate_consistency_with_rope() -> None:
-    """CRITICAL: extract_glimpse coordinates match glimpse_positions for RoPE.
+    """CRITICAL: sample_at_viewpoint coordinates match glimpse_positions for RoPE.
 
-    The pixel coordinates sampled by extract_glimpse must correspond to the
+    The pixel coordinates sampled by sample_at_viewpoint must correspond to the
     position embeddings computed by glimpse_positions. If these diverge,
     the model will have inconsistent spatial information.
 
@@ -170,8 +170,8 @@ def test_coordinate_consistency_with_rope() -> None:
     assert rope_pos.shape == (B, H * W, 2)
 
     # Extract glimpse from gradient images
-    glimpse_y = extract_glimpse(img_y, vp, size=H * 16)
-    glimpse_x = extract_glimpse(img_x, vp, size=W * 16)
+    glimpse_y = sample_at_viewpoint(img_y, vp, out_size=H * 16)
+    glimpse_x = sample_at_viewpoint(img_x, vp, out_size=W * 16)
 
     # Sample at patch centers (stride 16, offset 8 for center)
     for b in range(B):
@@ -205,7 +205,7 @@ def test_batch_independence() -> None:
     scales = torch.tensor([1.0, 0.5])
     vp = Viewpoint("mixed", centers, scales)
 
-    out = extract_glimpse(img, vp, size=32)
+    out = sample_at_viewpoint(img, vp, out_size=32)
     assert out.shape == (2, 3, 32, 32)
 
 
@@ -222,19 +222,19 @@ def test_axis_order_asymmetric() -> None:
     # Viewpoint centered on bottom half: y=0.5 (bottom), x=0 (center)
     # centers are (y, x) order
     vp = Viewpoint("bottom_center", torch.tensor([[0.5, 0.0]]), torch.tensor([0.5]))
-    out = extract_glimpse(img, vp, size=4)
+    out = sample_at_viewpoint(img, vp, out_size=4)
 
     # Should get mostly 1s (from bottom half)
     assert out.mean() > 0.8, f"Expected mostly bottom half (1s), got mean={out.mean():.2f}"
 
     # Now test the opposite: top half should give 0s
     vp_top = Viewpoint("top_center", torch.tensor([[-0.5, 0.0]]), torch.tensor([0.5]))
-    out_top = extract_glimpse(img, vp_top, size=4)
+    out_top = sample_at_viewpoint(img, vp_top, out_size=4)
     assert out_top.mean() < 0.2, f"Expected mostly top half (0s), got mean={out_top.mean():.2f}"
 
 
 def test_axis_order_with_rope() -> None:
-    """Verify axis order consistency between extract_glimpse and glimpse_positions.
+    """Verify axis order consistency between sample_at_viewpoint and glimpse_positions.
 
     Uses a non-square grid (3x5) to catch swapped axes. If axes were wrong,
     the position/pixel correspondence would break for non-square grids.
@@ -256,7 +256,7 @@ def test_axis_order_with_rope() -> None:
     rope_pos = glimpse_positions(centers, scales, G, G, dtype=torch.float32)
 
     # Extract from the non-square scene
-    glimpse = extract_glimpse(img_y.clone(), vp, size=G * 16)
+    glimpse = sample_at_viewpoint(img_y.clone(), vp, out_size=G * 16)
 
     # Verify at a few patch centers
     for i in range(G):

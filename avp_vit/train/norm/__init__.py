@@ -103,7 +103,7 @@ class PositionAwareNorm(nn.Module):
         mean_grid = self.mean.view(S, S, D).permute(2, 0, 1).unsqueeze(0)
         std_grid = (self.var + self.eps).sqrt().view(S, S, D).permute(2, 0, 1).unsqueeze(0)
 
-        # Build glimpse sampling grid (same coords as extract_glimpse)
+        # Build glimpse sampling grid (same coords as sample_at_viewpoint)
         offsets = grid_offsets(G, G, self.mean.device, dtype=torch.float32)
         offsets = offsets.view(G, G, 2).unsqueeze(0)  # [1, G, G, 2]
 

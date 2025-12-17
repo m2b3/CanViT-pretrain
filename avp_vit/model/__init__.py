@@ -17,7 +17,7 @@ from avp_vit.attention import (
 )
 from avp_vit.attention.convex import CheapConvexGatedAttention, ConvexGatedAttention
 from avp_vit.backbone import ViTBackbone
-from avp_vit.glimpse import Viewpoint, extract_glimpse
+from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 
 GatingMode = Literal["none", "cheap", "full"]
@@ -381,7 +381,7 @@ class AVPViT(nn.Module):
         context: Tensor | None = None,
     ) -> StepOutput:
         """Process a single viewpoint."""
-        glimpse = extract_glimpse(images, viewpoint, self.glimpse_size)
+        glimpse = sample_at_viewpoint(images, viewpoint, self.glimpse_size)
 
         if self.cfg.gradient_checkpointing and self.training:
             return cast(

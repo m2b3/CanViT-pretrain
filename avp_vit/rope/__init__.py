@@ -30,7 +30,7 @@ def grid_offsets(grid_h: int, grid_w: int, device: torch.device, dtype: torch.dt
     """Normalized grid offsets in [-1, 1]^2 (DINOv3 convention).
 
     This is the SINGLE SOURCE OF TRUTH for patch center coordinates.
-    Used by both glimpse_positions (for RoPE) and extract_glimpse (for cropping).
+    Used by both glimpse_positions (for RoPE) and sample_at_viewpoint (for cropping).
 
     Convention: (idx + 0.5) / grid_size * 2 - 1
     - Maps patch centers to [-1, 1] (not edges)

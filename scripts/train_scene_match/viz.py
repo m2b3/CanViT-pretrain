@@ -16,7 +16,7 @@ from torch import Tensor
 
 from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
-from avp_vit.glimpse import Viewpoint
+from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
 from avp_vit.train import imagenet_denormalize, plot_mean_scale_maps, plot_multistep_pca, plot_trajectory
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
@@ -217,6 +217,16 @@ def viz_and_log(
             for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
         ]
 
+        # Cropped teacher: sample from full-image teacher at viewpoint positions
+        # Shows "what teacher thinks at these positions with FULL image context"
+        target_spatial = target.view(target.shape[0], scene_grid_size, scene_grid_size, -1).permute(0, 3, 1, 2)
+        locals_teacher_cropped = [
+            (sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)
+             .permute(0, 2, 3, 1).reshape(-1, target.shape[-1])[sample_idx]  # back to [G², D], pick sample
+             - avp.sample_mean_map_at_viewpoint(vp)).cpu().float().numpy()
+            for vp in viewpoints
+        ]
+
         glimpses = [
             imagenet_denormalize(out.glimpse[sample_idx].cpu()).numpy()
             for out in outputs
@@ -238,6 +248,7 @@ def viz_and_log(
         initial_np,
         hidden_spatials=hidden_spatials,
         initial_hidden_spatial=initial_hidden_spatial,
+        locals_teacher_cropped=locals_teacher_cropped,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
