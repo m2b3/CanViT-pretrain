@@ -78,7 +78,7 @@ class AVPConfig:
     adapter_stride: int = 2  # Adapters every N backbone blocks (reference: 1)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     mean_map_grid_size: int = 96  # Learnable spatial mean map size
-    use_local_loss: bool = True  # Enable local loss (supervise glimpse predictions)
+    use_local_loss: bool = False  # Enable local loss (supervise glimpse predictions)
 
 
 @final
