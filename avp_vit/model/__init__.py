@@ -73,7 +73,7 @@ class AVPConfig:
     layer_scale_init: float = 1e-1  # Init for LayerScale (reference: 0.01)
     use_recurrence_ln: bool = True  # LN at recurrence boundary (False = Identity)
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
-    gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
+    gating: GatingMode = "cheap"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 4  # Adapters every N backbone blocks (reference: 1)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     use_local_loss: bool = False  # Enable local loss (supervise glimpse predictions)
