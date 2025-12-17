@@ -126,14 +126,24 @@ def test_registers_disabled_when_zero():
 
 
 def test_recurrence_ln_weight_init():
-    """LayerNorm weights should be 1/sqrt(D) to preserve magnitude."""
+    """LayerNorm weights should be 1/sqrt(D) when use_recurrence_ln=True."""
     import math
-    cfg = AVPConfig(n_scene_registers=8)
+    cfg = AVPConfig(n_scene_registers=8, use_recurrence_ln=True)
     avp = AVPViT(MockBackbone(), cfg, teacher_dim=64)
     expected = 1.0 / math.sqrt(64)
+    assert isinstance(avp.cls_ln, torch.nn.LayerNorm)
     assert torch.allclose(avp.cls_ln.weight, torch.full((64,), expected))
     assert torch.allclose(avp.reg_ln.weight, torch.full((64,), expected))
     assert torch.allclose(avp.spatial_ln.weight, torch.full((64,), expected))
+
+
+def test_recurrence_ln_disabled():
+    """With use_recurrence_ln=False, modules should be Identity."""
+    cfg = AVPConfig(n_scene_registers=8, use_recurrence_ln=False)
+    avp = AVPViT(MockBackbone(), cfg, teacher_dim=64)
+    assert isinstance(avp.cls_ln, torch.nn.Identity)
+    assert isinstance(avp.reg_ln, torch.nn.Identity)
+    assert isinstance(avp.spatial_ln, torch.nn.Identity)
 
 
 def test_get_spatial():

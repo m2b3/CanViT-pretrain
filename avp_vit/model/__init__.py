@@ -71,6 +71,7 @@ class AVPConfig:
     glimpse_grid_size: int = 8  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 1e-1  # Init for LayerScale (reference: 0.01)
+    use_recurrence_ln: bool = True  # LN at recurrence boundary (False = Identity)
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 4  # Adapters every N backbone blocks (reference: 1)
@@ -93,9 +94,9 @@ class AVPViT(nn.Module):
     cls_hidden_init: nn.Parameter  # [1, 1, D] for scene CLS token (always present)
     scene_registers: nn.Parameter | None  # [1, n_registers, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
-    cls_ln: nn.LayerNorm  # Normalize CLS at recurrence boundary
-    reg_ln: nn.LayerNorm  # Normalize registers at recurrence boundary
-    spatial_ln: nn.LayerNorm  # Normalize spatial at recurrence boundary
+    cls_ln: nn.Module  # LN or Identity at recurrence boundary
+    reg_ln: nn.Module  # LN or Identity at recurrence boundary
+    spatial_ln: nn.Module  # LN or Identity at recurrence boundary
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     scene_proj: nn.Sequential
@@ -143,11 +144,11 @@ class AVPViT(nn.Module):
         return slice(self.n_prefix, None)
 
     def _init_state_tokens(self, embed_dim: int) -> None:
-        """Initialize learnable state tokens and recurrence LayerNorms."""
+        """Initialize learnable state tokens and recurrence modules (LN or Identity)."""
         scale = 1.0 / math.sqrt(embed_dim)
         n_reg = self.n_registers
 
-        # Learnable initial hidden state components
+        # Learnable initial hidden state components (1/sqrt(D) for unit L2 norm)
         self.cls_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
         self.spatial_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
         self.scene_registers = (
@@ -156,14 +157,18 @@ class AVPViT(nn.Module):
             else None
         )
 
-        # Recurrence LayerNorms: normalize hidden at each timestep boundary
-        # Weight init 1/sqrt(D) to preserve magnitude after normalization
-        self.cls_ln = nn.LayerNorm(embed_dim)
-        self.reg_ln = nn.LayerNorm(embed_dim)
-        self.spatial_ln = nn.LayerNorm(embed_dim)
-        nn.init.constant_(self.cls_ln.weight, scale)
-        nn.init.constant_(self.reg_ln.weight, scale)
-        nn.init.constant_(self.spatial_ln.weight, scale)
+        # Recurrence boundary: LN (with gamma=1/sqrt(D)) or Identity
+        if self.cfg.use_recurrence_ln:
+            self.cls_ln = nn.LayerNorm(embed_dim)
+            self.reg_ln = nn.LayerNorm(embed_dim)
+            self.spatial_ln = nn.LayerNorm(embed_dim)
+            nn.init.constant_(self.cls_ln.weight, scale)
+            nn.init.constant_(self.reg_ln.weight, scale)
+            nn.init.constant_(self.spatial_ln.weight, scale)
+        else:
+            self.cls_ln = nn.Identity()
+            self.reg_ln = nn.Identity()
+            self.spatial_ln = nn.Identity()
 
     def __init__(
         self,
