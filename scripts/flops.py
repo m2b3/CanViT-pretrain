@@ -6,8 +6,6 @@ Uses introspection on actual model instances - no hardcoded formulas that can dr
 from pathlib import Path
 from typing import NamedTuple
 
-from torch import nn
-
 from avp_vit import AVPConfig, AVPViT
 from avp_vit.attention import AttentionConfig
 from avp_vit.backbone.dinov3 import DINOv3Backbone
@@ -41,7 +39,7 @@ class AVPStepFLOPs(NamedTuple):
     read_attn: CrossAttnFLOPs
     backbone: int
     write_attn: CrossAttnFLOPs
-    output_proj: int
+    scene_proj: int
     total: int
     n_local: int
     n_scene: int
@@ -104,13 +102,13 @@ def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone, scene_grid_size: int
     read_attn = CrossAttnFLOPs(sdpa_per_attn, 0, 0, 0, 0, read_attn_total)
     write_attn = CrossAttnFLOPs(sdpa_per_attn, 0, 0, 0, 0, write_attn_total)
 
-    if isinstance(model.output_proj, nn.Identity):
-        output_proj = 0
-    else:
-        output_proj = 2 * spatial_patches * D**2
+    # scene_proj = LayerNorm + Linear(D -> teacher_dim)
+    # LayerNorm: ~4*D per token, Linear: 2*D*teacher_dim per token
+    # For simplicity, approximate as 2*D*teacher_dim (Linear dominates)
+    scene_proj_flops = 2 * spatial_patches * D * model.teacher_dim
 
-    total = glimpse_embed + read_attn_total + blocks + write_attn_total + output_proj
-    return AVPStepFLOPs(glimpse_embed, read_attn, blocks, write_attn, output_proj, total, n_local, n_scene)
+    total = glimpse_embed + read_attn_total + blocks + write_attn_total + scene_proj_flops
+    return AVPStepFLOPs(glimpse_embed, read_attn, blocks, write_attn, scene_proj_flops, total, n_local, n_scene)
 
 
 def fmt(f: int | float) -> str:
@@ -183,7 +181,7 @@ def print_detailed_breakdown(
     print(f"    O proj:      {fmt(w.o_proj):>10}  {pct(w.o_proj)}  EWA on scene")
     print()
 
-    print(f"  Output proj:   {fmt(a.output_proj):>10}  {pct(a.output_proj)}")
+    print(f"  Scene proj:    {fmt(a.scene_proj):>10}  {pct(a.scene_proj)}")
     print()
     print(f"  TOTAL:         {fmt(a.total):>10}")
     print()
@@ -191,7 +189,7 @@ def print_detailed_breakdown(
     # EWA savings
     read_full = cross_attn_flops(n_local, n_scene, D, n_blocks, True, True, True, True)
     write_full = cross_attn_flops(n_scene, n_local, D, n_blocks, True, True, True, True)
-    full_linear_total = a.glimpse_embed + read_full.total + a.backbone + write_full.total + a.output_proj
+    full_linear_total = a.glimpse_embed + read_full.total + a.backbone + write_full.total + a.scene_proj
     savings = full_linear_total - a.total
 
     print("=" * 80)
