@@ -22,15 +22,15 @@ class Config:
     # AVP
     avp: AVPConfig = field(default_factory=AVPConfig)
     grid_sizes: tuple[int, ...] = (32,)
-    batch_size: int = 16  # Max batch size (at max grid size)
-    ref_lr: float = 8e-5
+    batch_size: int = 32  # Max batch size (at max grid size)
+    ref_lr: float = 4e-5
     weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
         4  # Inner loop viewpoints (>=2 for length generalization)
     )
-    warmup_steps: int = 100_000
+    warmup_steps: int = 50_000
     grad_clip: float = 1.0
-    n_steps: int = 1_000_000
+    n_steps: int = 500_000
     # Target normalization
     norm_warmup_images: int = 256  # Images to warm up running stats before training
     norm_momentum: float = 0.1  # Momentum for running mean/var updates
