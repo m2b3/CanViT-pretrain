@@ -24,7 +24,7 @@ class Config:
     grid_sizes: tuple[int, ...] = (16, 128)
     batch_size: int = 8  # Max batch size (at max grid size)
     ref_lr: float = 2e-5
-    weight_decay: float = 1e-4
+    weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)
     )
