@@ -66,8 +66,8 @@ def _n_eval_viewpoints(grid_size: int) -> int:
 
 def _batch_size_for_grid(grid_size: int, max_grid_size: int, max_batch_size: int) -> int:
     """Batch size scales inversely with token count (∝ G²)."""
-    ratio = max_grid_size // grid_size
-    return max(1, max_batch_size * ratio * ratio)
+    ratio = max_grid_size / grid_size
+    return max(1, round(max_batch_size * ratio * ratio))
 
 
 def _fresh_ratio(grid_size: int, n_viewpoints_per_step: int) -> float:
