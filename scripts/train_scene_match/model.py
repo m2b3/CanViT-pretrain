@@ -102,19 +102,19 @@ def create_avp(
 
 
 def compile_teacher(teacher: DINOv3Backbone) -> None:
-    """Wrap teacher DINOv3 blocks with torch.compile(dynamic=True)."""
+    """Compile teacher DINOv3 blocks in-place."""
     n_blocks = teacher.n_blocks
     log.info(f"Compiling teacher: {n_blocks} self-attention blocks")
 
     blocks = teacher._backbone.blocks
     for i in range(n_blocks):
-        blocks[i] = torch.compile(blocks[i], dynamic=True)  # type: ignore[assignment]
+        blocks[i].compile(dynamic=True)
 
     log.info("Teacher compilation complete")
 
 
 def compile_avp(avp: AVPViT) -> None:
-    """Wrap AVP DINOv3 blocks and cross-attention with torch.compile(dynamic=True)."""
+    """Compile AVP DINOv3 blocks and cross-attention in-place."""
     n_blocks = avp.backbone.n_blocks
     n_adapters = avp.n_adapters
     log.info(
@@ -124,10 +124,10 @@ def compile_avp(avp: AVPViT) -> None:
     assert isinstance(avp.backbone, DINOv3Backbone)
     blocks = avp.backbone._backbone.blocks
     for i in range(n_blocks):
-        blocks[i] = torch.compile(blocks[i], dynamic=True)  # type: ignore[assignment]
+        blocks[i].compile(dynamic=True)
 
     for i in range(n_adapters):
-        avp.read_attn[i] = torch.compile(avp.read_attn[i], dynamic=True)  # type: ignore[assignment]
-        avp.write_attn[i] = torch.compile(avp.write_attn[i], dynamic=True)  # type: ignore[assignment]
+        avp.read_attn[i].compile(dynamic=True)
+        avp.write_attn[i].compile(dynamic=True)
 
     log.info("AVP compilation complete")
