@@ -31,6 +31,9 @@ class Config:
     warmup_steps: int = 100_000
     grad_clip: float = 1.0
     n_steps: int = 1_000_000
+    # Target normalization
+    norm_warmup_images: int = 256  # Images to warm up running stats before training
+    norm_momentum: float = 0.1  # Momentum for running mean/var updates
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
