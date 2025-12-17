@@ -42,6 +42,7 @@ def _make_gated_attn(
         return ConvexGatedAttention(attn, gate_attn, scale_init)
     raise ValueError(f"Unknown gating mode: {gating!r}")
 
+
 # Type variable for forward_reduce accumulator
 T = TypeVar("T")
 
@@ -62,7 +63,9 @@ class AVPConfig:
     glimpse_grid_size: int = 7
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 0.01  # Init for LayerScale (reference: 0.01)
-    temporal_gate_init: float | None = 0.001  # None=disabled, float=gate init (ref: 0.001)
+    temporal_gate_init: float | None = (
+        0.001  # None=disabled, float=gate init (ref: 0.001)
+    )
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 1  # Adapters every N backbone blocks (reference: 1)
@@ -83,9 +86,13 @@ class AVPViT(nn.Module):
     teacher_dim: int
     scene_registers: nn.Parameter | None  # [1, n_registers, D]
     spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
-    register_temporal_gate: nn.Parameter | None  # [n_registers, D] per-position + per-dim
+    register_temporal_gate: (
+        nn.Parameter | None
+    )  # [n_registers, D] per-position + per-dim
     spatial_temporal_gate: nn.Parameter | None  # [D] per-dim only
-    mean_scale_map: nn.Parameter  # [1, 2*teacher_dim, G_proto, G_proto] - first D = mean, second D = scale
+    mean_scale_map: (
+        nn.Parameter
+    )  # [1, 2*teacher_dim, G_proto, G_proto] - first D = mean, second D = scale
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     scene_proj: nn.Sequential
@@ -117,7 +124,9 @@ class AVPViT(nn.Module):
 
         self.spatial_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
         self.scene_registers = (
-            nn.Parameter(torch.randn(1, n_reg, embed_dim) * scale) if n_reg > 0 else None
+            nn.Parameter(torch.randn(1, n_reg, embed_dim) * scale)
+            if n_reg > 0
+            else None
         )
         # Temporal gates: hidden = base + gate * (prev - base)
         self.register_temporal_gate = (
@@ -150,20 +159,32 @@ class AVPViT(nn.Module):
         self._init_state_tokens(embed_dim)
 
         attn_cfg = cfg.attention
-        self.read_attn = nn.ModuleList([
-            _make_gated_attn(
-                RoPEReadCrossAttention, embed_dim, num_heads,
-                attn_cfg, cfg.layer_scale_init, cfg.gating,
-            )
-            for _ in range(n_adapters)
-        ])
-        self.write_attn = nn.ModuleList([
-            _make_gated_attn(
-                RoPEWriteCrossAttention, embed_dim, num_heads,
-                attn_cfg, cfg.layer_scale_init, cfg.gating,
-            )
-            for _ in range(n_adapters)
-        ])
+        self.read_attn = nn.ModuleList(
+            [
+                _make_gated_attn(
+                    RoPEReadCrossAttention,
+                    embed_dim,
+                    num_heads,
+                    attn_cfg,
+                    cfg.layer_scale_init,
+                    cfg.gating,
+                )
+                for _ in range(n_adapters)
+            ]
+        )
+        self.write_attn = nn.ModuleList(
+            [
+                _make_gated_attn(
+                    RoPEWriteCrossAttention,
+                    embed_dim,
+                    num_heads,
+                    attn_cfg,
+                    cfg.layer_scale_init,
+                    cfg.gating,
+                )
+                for _ in range(n_adapters)
+            ]
+        )
 
         # Scene projection: LayerNorm + Linear (projects to teacher_dim for loss)
         self.scene_proj = nn.Sequential(
@@ -181,7 +202,7 @@ class AVPViT(nn.Module):
 
     def _get_base_hidden(self, B: int, scene_grid_size: int) -> Tensor:
         """Base hidden: [scene_registers | spatial], shape [B, n_registers + G*G, D]."""
-        n_spatial = scene_grid_size ** 2
+        n_spatial = scene_grid_size**2
         spatial = self.spatial_hidden_init.expand(B, n_spatial, -1)
         if self.scene_registers is not None:
             return torch.cat([self.scene_registers.expand(B, -1, -1), spatial], dim=1)
@@ -191,7 +212,9 @@ class AVPViT(nn.Module):
         """Infer scene grid size from hidden state shape."""
         n_spatial = hidden.shape[1] - self.n_registers
         G = int(math.sqrt(n_spatial))
-        assert G * G == n_spatial, f"hidden spatial dim {n_spatial} is not a perfect square"
+        assert G * G == n_spatial, (
+            f"hidden spatial dim {n_spatial} is not a perfect square"
+        )
         return G
 
     def init_hidden(self, batch_size: int, scene_grid_size: int) -> Tensor:
@@ -211,13 +234,15 @@ class AVPViT(nn.Module):
             reg_gate = self.register_temporal_gate  # [n_reg, D]
             spatial_gate = self.spatial_temporal_gate  # [D]
             reg_out = base[:, :n_reg] + reg_gate * (hidden[:, :n_reg] - base[:, :n_reg])
-            spatial_out = base[:, n_reg:] + spatial_gate * (hidden[:, n_reg:] - base[:, n_reg:])
+            spatial_out = base[:, n_reg:] + spatial_gate * (
+                hidden[:, n_reg:] - base[:, n_reg:]
+            )
             return torch.cat([reg_out, spatial_out], dim=1)
         return base + self.spatial_temporal_gate * (hidden - base)
 
     def get_spatial(self, hidden: Tensor) -> Tensor:
         """Extract spatial from hidden: [B, n_registers + G*G, D] -> [B, G*G, D]."""
-        return hidden[:, self.n_registers:]
+        return hidden[:, self.n_registers :]
 
     def interpolate_mean_scale_map(self, scene_grid_size: int) -> tuple[Tensor, Tensor]:
         """Interpolate mean_scale_map to target grid size. Returns (mean, scale) each [1, G*G, D]."""
@@ -261,7 +286,9 @@ class AVPViT(nn.Module):
         grid = grid.flip(-1)  # (y, x) -> (x, y) for grid_sample
 
         # Sample full mean_scale_map then extract mean (first D channels)
-        ms_local = F.grid_sample(self.mean_scale_map, grid, mode="bilinear", align_corners=False)
+        ms_local = F.grid_sample(
+            self.mean_scale_map, grid, mode="bilinear", align_corners=False
+        )
         assert ms_local.shape == (1, 2 * D, G, G)
         mean_local = ms_local[:, :D]  # first D channels = mean
         out = mean_local.squeeze(0).permute(1, 2, 0).reshape(G * G, D)
@@ -288,7 +315,7 @@ class AVPViT(nn.Module):
         B = hidden.shape[0]
         scene_grid_size = self._infer_scene_grid_size(hidden)
         n_reg = self.n_registers
-        n_spatial = scene_grid_size ** 2
+        n_spatial = scene_grid_size**2
 
         local, H, W = self.backbone.prepare_tokens(glimpse)
         assert H == W == self.cfg.glimpse_grid_size
@@ -310,10 +337,19 @@ class AVPViT(nn.Module):
             hidden_t = torch.cat([context, hidden_t], dim=1)
 
         # RoPE positions
-        local_pos = glimpse_positions(centers, scales, H, W, dtype=self.backbone.rope_dtype)
-        scene_pos = make_grid_positions(
-            scene_grid_size, scene_grid_size, glimpse.device, dtype=self.backbone.rope_dtype
-        ).unsqueeze(0).expand(B, -1, -1)
+        local_pos = glimpse_positions(
+            centers, scales, H, W, dtype=self.backbone.rope_dtype
+        )
+        scene_pos = (
+            make_grid_positions(
+                scene_grid_size,
+                scene_grid_size,
+                glimpse.device,
+                dtype=self.backbone.rope_dtype,
+            )
+            .unsqueeze(0)
+            .expand(B, -1, -1)
+        )
         local_rope = compute_rope(local_pos, self.backbone.rope_periods)
         scene_rope = compute_rope(scene_pos, self.backbone.rope_periods)
 
