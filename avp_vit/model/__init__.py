@@ -18,6 +18,7 @@ from avp_vit.attention import (
 from avp_vit.attention.convex import CheapConvexGatedAttention, ConvexGatedAttention
 from avp_vit.backbone import ViTBackbone
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
+from avp_vit.model.hidden import HiddenStreamParams
 from avp_vit.rope import compute_rope, glimpse_positions, make_grid_positions
 
 GatingMode = Literal["none", "cheap", "full"]
@@ -92,12 +93,7 @@ class AVPViT(nn.Module):
     backbone: ViTBackbone
     cfg: AVPConfig
     teacher_dim: int
-    cls_hidden_init: nn.Parameter  # [1, 1, D] for scene CLS token (always present)
-    scene_registers: nn.Parameter | None  # [1, n_registers, D]
-    spatial_hidden_init: nn.Parameter  # [1, 1, D] -> broadcast to [B, G*G, D]
-    cls_ln: nn.Module  # LN or Identity at recurrence boundary
-    reg_ln: nn.Module  # LN or Identity at recurrence boundary
-    spatial_ln: nn.Module  # LN or Identity at recurrence boundary
+    hidden_stream: HiddenStreamParams
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     scene_proj: nn.Sequential
@@ -113,12 +109,29 @@ class AVPViT(nn.Module):
 
     @property
     def n_registers(self) -> int:
-        return self.cfg.n_scene_registers
+        return self.hidden_stream.n_registers
 
     @property
     def n_prefix(self) -> int:
         """Number of prefix tokens in hidden state (cls + registers)."""
-        return self.n_cls + self.n_registers
+        return self.hidden_stream.n_prefix
+
+    # Delegation properties for hidden stream components
+    @property
+    def scene_registers(self) -> nn.Parameter | None:
+        return self.hidden_stream.registers
+
+    @property
+    def cls_ln(self) -> nn.Module:
+        return self.hidden_stream.cls_ln
+
+    @property
+    def reg_ln(self) -> nn.Module:
+        return self.hidden_stream.reg_ln
+
+    @property
+    def spatial_ln(self) -> nn.Module:
+        return self.hidden_stream.spatial_ln
 
     @property
     def n_local_tokens(self) -> int:
@@ -144,33 +157,6 @@ class AVPViT(nn.Module):
         """Slice for spatial tokens in hidden: [n_cls+n_reg:]."""
         return slice(self.n_prefix, None)
 
-    def _init_state_tokens(self, embed_dim: int) -> None:
-        """Initialize learnable state tokens and recurrence modules (LN or Identity)."""
-        scale = 1.0 / math.sqrt(embed_dim)
-        n_reg = self.n_registers
-
-        # Learnable initial hidden state components (1/sqrt(D) for unit L2 norm)
-        self.cls_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
-        self.spatial_hidden_init = nn.Parameter(torch.randn(1, 1, embed_dim) * scale)
-        self.scene_registers = (
-            nn.Parameter(torch.randn(1, n_reg, embed_dim) * scale)
-            if n_reg > 0
-            else None
-        )
-
-        # Recurrence boundary: LN (with gamma=1/sqrt(D)) or Identity
-        if self.cfg.use_recurrence_ln:
-            self.cls_ln = nn.LayerNorm(embed_dim)
-            self.reg_ln = nn.LayerNorm(embed_dim)
-            self.spatial_ln = nn.LayerNorm(embed_dim)
-            nn.init.constant_(self.cls_ln.weight, scale)
-            nn.init.constant_(self.reg_ln.weight, scale)
-            nn.init.constant_(self.spatial_ln.weight, scale)
-        else:
-            self.cls_ln = nn.Identity()
-            self.reg_ln = nn.Identity()
-            self.spatial_ln = nn.Identity()
-
     def __init__(
         self,
         backbone: ViTBackbone,
@@ -187,7 +173,12 @@ class AVPViT(nn.Module):
         n_blocks = backbone.n_blocks
         n_adapters = (n_blocks - 1) // cfg.adapter_stride
 
-        self._init_state_tokens(embed_dim)
+        self.hidden_stream = HiddenStreamParams(
+            embed_dim, cfg.n_scene_registers, cfg.use_recurrence_ln
+        )
+        # Consistency assertions
+        assert self.hidden_stream.n_registers == cfg.n_scene_registers
+        assert self.hidden_stream.n_prefix == 1 + cfg.n_scene_registers
 
         self.read_attn = nn.ModuleList(
             [
@@ -240,21 +231,6 @@ class AVPViT(nn.Module):
         else:
             self.cls_proj = None
 
-    def _get_base_hidden(self, B: int, scene_grid_size: int) -> Tensor:
-        """Base hidden: [cls | registers | spatial], shape [B, n_cls + n_registers + G*G, D]."""
-        n_spatial = scene_grid_size**2
-        cls = self.cls_hidden_init.expand(B, -1, -1)  # [B, 1, D]
-        spatial = self.spatial_hidden_init.expand(B, n_spatial, -1)  # [B, G*G, D]
-
-        if self.scene_registers is not None:
-            regs = self.scene_registers.expand(B, -1, -1)  # [B, n_reg, D]
-            hidden = torch.cat([cls, regs, spatial], dim=1)
-        else:
-            hidden = torch.cat([cls, spatial], dim=1)
-
-        assert hidden.shape == (B, self.n_prefix + n_spatial, hidden.shape[2])
-        return hidden
-
     def _infer_scene_grid_size(self, hidden: Tensor) -> int:
         """Infer scene grid size from hidden state shape."""
         n_spatial = hidden.shape[1] - self.n_prefix  # subtract cls + registers
@@ -266,18 +242,14 @@ class AVPViT(nn.Module):
 
     def init_hidden(self, batch_size: int, scene_grid_size: int) -> Tensor:
         """Create initial hidden state for given batch size and scene grid size."""
-        return self._get_base_hidden(batch_size, scene_grid_size)
+        n_spatial = scene_grid_size**2
+        hidden = self.hidden_stream.init_hidden(batch_size, n_spatial)
+        assert hidden.shape == (batch_size, self.n_prefix + n_spatial, self.backbone.embed_dim)
+        return hidden
 
     def _normalize_hidden(self, hidden: Tensor) -> Tensor:
-        """Normalize hidden at recurrence boundary: [cls | registers | spatial].
-
-        Each component is normalized separately with its own LayerNorm.
-        Works even when n_registers=0 (reg slice gives [B, 0, D]).
-        """
-        cls = self.cls_ln(hidden[:, self._cls_slice()])
-        reg = self.reg_ln(hidden[:, self._reg_slice()])
-        spatial = self.spatial_ln(hidden[:, self._spatial_slice()])
-        result = torch.cat([cls, reg, spatial], dim=1)
+        """Normalize hidden at recurrence boundary: [cls | registers | spatial]."""
+        result = self.hidden_stream.normalize(hidden)
         assert result.shape == hidden.shape
         return result
 
