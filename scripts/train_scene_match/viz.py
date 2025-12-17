@@ -5,7 +5,6 @@ import io
 import logging
 import math
 from collections.abc import Callable
-from pathlib import Path
 from typing import Literal
 
 import comet_ml
@@ -410,35 +409,6 @@ def eval_and_log(
     return l1_losses[-1]
 
 
-def save_checkpoint(
-    *,
-    avp: AVPViT,
-    path: Path,
-    exp: comet_ml.Experiment,
-    step: int,
-    train_loss: float,
-    current_grid_size: int,
-) -> None:
-    """Save checkpoint with model state."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint = {
-        "avp": avp.state_dict(),
-        "step": step,
-        "current_grid_size": current_grid_size,
-    }
-    torch.save(checkpoint, path)
-    size_mb = path.stat().st_size / (1024 * 1024)
-    log.info(
-        f"Saved checkpoint: {path} ({size_mb:.1f} MB), train_loss={train_loss:.4f}"
-    )
-    exp.log_metric("ckpt/train_loss", train_loss, step=step)
-
-
-def load_avp_checkpoint(path: Path, avp: AVPViT) -> None:
-    """Load AVP weights from checkpoint."""
-    ckpt = torch.load(path, weights_only=False)
-    avp.load_state_dict(ckpt["avp"])
-    log.info(f"Loaded AVP weights from {path}")
 
 
 def log_norm_stats(

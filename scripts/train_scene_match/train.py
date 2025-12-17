@@ -13,8 +13,10 @@ from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
 from ytch.model import count_parameters
 
-from avp_vit import AVPViT
+from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone.dinov3 import NormFeatures
+from avp_vit.checkpoint import load as load_checkpoint
+from avp_vit.checkpoint import save as save_checkpoint
 from avp_vit.train import InfiniteLoader, SurvivalBatch
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
@@ -23,14 +25,7 @@ from .config import Config
 from .data import ResolutionStage, create_loaders, create_resolution_stages
 from .model import compile_avp, compile_teacher, create_avp, load_student_backbone, load_teacher
 from .scheduler import create_scheduler
-from .viz import (
-    eval_and_log,
-    load_avp_checkpoint,
-    log_norm_stats,
-    save_checkpoint,
-    val_metrics_only,
-    viz_and_log,
-)
+from .viz import eval_and_log, log_norm_stats, val_metrics_only, viz_and_log
 
 log = logging.getLogger(__name__)
 
@@ -209,7 +204,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Load AVP weights from checkpoint if specified
     if cfg.resume_ckpt is not None:
-        load_avp_checkpoint(cfg.resume_ckpt, avp)
+        ckpt_data = load_checkpoint(cfg.resume_ckpt, cfg.device)
+        ckpt_cfg = AVPConfig(**ckpt_data["avp_config"])
+        if ckpt_cfg != cfg.avp:
+            log.warning("Checkpoint config differs from current config!")
+            log.warning(f"  Checkpoint: {ckpt_cfg}")
+            log.warning(f"  Current: {cfg.avp}")
+        avp.load_state_dict(ckpt_data["state_dict"])
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
@@ -396,8 +397,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         # Checkpointing
         if step % cfg.ckpt_every == 0:
             save_checkpoint(
-                avp=avp, path=ckpt_path, exp=exp,
-                step=step, train_loss=ema_loss_t.item(), current_grid_size=G,
+                ckpt_path, avp, cfg.student_model,
+                step=step, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),
             )
             log_norm_stats(exp, normalizers, cls_normalizer, step)
 
@@ -413,8 +414,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Final checkpoint
     save_checkpoint(
-        avp=avp, path=ckpt_path, exp=exp,
-        step=cfg.n_steps, train_loss=ema_loss_t.item(), current_grid_size=cfg.max_grid_size,
+        ckpt_path, avp, cfg.student_model,
+        step=cfg.n_steps, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),
     )
 
     log.info(f"Final: train_ema={ema_loss_t.item():.4f}")

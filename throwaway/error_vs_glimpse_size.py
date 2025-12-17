@@ -12,42 +12,34 @@ from ytch.device import get_sensible_device
 
 from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
+from avp_vit.checkpoint import load as load_checkpoint
 from avp_vit.glimpse import Viewpoint
-from avp_vit.train.data import val_transform, make_loader
+from avp_vit.train.data import make_loader, val_transform
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
-
-
-def _strip_compiled_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Strip '_orig_mod.' prefix from keys (torch.compile artifact)."""
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        new_key = k.replace("._orig_mod", "")
-        new_state_dict[new_key] = v
-    return new_state_dict
 
 
 def load_avp(ckpt_path: Path, device: torch.device) -> tuple[AVPViT, DINOv3Backbone]:
     """Load AVP model and teacher from checkpoint."""
     from dinov3.hub.backbones import dinov3_vits16
 
+    # Load teacher
     teacher_raw = dinov3_vits16(pretrained=True, weights="dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
     teacher = DINOv3Backbone(teacher_raw.eval().to(device))
     for p in teacher.parameters():
         p.requires_grad = False
 
+    # Load checkpoint and create AVP with correct config
+    ckpt = load_checkpoint(ckpt_path, device)
+    cfg = AVPConfig(**ckpt["avp_config"])
+
     student_raw = dinov3_vits16(pretrained=False)
     student = DINOv3Backbone(student_raw.to(device))
 
-    avp_cfg = AVPConfig()
-    avp = AVPViT(student, avp_cfg, teacher.embed_dim).to(device)
-
-    ckpt = torch.load(ckpt_path, weights_only=False, map_location=device)
-    state_dict = _strip_compiled_prefix(ckpt["avp"])
-    avp.load_state_dict(state_dict)
+    avp = AVPViT(student, cfg, ckpt["teacher_dim"]).to(device)
+    avp.load_state_dict(ckpt["state_dict"])
     avp.eval()
-    log.info(f"Loaded AVP from {ckpt_path}")
 
     return avp, teacher
 
