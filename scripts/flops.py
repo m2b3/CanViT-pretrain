@@ -11,9 +11,7 @@ from avp_vit.backbone.dinov3 import DINOv3Backbone
 
 CKPT_PATH = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
 
-# Configuration
-GLIMPSE_GRID = 7
-N_REGISTERS = 32
+# Scene grid sizes to evaluate (script parameter, not model config)
 SCENE_GRIDS = [16, 32, 64, 128]
 
 
@@ -46,8 +44,10 @@ def teacher_flops(backbone: DINOv3Backbone, n_patches: int) -> TeacherFLOPs:
     return TeacherFLOPs(patch_embed, blocks, patch_embed + blocks, n_tokens)
 
 
-def avp_step_flops(model: AVPViT, backbone: DINOv3Backbone, scene_grid_size: int) -> AVPStepFLOPs:
+def avp_step_flops(model: AVPViT, scene_grid_size: int) -> AVPStepFLOPs:
     """FLOPs for one AVP step. Uses introspection on actual model modules."""
+    assert isinstance(model.backbone, DINOv3Backbone)
+    backbone = model.backbone
     cfg = model.cfg
     D = backbone.embed_dim
     n_blocks = backbone.n_blocks
@@ -113,41 +113,30 @@ def fmt(f: int | float) -> str:
     return f"{f:.0f}"
 
 
-def print_detailed_breakdown(
-    backbone: DINOv3Backbone,
-    scene_grid: int,
-    glimpse_grid: int,
-    n_registers: int,
-    gating: str = "none",
-) -> None:
+def print_detailed_breakdown(avp: AVPViT, scene_grid: int) -> None:
+    assert isinstance(avp.backbone, DINOv3Backbone)
+    backbone = avp.backbone
+    cfg = avp.cfg
+
     D = backbone.embed_dim
     P = backbone.patch_size
     n_blocks = backbone.n_blocks
     scene_px = scene_grid * P
-    glimpse_px = glimpse_grid * P
+    glimpse_px = cfg.glimpse_grid_size * P
     n_spatial = scene_grid**2
 
-    avp = AVPViT(
-        backbone,
-        AVPConfig(
-            glimpse_grid_size=glimpse_grid,
-            n_scene_registers=n_registers,
-            gating=gating,  # type: ignore[arg-type]
-        ),
-        teacher_dim=backbone.embed_dim,
-    )
-    a = avp_step_flops(avp, backbone, scene_grid)
+    a = avp_step_flops(avp, scene_grid)
     t_scene = teacher_flops(backbone, scene_grid**2)
-    t_glimpse = teacher_flops(backbone, glimpse_grid**2)
+    t_glimpse = teacher_flops(backbone, cfg.glimpse_grid_size**2)
 
     def pct(x: int) -> str:
         return f"({100 * x / a.total:4.1f}%)"
 
     print("=" * 80)
-    print(f"DETAILED: {scene_grid}x{scene_grid} scene ({scene_px}x{scene_px} px), gating={gating}")
+    print(f"DETAILED: {scene_grid}x{scene_grid} scene ({scene_px}x{scene_px} px), gating={cfg.gating}")
     print("=" * 80)
-    print(f"Tokens: local={a.n_local}, scene={a.n_scene} (spatial={n_spatial} + registers={n_registers})")
-    print(f"Adapters: {a.n_adapters} (backbone has {n_blocks} blocks)")
+    print(f"Tokens: local={a.n_local}, scene={a.n_scene} (spatial={n_spatial} + registers={cfg.n_scene_registers})")
+    print(f"Adapters: {a.n_adapters} (backbone has {n_blocks} blocks, stride={cfg.adapter_stride})")
     print()
 
     print(f"  Glimpse embed: {fmt(a.glimpse_embed):>10}  {pct(a.glimpse_embed)}")
@@ -160,7 +149,7 @@ def print_detailed_breakdown(
     print()
 
     # EWA savings: compare actual AVP vs hypothetical full-Linear
-    convex = gating == "full"
+    convex = cfg.gating == "full"
     full_linear_attn = hypothetical_full_linear_flops(a.n_local, a.n_scene, D, a.n_adapters, convex)
     full_linear_total = a.glimpse_embed + full_linear_attn + a.backbone + a.scene_proj
     actual_attn = a.read_attn + a.write_attn
@@ -186,11 +175,11 @@ def print_detailed_breakdown(
     print(f"COMPARISON ({scene_grid}x{scene_grid} scene = {scene_px}x{scene_px} px)")
     print("=" * 80)
     print(f"  Teacher @ {scene_grid}x{scene_grid} ({scene_px}px):   {fmt(t_scene.total):>10}")
-    print(f"  Teacher @ {glimpse_grid}x{glimpse_grid} ({glimpse_px}px):    {fmt(t_glimpse.total):>10}")
+    print(f"  Teacher @ {cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({glimpse_px}px):    {fmt(t_glimpse.total):>10}")
     print(f"  AVP step:                  {fmt(a.total):>10}")
     print()
     print(f"  AVP steps per Teacher({scene_grid}x{scene_grid}):    {t_scene.total / a.total:6.1f}")
-    print(f"  Teacher({glimpse_grid}x{glimpse_grid}) per AVP step:       {a.total / t_glimpse.total:6.2f}")
+    print(f"  Teacher({cfg.glimpse_grid_size}x{cfg.glimpse_grid_size}) per AVP step:       {a.total / t_glimpse.total:6.2f}")
 
 
 def main() -> None:
@@ -198,15 +187,17 @@ def main() -> None:
 
     backbone = DINOv3Backbone(dinov3_vits16(weights=str(CKPT_PATH), pretrained=True))
     D = backbone.embed_dim
-    n_blocks = backbone.n_blocks
+
+    # Create default AVP to get config values
+    avp_default = AVPViT(backbone, AVPConfig(), teacher_dim=D)
+    cfg = avp_default.cfg
     P = backbone.patch_size
 
     print("=" * 80)
     print("FLOPs Calculator for AVP-ViT")
     print("=" * 80)
-    print(f"Backbone: DINOv3 ViT-S/16 (D={D}, heads={backbone.num_heads}, blocks={n_blocks}, P={P})")
-    print(f"Glimpse: {GLIMPSE_GRID}x{GLIMPSE_GRID} = {GLIMPSE_GRID * P}x{GLIMPSE_GRID * P} px")
-    print(f"Registers: {N_REGISTERS}")
+    print(f"Backbone: DINOv3 ViT-S/16 (D={D}, heads={backbone.num_heads}, blocks={backbone.n_blocks}, P={P})")
+    print(f"AVPConfig defaults: glimpse={cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({cfg.glimpse_grid_size * P}px), registers={cfg.n_scene_registers}, stride={cfg.adapter_stride}")
     print()
 
     # Table header
@@ -217,29 +208,12 @@ def main() -> None:
     for scene_grid in SCENE_GRIDS:
         t_scene = teacher_flops(backbone, scene_grid**2)
 
-        # Default AVP (LayerScale gating)
-        avp_default = AVPViT(
-            backbone,
-            AVPConfig(
-                glimpse_grid_size=GLIMPSE_GRID,
-                n_scene_registers=N_REGISTERS,
-            ),
-            teacher_dim=D,
-        )
-        a_default = avp_step_flops(avp_default, backbone, scene_grid)
+        # Default AVP (LayerScale gating) - reuse if already created
+        a_default = avp_step_flops(avp_default, scene_grid)
 
         # AVP with convex gating
-        avp_cvx = AVPViT(
-            backbone,
-            AVPConfig(
-                glimpse_grid_size=GLIMPSE_GRID,
-                n_scene_registers=N_REGISTERS,
-                gating="full",
-                layer_scale_init=1e-3,
-            ),
-            teacher_dim=D,
-        )
-        a_cvx = avp_step_flops(avp_cvx, backbone, scene_grid)
+        avp_cvx = AVPViT(backbone, AVPConfig(gating="full", layer_scale_init=1e-3), teacher_dim=D)
+        a_cvx = avp_step_flops(avp_cvx, scene_grid)
 
         print(
             f"{scene_grid}x{scene_grid:<7} "
@@ -251,12 +225,12 @@ def main() -> None:
     print()
     print("Legend:")
     print("  Teacher (scene) = Full ViT at scene resolution")
-    print("  AVP (default)   = LayerScale gating, adapter_stride=2")
+    print(f"  AVP (default)   = gating={cfg.gating}, adapter_stride={cfg.adapter_stride}")
     print("  AVP cvx (full)  = ConvexGating (2x attention per adapter)")
     print()
 
-    # Detailed breakdown for largest scene
-    print_detailed_breakdown(backbone, SCENE_GRIDS[-1], GLIMPSE_GRID, N_REGISTERS, gating="none")
+    # Detailed breakdown for largest scene using default config
+    print_detailed_breakdown(avp_default, SCENE_GRIDS[-1])
 
 
 if __name__ == "__main__":
