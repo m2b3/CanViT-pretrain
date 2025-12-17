@@ -21,7 +21,7 @@ from .config import Config
 from .data import ResolutionStage, create_loaders, create_resolution_stages
 from .model import compile_avp, compile_teacher, create_avp, load_student_backbone, load_teacher
 from .scheduler import create_scheduler
-from .viz import eval_and_log, save_checkpoint, viz_and_log
+from .viz import eval_and_log, log_mean_scale_maps, save_checkpoint, viz_and_log
 
 log = logging.getLogger(__name__)
 
@@ -224,6 +224,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     avp=avp, path=ckpt_path, exp=exp,
                     step=step, train_loss=ema_loss_t.item(), current_grid_size=G,
                 )
+                log_mean_scale_maps(exp, avp, step)
 
             if step > 0:
                 trial.report(ema_loss_t.item(), step)
