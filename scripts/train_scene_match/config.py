@@ -35,6 +35,7 @@ class Config:
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     ckpt_dir: Path = Path("checkpoints")
+    resume_ckpt: Path | None = None  # AVP checkpoint to resume from
     # Training
     num_workers: int = 8
     crop_scale_min: float = 0.4

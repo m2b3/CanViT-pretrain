@@ -357,6 +357,13 @@ def save_checkpoint(
     exp.log_metric("ckpt/train_loss", train_loss, step=step)
 
 
+def load_avp_checkpoint(path: Path, avp: AVPViT) -> None:
+    """Load AVP weights from checkpoint."""
+    ckpt = torch.load(path, weights_only=False)
+    avp.load_state_dict(ckpt["avp"])
+    log.info(f"Loaded AVP weights from {path}")
+
+
 def log_mean_map(
     exp: comet_ml.Experiment,
     avp: AVPViT,

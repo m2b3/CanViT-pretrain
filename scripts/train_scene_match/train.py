@@ -21,7 +21,7 @@ from .config import Config
 from .data import ResolutionStage, create_loaders, create_resolution_stages
 from .model import compile_avp, compile_teacher, create_avp, load_student_backbone, load_teacher
 from .scheduler import create_scheduler
-from .viz import eval_and_log, log_mean_map, save_checkpoint, viz_and_log
+from .viz import eval_and_log, load_avp_checkpoint, log_mean_map, save_checkpoint, viz_and_log
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +125,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
     scheduler = create_scheduler(optimizer, cfg)
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
+
+    # Load AVP weights from checkpoint if specified
+    if cfg.resume_ckpt is not None:
+        load_avp_checkpoint(cfg.resume_ckpt, avp)
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
