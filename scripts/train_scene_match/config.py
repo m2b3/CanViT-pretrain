@@ -46,6 +46,7 @@ class Config:
     # Logging
     log_every: int = 20
     val_every: int = 500
+    viz_every: int = 1_000  # PCA viz (expensive) less often than val
     curve_every: int = (
         10_000  # Curves less often than val (Comet limit: 1000/experiment)
     )

@@ -17,11 +17,8 @@ from torch import Tensor
 from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
-from avp_vit.train import (
-    imagenet_denormalize,
-    plot_mean_map,
-    plot_multistep_pca,
-)
+from avp_vit.train import imagenet_denormalize, plot_multistep_pca
+from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
 log = logging.getLogger(__name__)
@@ -77,6 +74,7 @@ def viz_and_log(
     prefix: str,
     avp: AVPViT,
     teacher: DINOv3Backbone,
+    normalizer: PositionAwareNorm,
     images: Tensor,
     viewpoints: list[Viewpoint],
     target: Tensor,
@@ -88,6 +86,10 @@ def viz_and_log(
     log_register_curves: bool = False,
 ) -> tuple[list[float], list[float]]:
     """Run forward trajectory and log visualization.
+
+    Args:
+        target: Already-normalized targets [B, N, D]
+        normalizer: Used for normalizing cropped teacher features for local comparison
 
     Returns (l1_losses, mse_losses) per timestep.
     """
@@ -185,15 +187,11 @@ def viz_and_log(
 
         full_img = imagenet_denormalize(images[sample_idx].cpu()).numpy()
 
-        # Center scene-level features by subtracting interpolated mean_map
-        mean_map_scene = avp.interpolate_mean_map(scene_grid_size).squeeze(0)
-        teacher_np = (target[sample_idx] - mean_map_scene).cpu().float().numpy()
-        initial_np = (initial_scene[sample_idx] - mean_map_scene).cpu().float().numpy()
+        # Target is already normalized; model predicts normalized features directly
+        teacher_np = target[sample_idx].cpu().float().numpy()
+        initial_np = initial_scene[sample_idx].cpu().float().numpy()
 
-        scenes = [
-            (out.scene[sample_idx] - mean_map_scene).cpu().float().numpy()
-            for out in outputs
-        ]
+        scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
 
         # Raw hidden spatials (before output_proj)
         if show_hidden:
@@ -214,7 +212,7 @@ def viz_and_log(
             initial_hidden_spatial = None
             hidden_spatials = None
 
-        # Local features (no mean_map centering - local loss uses raw features)
+        # Local features from AVP backbone
         locals_avp_raw = [
             avp_backbone.output_norm(
                 out.local[sample_idx : sample_idx + 1, n_prefix:]
@@ -237,9 +235,9 @@ def viz_and_log(
             for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
         ]
 
-        # Cropped teacher: sample from full-image teacher at viewpoint positions
+        # Cropped teacher: sample normalized full-image targets at viewpoint positions
         # Shows "what teacher thinks at these positions with FULL image context"
-        # No mean_map centering - this is raw teacher, PCA handles its own centering
+        # Target is already normalized, so cropped features are too
         target_spatial = target.view(
             target.shape[0], scene_grid_size, scene_grid_size, -1
         ).permute(0, 3, 1, 2)
@@ -287,12 +285,56 @@ def viz_and_log(
     return l1_losses, mse_losses
 
 
+def val_metrics_only(
+    exp: comet_ml.Experiment,
+    step: int,
+    avp: AVPViT,
+    compute_raw_targets: Callable[[Tensor], "NormFeatures"],
+    normalizer: PositionAwareNorm,
+    images: Tensor,
+    scene_grid_size: int,
+    prefix: str = "val",
+) -> float:
+    """Fast validation: compute and log metrics without expensive PCA visualization.
+
+    Logs both normalized and raw metrics for cross-run comparison:
+    - {prefix}/l1, {prefix}/mse: loss vs normalized targets (what we train on)
+    - {prefix}/l1_raw, {prefix}/mse_raw: loss vs raw targets (for comparison to non-normalized runs)
+
+    Returns final l1 loss (normalized).
+    """
+    from torch.nn.functional import l1_loss, mse_loss
+
+    B = images.shape[0]
+    viewpoints = make_eval_viewpoints(B, images.device)
+
+    with torch.inference_mode():
+        raw_target = compute_raw_targets(images).patches
+        target = normalizer(raw_target)
+        hidden = avp.init_hidden(B, scene_grid_size)
+        outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
+        final_scene = outputs[-1].scene
+
+        # Normalized metrics (what we train on)
+        l1_norm = l1_loss(final_scene, target).item()
+        mse_norm = mse_loss(final_scene, target).item()
+        exp.log_metric(f"{prefix}/l1", l1_norm, step=step)
+        exp.log_metric(f"{prefix}/mse", mse_norm, step=step)
+
+        # Raw metrics (for cross-run comparison)
+        exp.log_metric(f"{prefix}/l1_raw", l1_loss(final_scene, raw_target).item(), step=step)
+        exp.log_metric(f"{prefix}/mse_raw", mse_loss(final_scene, raw_target).item(), step=step)
+
+    return l1_norm
+
+
 def eval_and_log(
     exp: comet_ml.Experiment,
     step: int,
     avp: AVPViT,
     teacher: DINOv3Backbone,
-    compute_targets: Callable[[Tensor], "NormFeatures"],
+    compute_raw_targets: Callable[[Tensor], "NormFeatures"],
+    normalizer: PositionAwareNorm,
     images: Tensor,
     scene_grid_size: int,
     prefix: str = "val",
@@ -300,20 +342,30 @@ def eval_and_log(
     log_curves: bool = True,
     loss_type: Literal["l1", "mse"] = "mse",
 ) -> float:
-    """Evaluate on one batch. Returns final L1 loss."""
+    """Full evaluation with PCA visualization (expensive). Returns final l1 loss (normalized).
+
+    Logs both normalized and raw metrics for cross-run comparison:
+    - {prefix}/l1, {prefix}/mse: loss vs normalized targets (what we train on)
+    - {prefix}/l1_raw, {prefix}/mse_raw: loss vs raw targets (for comparison to non-normalized runs)
+    """
+    from torch.nn.functional import l1_loss, mse_loss
+
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
     with torch.inference_mode():
-        target = compute_targets(images).patches
+        raw_target = compute_raw_targets(images).patches
+        target = normalizer(raw_target)
         hidden = avp.init_hidden(B, scene_grid_size)
 
+    # Full viz with PCA (expensive)
     l1_losses, mse_losses = viz_and_log(
         exp,
         step,
         prefix,
         avp,
         teacher,
+        normalizer,
         images,
         viewpoints,
         target,
@@ -323,12 +375,20 @@ def eval_and_log(
         loss_type=loss_type,
     )
 
+    # Log normalized metrics (what we train on) - per timestep
     for t, (l1, mse) in enumerate(zip(l1_losses, mse_losses, strict=True)):
         exp.log_metric(f"{prefix}/l1_t{t}", l1, step=step)
         exp.log_metric(f"{prefix}/mse_t{t}", mse, step=step)
-
     exp.log_metric(f"{prefix}/l1", l1_losses[-1], step=step)
     exp.log_metric(f"{prefix}/mse", mse_losses[-1], step=step)
+
+    # Raw metrics (for cross-run comparison)
+    with torch.inference_mode():
+        outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
+        final_scene = outputs[-1].scene
+        exp.log_metric(f"{prefix}/l1_raw", l1_loss(final_scene, raw_target).item(), step=step)
+        exp.log_metric(f"{prefix}/mse_raw", mse_loss(final_scene, raw_target).item(), step=step)
+
     return l1_losses[-1]
 
 
@@ -363,16 +423,18 @@ def load_avp_checkpoint(path: Path, avp: AVPViT) -> None:
     log.info(f"Loaded AVP weights from {path}")
 
 
-def log_mean_map(
+def log_norm_stats(
     exp: comet_ml.Experiment,
-    avp: AVPViT,
+    normalizers: dict[int, PositionAwareNorm],
     step: int,
-    prefix: str = "maps",
 ) -> None:
-    """Log mean map amplitude heatmap to Comet."""
-    with torch.inference_mode():
-        m = avp.mean_map.detach()
-        mean_map = m[0].permute(1, 2, 0).cpu().float().numpy()  # [G, G, D]
-
-    fig = plot_mean_map(mean_map)
-    log_figure(exp, fig, f"{prefix}/mean_amp", step)
+    """Log normalizer running stats to Comet (per grid size)."""
+    for G, norm in normalizers.items():
+        exp.log_metrics(
+            {
+                f"norm/G{G}/mean_norm": norm.mean.norm().item(),
+                f"norm/G{G}/var_mean": norm.var.mean().item(),
+                f"norm/G{G}/var_std": norm.var.std().item(),
+            },
+            step=step,
+        )

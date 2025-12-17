@@ -16,13 +16,21 @@ from ytch.model import count_parameters
 from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import NormFeatures
 from avp_vit.train import InfiniteLoader, SurvivalBatch
+from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
 
 from .config import Config
 from .data import ResolutionStage, create_loaders, create_resolution_stages
 from .model import compile_avp, compile_teacher, create_avp, load_student_backbone, load_teacher
 from .scheduler import create_scheduler
-from .viz import eval_and_log, load_avp_checkpoint, log_mean_map, save_checkpoint, viz_and_log
+from .viz import (
+    eval_and_log,
+    load_avp_checkpoint,
+    log_norm_stats,
+    save_checkpoint,
+    val_metrics_only,
+    viz_and_log,
+)
 
 log = logging.getLogger(__name__)
 
@@ -31,12 +39,16 @@ def init_survival_batch(
     avp: AVPViT,
     train_loader: InfiniteLoader,
     compute_targets: Callable[[Tensor], NormFeatures],
+    normalizer: PositionAwareNorm,
     batch_size: int,
     fresh_count: int,
     scene_grid_size: int,
     device: torch.device,
 ) -> SurvivalBatch:
-    """Initialize survival batch by loading fresh_count images at a time."""
+    """Initialize survival batch by loading fresh_count images at a time.
+
+    Targets are normalized using the provided normalizer (expected to be in eval mode).
+    """
     n_init_batches = (batch_size + fresh_count - 1) // fresh_count
     log.info(f"Initializing survival batch: batch_size={batch_size}, fresh_count={fresh_count}")
 
@@ -47,8 +59,9 @@ def init_survival_batch(
         for _ in range(n_init_batches):
             batch = train_loader.next_batch().to(device)
             feats = compute_targets(batch)
+            norm_patches = normalizer(feats.patches)
             init_imgs_list.append(batch)
-            init_patches_list.append(feats.patches)
+            init_patches_list.append(norm_patches)
             init_cls_list.append(feats.cls)
 
     init_imgs = torch.cat(init_imgs_list, dim=0)[:batch_size]
@@ -66,6 +79,38 @@ def _log_stage(stage: ResolutionStage) -> None:
         f"E[glimpses]={stage.e_glimpses_actual:.1f} (desired={stage.e_glimpses_desired:.1f}), "
         f"min_scale={stage.min_viewpoint_scale:.2f}"
     )
+
+
+def warmup_normalizers(
+    normalizers: dict[int, PositionAwareNorm],
+    train_loaders: dict[int, InfiniteLoader],
+    compute_raw_targets: Callable[[Tensor], NormFeatures],
+    warmup_images: int,
+    device: torch.device,
+) -> None:
+    """Warm up normalizer running stats by passing through warmup_images images per grid size.
+
+    After warmup, normalizers are switched to eval mode (frozen stats).
+    """
+    for G, normalizer in normalizers.items():
+        normalizer.train()
+        loader = train_loaders[G]
+        images_seen = 0
+        pbar = tqdm(total=warmup_images, desc=f"Warmup G={G}", unit="img", leave=False)
+        while images_seen < warmup_images:
+            batch = loader.next_batch().to(device)
+            with torch.no_grad():
+                feats = compute_raw_targets(batch)
+                normalizer(feats.patches)  # Updates running stats
+            images_seen += batch.shape[0]
+            pbar.update(batch.shape[0])
+        pbar.close()
+        normalizer.eval()
+        log.info(
+            f"Warmup G={G}: {images_seen} images, "
+            f"mean_norm={normalizer.mean.norm().item():.4f}, "
+            f"var_mean={normalizer.var.mean().item():.4f}"
+        )
 
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
@@ -138,17 +183,32 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
-    def compute_targets(images: Tensor) -> NormFeatures:
+    def compute_raw_targets(images: Tensor) -> NormFeatures:
+        """Compute teacher features (not normalized)."""
         with torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16):
             feats = teacher.forward_norm_features(images)
             return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
-    # Initialize all survival batches upfront
+    # Create normalizers for each grid size (different n_tokens)
+    normalizers: dict[int, PositionAwareNorm] = {}
+    for G in cfg.grid_sizes:
+        normalizers[G] = PositionAwareNorm(
+            n_tokens=G * G,
+            embed_dim=teacher.embed_dim,
+            grid_size=G,
+            momentum=cfg.norm_momentum,
+        ).to(cfg.device)
+
+    # Warm up normalizer stats before training
+    log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images per grid size)...")
+    warmup_normalizers(normalizers, train_loaders, compute_raw_targets, cfg.norm_warmup_images, cfg.device)
+
+    # Initialize all survival batches upfront (with normalized targets)
     log.info("Initializing survival batches...")
     states: dict[int, SurvivalBatch] = {}
     for G, stage in stages.items():
         states[G] = init_survival_batch(
-            avp, train_loaders[G], compute_targets,
+            avp, train_loaders[G], compute_raw_targets, normalizers[G],
             stage.batch_size, stage.fresh_count, G, cfg.device,
         )
 
@@ -169,10 +229,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         train_loader = train_loaders[G]
         val_loader = val_loaders[G]
 
-        # Load fresh images
+        # Load fresh images and normalize targets
+        normalizer = normalizers[G]
         fresh_imgs = train_loader.next_batch().to(cfg.device)
         with torch.no_grad():
-            fresh_feats = compute_targets(fresh_imgs)
+            fresh_feats = compute_raw_targets(fresh_imgs)
+            fresh_patches_norm = normalizer(fresh_feats.patches)
 
         # Viewpoint scale bounds for current grid size
         min_scale = stage.min_viewpoint_scale
@@ -249,32 +311,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             exp.log_metrics(metrics, step=step)
             pbar.set_postfix_str(f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
+        # Validation (metrics only, fast)
         if step % cfg.val_every == 0:
-            # Training viz (no curves)
-            train_l1, train_mse = viz_and_log(
-                exp, step, f"grid{G}/train", avp, teacher,
-                state.images, viewpoints, state.targets, state.hidden,
-                log_spatial_stats=cfg.log_spatial_stats, log_curves=False, loss_type=cfg.loss,
-            )
-            exp.log_metric(f"grid{G}/train/viz_l1", train_l1[-1], step=step)
-            exp.log_metric(f"grid{G}/train/viz_mse", train_mse[-1], step=step)
-
-            # Validation
             val_images = val_loader.next_batch().to(cfg.device)
-            val_loss = eval_and_log(
-                exp, step, avp, teacher, compute_targets, val_images, G, f"grid{G}/val",
-                log_spatial_stats=cfg.log_spatial_stats,
-                log_curves=(step % cfg.curve_every == 0),
-                loss_type=cfg.loss,
+            val_loss = val_metrics_only(
+                exp, step, avp, compute_raw_targets, normalizer, val_images, G, f"grid{G}/val",
             )
             exp.log_metric("val/loss", val_loss, step=step)
-
-            if step % cfg.ckpt_every == 0:
-                save_checkpoint(
-                    avp=avp, path=ckpt_path, exp=exp,
-                    step=step, train_loss=ema_loss_t.item(), current_grid_size=G,
-                )
-                log_mean_map(exp, avp, step)
 
             if step > 0:
                 trial.report(ema_loss_t.item(), step)
@@ -282,11 +325,37 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     exp.end()
                     raise optuna.TrialPruned()
 
-        # Fresh ratio survival: permute batch, replace first K with fresh
+        # Full viz with PCA (expensive, less frequent)
+        if step % cfg.viz_every == 0:
+            train_l1, train_mse = viz_and_log(
+                exp, step, f"grid{G}/train", avp, teacher, normalizer,
+                state.images, viewpoints, state.targets, state.hidden,
+                log_spatial_stats=cfg.log_spatial_stats, log_curves=False, loss_type=cfg.loss,
+            )
+            exp.log_metric(f"grid{G}/train/viz_l1", train_l1[-1], step=step)
+            exp.log_metric(f"grid{G}/train/viz_mse", train_mse[-1], step=step)
+
+            val_images = val_loader.next_batch().to(cfg.device)
+            eval_and_log(
+                exp, step, avp, teacher, compute_raw_targets, normalizer, val_images, G, f"grid{G}/val",
+                log_spatial_stats=cfg.log_spatial_stats,
+                log_curves=(step % cfg.curve_every == 0),
+                loss_type=cfg.loss,
+            )
+
+        # Checkpointing
+        if step % cfg.ckpt_every == 0:
+            save_checkpoint(
+                avp=avp, path=ckpt_path, exp=exp,
+                step=step, train_loss=ema_loss_t.item(), current_grid_size=G,
+            )
+            log_norm_stats(exp, normalizers, step)
+
+        # Fresh ratio survival: permute batch, replace first K with fresh (normalized targets)
         hidden_init = avp.init_hidden(stage.fresh_count, G)
         states[G] = state.step(
             fresh_images=fresh_imgs,
-            fresh_targets=fresh_feats.patches,
+            fresh_targets=fresh_patches_norm,
             fresh_cls_targets=fresh_feats.cls,
             next_hidden=final_hidden,
             hidden_init=hidden_init,
