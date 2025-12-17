@@ -86,7 +86,7 @@ def test_multi_viewpoint_forward(backbone: ViTBackbone) -> None:
 def test_forward_loss(backbone: ViTBackbone) -> None:
     """forward_loss computes averaged MSE correctly."""
     scene_grid_size = 8
-    cfg = AVPConfig(glimpse_grid_size=7, n_scene_registers=0)
+    cfg = AVPConfig(glimpse_grid_size=7, n_scene_registers=0, use_cls_loss=False)
     avp = AVPViT(backbone, cfg, teacher_dim=backbone.embed_dim)
 
     B = 2
@@ -102,8 +102,7 @@ def test_forward_loss(backbone: ViTBackbone) -> None:
 
     assert losses.scene.shape == ()
     assert losses.scene.requires_grad
-    # use_local_loss=True by default
-    assert losses.local is not None
-    assert losses.local.shape == ()
-    assert losses.local.requires_grad
+    # use_local_loss=False by default, use_cls_loss=False in config
+    assert losses.local is None
+    assert losses.cls is None
     assert final_hidden.shape == (B, 64, backbone.embed_dim)
