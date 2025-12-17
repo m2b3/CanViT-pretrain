@@ -98,34 +98,22 @@ def imagenet_denormalize(t: Tensor) -> Tensor:
     return ((t * std + mean).clamp(0, 1)).permute(1, 2, 0)
 
 
-def plot_mean_scale_maps(
-    mean_map: NDArray[np.floating],
-    scale_map: NDArray[np.floating],
-) -> Figure:
-    """Plot mean and scale map amplitude heatmaps.
+def plot_mean_map(mean_map: NDArray[np.floating]) -> Figure:
+    """Plot mean map amplitude heatmap.
 
     Args:
-        mean_map: [G, G, D] numpy array (mean portion of mean_scale_map)
-        scale_map: [G, G, D] numpy array (scale portion of mean_scale_map)
+        mean_map: [G, G, D] numpy array
 
     Returns:
-        matplotlib Figure with two heatmaps showing L2 norm at each position
+        matplotlib Figure with heatmap showing L2 norm at each position
     """
-    # Compute L2 norm across D dimension: [G, G]
-    mean_amp = np.linalg.norm(mean_map, axis=-1)
-    scale_amp = np.linalg.norm(scale_map, axis=-1)
+    mean_amp = np.linalg.norm(mean_map, axis=-1)  # [G, G]
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-
-    im_mean = axes[0].imshow(mean_amp, cmap="viridis")
-    axes[0].set_title(f"Mean amplitude (L2)\nmin={mean_amp.min():.3f}, max={mean_amp.max():.3f}")
-    axes[0].axis("off")
-    fig.colorbar(im_mean, ax=axes[0], fraction=0.046, pad=0.04)
-
-    im_scale = axes[1].imshow(scale_amp, cmap="viridis")
-    axes[1].set_title(f"Scale amplitude (L2)\nmin={scale_amp.min():.3f}, max={scale_amp.max():.3f}")
-    axes[1].axis("off")
-    fig.colorbar(im_scale, ax=axes[1], fraction=0.046, pad=0.04)
+    fig, ax = plt.subplots(figsize=(5, 4))
+    im = ax.imshow(mean_amp, cmap="viridis")
+    ax.set_title(f"Mean amplitude (L2)\nmin={mean_amp.min():.3f}, max={mean_amp.max():.3f}")
+    ax.axis("off")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     return fig
