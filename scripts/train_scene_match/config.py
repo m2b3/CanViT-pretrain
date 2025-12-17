@@ -50,7 +50,7 @@ class Config:
     # Optuna
     n_trials: int = 100
     # Debug
-    debug_train_on_single_image: bool = False  # Train on single repeated image (index 0)
+    debug_train_on_single_batch: bool = False  # Train on single repeated batch (for overfitting test)
     # Runtime
     device: torch.device = field(default_factory=get_sensible_device)
 

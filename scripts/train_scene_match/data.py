@@ -66,18 +66,22 @@ def create_resolution_stage(
     )
 
 
-class SingleImageDataset(Dataset[tuple[Tensor, int]]):
-    """Wraps a dataset, always returns item at index 0."""
+class SingleBatchDataset(Dataset[tuple[Tensor, int]]):
+    """Wraps a dataset, caches first N items and cycles through them.
 
-    def __init__(self, dataset: Dataset[Any]) -> None:
-        self._item: tuple[Tensor, int] = dataset[0]
-        log.info(f"DEBUG: Cached single image from dataset (index 0, label={self._item[1]})")
+    This ensures diverse samples within each batch (for correct variance estimation
+    in batch normalization) while keeping the same batch every time (for debugging).
+    """
+
+    def __init__(self, dataset: Dataset[Any], n: int) -> None:
+        self._items = [dataset[i] for i in range(n)]
+        log.warning(f"Cached {n} images for single-batch training")
 
     def __len__(self) -> int:
         return 1_000_000
 
-    def __getitem__(self, _idx: int) -> tuple[Tensor, int]:
-        return self._item
+    def __getitem__(self, idx: int) -> tuple[Tensor, int]:
+        return self._items[idx % len(self._items)]
 
 
 def create_resolution_stages(cfg: Config, patch_size: int) -> dict[int, ResolutionStage]:
@@ -99,9 +103,9 @@ def create_loaders(
     cfg: Config, stages: dict[int, ResolutionStage]
 ) -> tuple[dict[int, InfiniteLoader], dict[int, InfiniteLoader]]:
     """Create train/val loaders for each resolution stage."""
-    if cfg.debug_train_on_single_image:
+    if cfg.debug_train_on_single_batch:
         log.warning("=" * 60)
-        log.warning("DEBUG MODE: Training on single repeated image (index 0)")
+        log.warning("DEBUG MODE: Training on single repeated batch")
         log.warning("=" * 60)
 
     train_loaders: dict[int, InfiniteLoader] = {}
@@ -123,14 +127,14 @@ def create_loaders(
             str(cfg.val_dir), val_transform(scene_size_px)
         )
 
-        if cfg.debug_train_on_single_image:
-            train_dataset = SingleImageDataset(train_dataset)
-            val_dataset = SingleImageDataset(val_dataset)
+        if cfg.debug_train_on_single_batch:
+            train_dataset = SingleBatchDataset(train_dataset, fresh_count)
+            val_dataset = SingleBatchDataset(val_dataset, fresh_count)
 
         train_loader: DataLoader[Any] = DataLoader(
             train_dataset,
             batch_size=fresh_count,
-            shuffle=not cfg.debug_train_on_single_image,
+            shuffle=not cfg.debug_train_on_single_batch,
             num_workers=cfg.num_workers,
             pin_memory=True,
             drop_last=True,
@@ -138,7 +142,7 @@ def create_loaders(
         val_loader: DataLoader[Any] = DataLoader(
             val_dataset,
             batch_size=fresh_count,
-            shuffle=not cfg.debug_train_on_single_image,
+            shuffle=not cfg.debug_train_on_single_batch,
             num_workers=cfg.num_workers,
             pin_memory=True,
             drop_last=True,
