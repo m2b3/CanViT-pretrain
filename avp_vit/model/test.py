@@ -12,6 +12,8 @@ from avp_vit.rope import make_rope_periods
 class MockBackbone(ViTBackbone, nn.Module):
     """Minimal backbone for unit testing AVPViT."""
 
+    _rope_periods: Tensor
+
     def __init__(
         self,
         embed_dim: int = 64,

@@ -18,7 +18,6 @@ from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.glimpse import Viewpoint
 from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_trajectory
-from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
 log = logging.getLogger(__name__)
@@ -78,7 +77,6 @@ def viz_and_log(
     viewpoints: list[Viewpoint],
     target: Tensor,
     hidden: Tensor,
-    target_norm: PositionAwareNorm | None = None,
     show_hidden: bool = True,
     log_spatial_stats: bool = True,
     log_curves: bool = True,
@@ -177,10 +175,13 @@ def viz_and_log(
         initial_scene = avp.compute_scene(initial_hidden)  # [B, N, D]
 
         full_img = imagenet_denormalize(images[sample_idx].cpu()).numpy()
-        teacher_np = target[sample_idx].cpu().float().numpy()
-        initial_np = initial_scene[sample_idx].cpu().float().numpy()
 
-        scenes = [out.scene[sample_idx].cpu().float().numpy() for out in outputs]
+        # Center scene-level features by subtracting interpolated mean_map
+        mean_map_scene = avp.interpolate_mean_map(scene_grid_size).squeeze(0)
+        teacher_np = (target[sample_idx] - mean_map_scene).cpu().float().numpy()
+        initial_np = (initial_scene[sample_idx] - mean_map_scene).cpu().float().numpy()
+
+        scenes = [(out.scene[sample_idx] - mean_map_scene).cpu().float().numpy() for out in outputs]
 
         # Raw hidden spatials (before output_proj)
         if show_hidden:
@@ -193,7 +194,7 @@ def viz_and_log(
             initial_hidden_spatial = None
             hidden_spatials = None
 
-        # Local features - normalize with interpolated stats if available
+        # Local features - center by subtracting mean_map sampled at viewpoint
         locals_avp_raw = [
             avp_backbone.output_norm(
                 out.local[sample_idx : sample_idx + 1, n_prefix:]
@@ -207,19 +208,14 @@ def viz_and_log(
             for out in outputs
         ]
 
-        if target_norm is not None and target_norm.initialized:
-            g = avp.cfg.glimpse_grid_size
-            locals_avp = [
-                target_norm.normalize_at_viewpoint(feat, vp, g).cpu().float().numpy()
-                for feat, vp in zip(locals_avp_raw, viewpoints, strict=True)
-            ]
-            locals_teacher = [
-                target_norm.normalize_at_viewpoint(feat, vp, g).cpu().float().numpy()
-                for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
-            ]
-        else:
-            locals_avp = [feat.cpu().float().numpy() for feat in locals_avp_raw]
-            locals_teacher = [feat.cpu().float().numpy() for feat in locals_teacher_raw]
+        locals_avp = [
+            (feat - avp.sample_mean_map_at_viewpoint(vp)).cpu().float().numpy()
+            for feat, vp in zip(locals_avp_raw, viewpoints, strict=True)
+        ]
+        locals_teacher = [
+            (feat - avp.sample_mean_map_at_viewpoint(vp)).cpu().float().numpy()
+            for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
+        ]
 
         glimpses = [
             imagenet_denormalize(out.glimpse[sample_idx].cpu()).numpy()
@@ -259,7 +255,6 @@ def eval_and_log(
     compute_targets: Callable[[Tensor], Tensor],
     images: Tensor,
     scene_grid_size: int,
-    target_norm: PositionAwareNorm | None = None,
     prefix: str = "val",
     log_spatial_stats: bool = True,
     log_curves: bool = True,
@@ -274,7 +269,7 @@ def eval_and_log(
         hidden = avp.init_hidden(B, scene_grid_size)
 
     l1_losses, mse_losses = viz_and_log(
-        exp, step, prefix, avp, teacher, images, viewpoints, target, hidden, target_norm,
+        exp, step, prefix, avp, teacher, images, viewpoints, target, hidden,
         log_spatial_stats=log_spatial_stats,
         log_curves=log_curves,
         loss_type=loss_type,
@@ -290,21 +285,20 @@ def eval_and_log(
 
 
 def save_checkpoint(
+    *,
     avp: AVPViT,
-    norms: dict[int, PositionAwareNorm],
     path: Path,
     exp: comet_ml.Experiment,
     step: int,
     train_loss: float,
     current_grid_size: int,
 ) -> None:
-    """Save checkpoint with model and all norm states."""
+    """Save checkpoint with model state."""
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
         "avp": avp.state_dict(),
         "step": step,
         "current_grid_size": current_grid_size,
-        "norm_states": {G: norm.state_dict() for G, norm in norms.items()},
     }
     torch.save(checkpoint, path)
     size_mb = path.stat().st_size / (1024 * 1024)
