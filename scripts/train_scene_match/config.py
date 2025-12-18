@@ -2,12 +2,12 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import torch
 from ytch.device import get_sensible_device
 
 from avp_vit import AVPConfig
+from avp_vit.train import LossType
 
 
 @dataclass
@@ -53,7 +53,7 @@ class Config:
     # Training
     num_workers: int = 8
     crop_scale_min: float = 0.8
-    loss: Literal["l1", "mse", "cos"] = "cos"
+    loss: LossType = "cos"
     # Logging
     log_every: int = 20
     val_every: int = 250

@@ -8,6 +8,7 @@ from avp_vit.train.data import (
     train_transform,
     val_transform,
 )
+from avp_vit.train.loss import LOSS_FNS, LossFn, LossType, cos_dissim, get_loss_fn
 from avp_vit.train.scheduler import warmup_cosine_scheduler
 from avp_vit.train.state import SurvivalBatch
 from avp_vit.train.viewpoint import make_eval_viewpoints, random_viewpoint
@@ -26,8 +27,13 @@ __all__ = [
     "IMAGENET_MEAN",
     "IMAGENET_STD",
     "InfiniteLoader",
+    "LOSS_FNS",
+    "LossFn",
+    "LossType",
     "SurvivalBatch",
+    "cos_dissim",
     "fit_pca",
+    "get_loss_fn",
     "imagenet_denormalize",
     "make_eval_viewpoints",
     "make_loader",

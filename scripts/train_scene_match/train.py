@@ -8,7 +8,6 @@ import comet_ml
 import optuna
 import torch
 from torch import Tensor, nn
-from torch.nn.functional import cosine_similarity, l1_loss, mse_loss
 from tqdm import tqdm
 from ymc.lr import get_linear_scaled_lr
 from ytch.model import count_parameters
@@ -17,7 +16,7 @@ from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone.dinov3 import NormFeatures
 from avp_vit.checkpoint import load as load_checkpoint
 from avp_vit.checkpoint import save as save_checkpoint
-from avp_vit.train import InfiniteLoader, SurvivalBatch, warmup_cosine_scheduler
+from avp_vit.train import InfiniteLoader, SurvivalBatch, get_loss_fn, warmup_cosine_scheduler
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
 
@@ -164,10 +163,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         compile_teacher(teacher)
         compile_avp(avp)
 
-    def cos_loss(pred: Tensor, target: Tensor) -> Tensor:
-        return (1 - cosine_similarity(pred, target, dim=-1)).mean()
-
-    loss_fn = {"l1": l1_loss, "mse": mse_loss, "cos": cos_loss}[cfg.loss]
+    loss_fn = get_loss_fn(cfg.loss)
     log.info(f"Loss function: {cfg.loss}")
 
     # Create resolution stages and resources

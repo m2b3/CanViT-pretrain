@@ -5,30 +5,21 @@ import io
 import logging
 import math
 from collections.abc import Callable
-from typing import Literal
 
 import comet_ml
 import matplotlib.pyplot as plt
 import torch
 from matplotlib.figure import Figure
 from torch import Tensor
-from torch.nn.functional import cosine_similarity, l1_loss, mse_loss
 
 from avp_vit import AVPViT
 from avp_vit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
-from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_norm_stats
+from avp_vit.train import LOSS_FNS, LossType, imagenet_denormalize, plot_multistep_pca, plot_norm_stats
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
 log = logging.getLogger(__name__)
-
-
-def cos_dissim(pred: Tensor, target: Tensor) -> Tensor:
-    return (1 - cosine_similarity(pred, target, dim=-1)).mean()
-
-
-LOSS_FNS = {"l1": l1_loss, "mse": mse_loss, "cos": cos_dissim}
 
 
 def _infer_scene_grid_size(target: Tensor) -> int:
@@ -89,7 +80,7 @@ def viz_and_log(
     show_hidden: bool = True,
     log_spatial_stats: bool = True,
     log_curves: bool = True,
-    loss_type: Literal["l1", "mse", "cos"] = "mse",
+    loss_type: LossType = "mse",
     log_register_curves: bool = False,
 ) -> dict[str, list[float]]:
     """Run forward trajectory and log visualization. Returns {l1, mse, cos} losses per timestep."""
@@ -330,7 +321,7 @@ def eval_and_log(
     prefix: str = "val",
     log_spatial_stats: bool = True,
     log_curves: bool = True,
-    loss_type: Literal["l1", "mse", "cos"] = "mse",
+    loss_type: LossType = "mse",
 ) -> float:
     """Full evaluation with PCA visualization (expensive). Returns final scene l1 loss (normalized)."""
     B = images.shape[0]
