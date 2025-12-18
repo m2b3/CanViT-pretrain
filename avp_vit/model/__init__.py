@@ -71,7 +71,7 @@ class LossOutputs(NamedTuple):
 class AVPConfig:
     glimpse_grid_size: int = 8  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
-    layer_scale_init: float = 1e-5  # Init for LayerScale (reference: 0.01)
+    layer_scale_init: float = 1e-6  # Init for LayerScale (reference: 0.01)
     use_recurrence_ln: bool = False  # LN at recurrence boundary (False = Identity)
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "cheap"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
@@ -244,7 +244,11 @@ class AVPViT(nn.Module):
         """Create initial hidden state for given batch size and scene grid size."""
         n_spatial = scene_grid_size**2
         hidden = self.hidden_stream.init_hidden(batch_size, n_spatial)
-        assert hidden.shape == (batch_size, self.n_prefix + n_spatial, self.backbone.embed_dim)
+        assert hidden.shape == (
+            batch_size,
+            self.n_prefix + n_spatial,
+            self.backbone.embed_dim,
+        )
         return hidden
 
     def _normalize_hidden(self, hidden: Tensor) -> Tensor:
