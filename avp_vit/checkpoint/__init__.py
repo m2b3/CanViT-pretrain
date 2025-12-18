@@ -11,6 +11,7 @@ import torch
 from torch import Tensor
 
 from avp_vit import AVPConfig, AVPViT
+from avp_vit.attention import CrossAttentionConfig
 
 log = logging.getLogger(__name__)
 
@@ -107,9 +108,16 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     if "avp" in raw and "state_dict" not in raw:
         raw["state_dict"] = raw.pop("avp")
 
+    # Reconstruct nested dataclasses in avp_config
+    avp_config = raw["avp_config"].copy()
+    if isinstance(avp_config.get("read_attention"), dict):
+        avp_config["read_attention"] = CrossAttentionConfig(**avp_config["read_attention"])
+    if isinstance(avp_config.get("write_attention"), dict):
+        avp_config["write_attention"] = CrossAttentionConfig(**avp_config["write_attention"])
+
     data: CheckpointData = {
         "state_dict": _strip_orig_mod(raw["state_dict"]),
-        "avp_config": raw["avp_config"],
+        "avp_config": avp_config,
         "teacher_dim": raw["teacher_dim"],
         "backbone": raw["backbone"],
         "timestamp": raw.get("timestamp", "unknown"),

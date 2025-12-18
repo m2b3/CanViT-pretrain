@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Multi-grid inference: run model at various scene grid sizes."""
+"""Multi-grid inference: run model at various scene grid sizes with PCA viz."""
 
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import tyro
 from PIL import Image
@@ -15,6 +19,7 @@ from avp_vit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.checkpoint import load as load_checkpoint
 from avp_vit.glimpse import Viewpoint
 from avp_vit.train.data import imagenet_normalize
+from avp_vit.train.viz import fit_pca, pca_rgb, imagenet_denormalize
 from scripts.train_scene_match.model import MODEL_REGISTRY
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -25,9 +30,10 @@ log = logging.getLogger(__name__)
 class Args:
     checkpoint: Path
     image: Path
+    output: Path = Path("outputs/multi_grid_pca.png")
     grid_sizes: tuple[int, ...] = (8, 16, 32, 64, 128)
     n_glimpses: int = 4
-    backbone_weights: Path | None = None  # If None, use pretrained
+    backbone_weights: Path | None = None
     device: str = "mps"
     seed: int = 42
 
@@ -39,7 +45,6 @@ def load_model(ckpt_path: Path, backbone_weights: Path | None, device: torch.dev
     backbone_slug = ckpt["backbone"]
     teacher_dim = ckpt["teacher_dim"]
 
-    # Load backbone
     factory = MODEL_REGISTRY[backbone_slug]
     if backbone_weights is not None:
         log.info(f"Loading backbone {backbone_slug} from {backbone_weights}")
@@ -93,7 +98,6 @@ def main(args: Args) -> None:
     avp = load_model(args.checkpoint, args.backbone_weights, device)
     patch_size = avp.backbone.patch_size
 
-    # Determine image size: must be large enough for largest grid
     max_grid = max(args.grid_sizes)
     img_size = max_grid * patch_size
     log.info(f"Image size: {img_size}px (for max grid {max_grid}, patch_size={patch_size})")
@@ -101,47 +105,56 @@ def main(args: Args) -> None:
     image = load_image(args.image, img_size, device)
     log.info(f"Loaded image: {args.image} -> {image.shape}")
 
-    # Same viewpoints for all grid sizes (reproducible)
     viewpoints = random_viewpoints(args.n_glimpses, 1, device, args.seed)
-    vp_info = [(vp.centers[0].tolist(), vp.scales[0].item()) for vp in viewpoints]
-    log.info(f"Viewpoints ({args.n_glimpses}): {vp_info}")
+    log.info(f"Viewpoints: {args.n_glimpses}")
 
-    log.info(f"\n{'='*60}")
-    log.info(f"Running inference at grid sizes: {args.grid_sizes}")
-    log.info(f"{'='*60}\n")
-
-    results: dict[int, dict] = {}
+    # Collect scenes at each grid size
+    all_scenes: dict[int, list[np.ndarray]] = {}
 
     with torch.no_grad():
         for G in args.grid_sizes:
-            log.info(f"Grid size {G}x{G} ({G*G} spatial tokens)...")
-
+            log.info(f"Grid size {G}x{G}...")
             hidden = avp.init_hidden(1, G)
-            outputs, final_hidden = avp.forward_trajectory_full(image, viewpoints, hidden)
+            outputs, _ = avp.forward_trajectory_full(image, viewpoints, hidden)
+            # scenes[i] shape: [1, G*G, D] -> [G*G, D]
+            all_scenes[G] = [out.scene[0].cpu().numpy() for out in outputs]
 
-            # Collect stats
-            scenes = [out.scene for out in outputs]
-            scene_norms = [s.norm().item() for s in scenes]
-            final_scene = scenes[-1]
+    # Create figure: rows = grid sizes, cols = timesteps + input image
+    n_rows = len(args.grid_sizes)
+    n_cols = args.n_glimpses + 1  # +1 for input image column
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows))
 
-            results[G] = {
-                "scene_shape": final_scene.shape,
-                "scene_norms": scene_norms,
-                "hidden_norm": final_hidden.norm().item(),
-                "final_scene": final_scene.cpu(),
-            }
+    # Input image (denormalized)
+    img_np = imagenet_denormalize(image[0].cpu()).numpy()
 
-            log.info(f"  scene shape: {final_scene.shape}")
-            log.info(f"  scene norms per step: {[f'{n:.2f}' for n in scene_norms]}")
-            log.info(f"  final hidden norm: {final_hidden.norm().item():.2f}")
-            log.info("")
+    for row_idx, G in enumerate(args.grid_sizes):
+        scenes = all_scenes[G]
 
-    # Summary
-    log.info(f"{'='*60}")
-    log.info("Summary:")
-    log.info(f"{'='*60}")
-    for G, r in results.items():
-        log.info(f"  G={G:3d}: scene {r['scene_shape']}, final_norm={r['scene_norms'][-1]:.2f}")
+        # Fit PCA independently for each grid size
+        pca = fit_pca(scenes[-1])
+
+        # First column: input image (same for all rows)
+        ax = axes[row_idx, 0]
+        ax.imshow(img_np)
+        ax.set_title("Input" if row_idx == 0 else "")
+        ax.set_ylabel(f"G={G}")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        # Remaining columns: scene PCA at each timestep
+        for t, scene in enumerate(scenes):
+            ax = axes[row_idx, t + 1]
+            rgb = pca_rgb(pca, scene, G, G)
+            ax.imshow(rgb)
+            ax.set_title(f"t={t}" if row_idx == 0 else "")
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+    plt.tight_layout()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(args.output, dpi=150)
+    plt.close(fig)
+    log.info(f"Saved: {args.output}")
 
 
 if __name__ == "__main__":
