@@ -2,10 +2,8 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
-from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 
 from avp_vit.train import InfiniteLoader, train_transform, val_transform
@@ -17,8 +15,6 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ResolutionStage:
-    """Configuration for one resolution stage."""
-
     scene_grid_size: int
     glimpse_grid_size: int
     patch_size: int
@@ -39,134 +35,66 @@ class ResolutionStage:
         return self.fresh_count / self.batch_size
 
 
-def _batch_size_for_grid(
-    grid_size: int,
-    min_grid_size: int,
-    max_grid_size: int,
-    bs_at_min: int,
-    bs_at_max: int,
-) -> int:
-    """Linear interpolation in token count (G²), i.e., quadratic in G."""
-    if min_grid_size == max_grid_size:
-        return bs_at_max
-    T = grid_size ** 2
-    T_min, T_max = min_grid_size ** 2, max_grid_size ** 2
-    t = (T - T_min) / (T_max - T_min)
-    return max(1, round(bs_at_min + t * (bs_at_max - bs_at_min)))
+def create_resolution_stages(cfg: Config, patch_size: int) -> dict[int, ResolutionStage]:
+    assert len(cfg.grid_sizes) > 0
+    assert cfg.avp.glimpse_grid_size <= cfg.min_grid_size
 
-
-def create_resolution_stage(
-    scene_grid_size: int,
-    glimpse_grid_size: int,
-    patch_size: int,
-    batch_size: int,
-    fresh_ratio: float,
-    n_viewpoints_per_step: int,
-) -> ResolutionStage:
-    """Create a resolution stage with given batch size and fresh ratio."""
-    assert batch_size >= 2, f"batch_size must be >= 2, got {batch_size}"
-    assert 0 < fresh_ratio < 1, f"fresh_ratio must be in (0, 1), got {fresh_ratio}"
-    fresh_count = max(1, min(batch_size - 1, round(fresh_ratio * batch_size)))
-    return ResolutionStage(
-        scene_grid_size=scene_grid_size,
-        glimpse_grid_size=glimpse_grid_size,
-        patch_size=patch_size,
-        batch_size=batch_size,
-        fresh_count=fresh_count,
-        n_viewpoints_per_step=n_viewpoints_per_step,
-    )
-
-
-class SingleBatchDataset(Dataset[tuple[Tensor, int]]):
-    """Wraps a dataset, caches first N items and cycles through them.
-
-    This ensures diverse samples within each batch (for correct variance estimation
-    in batch normalization) while keeping the same batch every time (for debugging).
-    """
-
-    def __init__(self, dataset: Dataset[Any], n: int) -> None:
-        self._items = [dataset[i] for i in range(n)]
-        log.warning(f"Cached {n} images for single-batch training")
-
-    def __len__(self) -> int:
-        return 1_000_000
-
-    def __getitem__(self, idx: int) -> tuple[Tensor, int]:
-        return self._items[idx % len(self._items)]
-
-
-def create_resolution_stages(
-    cfg: Config, patch_size: int
-) -> dict[int, ResolutionStage]:
-    """Create resolution stages for each grid size."""
-    # Default: old quadratic behavior (bs ∝ 1/G²)
     ratio = cfg.max_grid_size / cfg.min_grid_size
     bs_at_min = cfg.batch_size_at_min_grid or round(cfg.batch_size * ratio * ratio)
 
+    log.info(f"Batch sizes: G={cfg.min_grid_size} -> {bs_at_min}, G={cfg.max_grid_size} -> {cfg.batch_size}")
+
     stages: dict[int, ResolutionStage] = {}
     for G in cfg.grid_sizes:
-        bs = _batch_size_for_grid(G, cfg.min_grid_size, cfg.max_grid_size, bs_at_min, cfg.batch_size)
-        stages[G] = create_resolution_stage(
+        # Linear interpolation in token count (G²)
+        if cfg.min_grid_size == cfg.max_grid_size:
+            bs = cfg.batch_size
+        else:
+            t = (G**2 - cfg.min_grid_size**2) / (cfg.max_grid_size**2 - cfg.min_grid_size**2)
+            bs = max(2, round(bs_at_min + t * (cfg.batch_size - bs_at_min)))
+
+        fresh_count = max(1, min(bs - 1, round(cfg.fresh_ratio * bs)))
+
+        stages[G] = ResolutionStage(
             scene_grid_size=G,
             glimpse_grid_size=cfg.avp.glimpse_grid_size,
             patch_size=patch_size,
             batch_size=bs,
-            fresh_ratio=cfg.fresh_ratio,
+            fresh_count=fresh_count,
             n_viewpoints_per_step=cfg.n_viewpoints_per_step,
         )
+        log.info(f"  G={G}: {stages[G].scene_size_px}px, batch={bs}, fresh={fresh_count}")
+
     return stages
 
 
 def create_loaders(
     cfg: Config, stages: dict[int, ResolutionStage]
 ) -> tuple[dict[int, InfiniteLoader], dict[int, InfiniteLoader]]:
-    """Create train/val loaders for each resolution stage."""
-    if cfg.debug_train_on_single_batch:
-        log.warning("=" * 60)
-        log.warning("DEBUG MODE: Training on single repeated batch")
-        log.warning("=" * 60)
+    assert cfg.train_dir.is_dir(), f"train_dir not found: {cfg.train_dir}"
+    assert cfg.val_dir.is_dir(), f"val_dir not found: {cfg.val_dir}"
 
     train_loaders: dict[int, InfiniteLoader] = {}
     val_loaders: dict[int, InfiniteLoader] = {}
 
     for G, stage in stages.items():
-        scene_size_px = stage.scene_size_px
-        fresh_count = stage.fresh_count
+        sz = stage.scene_size_px
 
-        log.info(
-            f"Creating loaders for G={G}: scene_size={scene_size_px}px, "
-            f"batch={stage.batch_size}, fresh={fresh_count}"
-        )
+        train_ds = ImageFolder(str(cfg.train_dir), train_transform(sz, (cfg.crop_scale_min, 1.0)))
+        val_ds = ImageFolder(str(cfg.val_dir), val_transform(sz))
 
-        train_dataset: Dataset[Any] = ImageFolder(
-            str(cfg.train_dir),
-            train_transform(scene_size_px, (cfg.crop_scale_min, 1.0)),
-        )
-        val_dataset: Dataset[Any] = ImageFolder(
-            str(cfg.val_dir), val_transform(scene_size_px)
-        )
+        assert len(train_ds) > 0, "train dataset empty"
+        assert len(val_ds) > 0, "val dataset empty"
+        log.info(f"  G={G}: train={len(train_ds):,}, val={len(val_ds):,}")
 
-        if cfg.debug_train_on_single_batch:
-            train_dataset = SingleBatchDataset(train_dataset, fresh_count)
-            val_dataset = SingleBatchDataset(val_dataset, fresh_count)
-
-        train_loader: DataLoader[Any] = DataLoader(
-            train_dataset,
-            batch_size=fresh_count,
-            shuffle=not cfg.debug_train_on_single_batch,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
-        val_loader: DataLoader[Any] = DataLoader(
-            val_dataset,
-            batch_size=fresh_count,
-            shuffle=not cfg.debug_train_on_single_batch,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            drop_last=True,
-        )
-        train_loaders[G] = InfiniteLoader(train_loader)
-        val_loaders[G] = InfiniteLoader(val_loader)
+        persistent = cfg.num_workers > 0
+        train_loaders[G] = InfiniteLoader(DataLoader(
+            train_ds, batch_size=stage.fresh_count, shuffle=True,
+            num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
+        ))
+        val_loaders[G] = InfiniteLoader(DataLoader(
+            val_ds, batch_size=stage.fresh_count, shuffle=False,
+            num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
+        ))
 
     return train_loaders, val_loaders
