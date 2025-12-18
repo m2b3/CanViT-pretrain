@@ -72,9 +72,9 @@ class AVPConfig:
     glimpse_grid_size: int = 8  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 1e-3  # Init for LayerScale (reference: 0.01)
-    use_recurrence_ln: bool = True  # LN at recurrence boundary (False = Identity)
+    use_recurrence_ln: bool = False  # LN at recurrence boundary (False = Identity)
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
-    gating: GatingMode = "cheap"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
+    gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 4  # Adapters every N backbone blocks (reference: 1)
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
