@@ -23,8 +23,14 @@ class Config:
     avp: AVPConfig = field(default_factory=AVPConfig)
     grid_sizes: tuple[int, ...] = (64,)
     batch_size: int = 16  # Batch size at max grid size
-    batch_size_at_min_grid: int | None = None  # If set, linearly interpolate BS between grids
-    fresh_ratio: float = 0.5  # Fraction of batch replaced each optimizer step
+    batch_size_at_min_grid: int | None = (
+        None  # If set, linearly interpolate BS between grids
+    )
+    # Fraction of batch replaced each optimizer step
+    # Having this NOT be 1.0 makes optimization a lot harder...
+    # It could make sense to first pretrain with this at 1.0, maybe adjust it later...
+    # There's an enough complexity
+    fresh_ratio: float = 1.0
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
@@ -39,7 +45,9 @@ class Config:
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
-    index_dir: Path | None = None  # If set, use IndexedImageFolder for train (needed for IN21k)
+    index_dir: Path | None = (
+        None  # If set, use IndexedImageFolder for train (needed for IN21k)
+    )
     ckpt_dir: Path = Path("checkpoints")
     resume_ckpt: Path | None = None  # AVP checkpoint to resume from
     # Training
