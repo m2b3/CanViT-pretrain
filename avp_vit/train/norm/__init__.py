@@ -20,6 +20,7 @@ class PositionAwareNorm(nn.Module):
 
     mean: Tensor
     var: Tensor
+    _initialized: Tensor  # bool tensor, persisted in state_dict
 
     def __init__(
         self,
@@ -35,7 +36,12 @@ class PositionAwareNorm(nn.Module):
         self.eps = eps
         self.register_buffer("mean", torch.zeros(n_tokens, embed_dim))
         self.register_buffer("var", torch.ones(n_tokens, embed_dim))
-        self.initialized = False
+        self.register_buffer("_initialized", torch.tensor(False))
+
+    @property
+    def initialized(self) -> bool:
+        """Whether running stats have been initialized from data."""
+        return self._initialized.item()  # type: ignore[return-value]
 
     def forward(self, x: Tensor) -> Tensor:
         """Normalize x: [B, N, D] -> [B, N, D]. Updates stats only in train mode.
@@ -65,7 +71,7 @@ class PositionAwareNorm(nn.Module):
                     if B > 1:
                         self.var.copy_(batch_var)
                     # else: keep var=1 until we have enough samples
-                    self.initialized = True
+                    self._initialized.fill_(True)
                 else:
                     self.mean.lerp_(batch_mean, m)
                     # Chan's formula: var = within-batch + between-batch variance

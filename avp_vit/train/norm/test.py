@@ -88,6 +88,23 @@ def test_state_dict_contains_buffers():
     sd = norm.state_dict()
     assert "mean" in sd
     assert "var" in sd
+    assert "_initialized" in sd
+
+
+def test_initialized_persists_through_save_load():
+    """initialized flag must survive state_dict round-trip."""
+    norm1 = PositionAwareNorm(n_tokens=4, embed_dim=8, grid_size=2)
+    norm1.train()
+    assert not norm1.initialized
+
+    norm1(torch.randn(4, 4, 8))
+    assert norm1.initialized
+
+    # Save and load into fresh instance
+    norm2 = PositionAwareNorm(n_tokens=4, embed_dim=8, grid_size=2)
+    assert not norm2.initialized
+    norm2.load_state_dict(norm1.state_dict())
+    assert norm2.initialized, "initialized flag not restored from state_dict"
 
 
 # ============================================================================
