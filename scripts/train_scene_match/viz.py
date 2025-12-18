@@ -81,7 +81,6 @@ def viz_and_log(
     log_spatial_stats: bool = True,
     log_curves: bool = True,
     loss_type: LossType = "mse",
-    log_register_curves: bool = False,
 ) -> dict[str, list[float]]:
     """Run forward trajectory and log visualization. Returns {l1, mse, cos} losses per timestep."""
     assert isinstance(avp.backbone, DINOv3Backbone)
@@ -102,7 +101,6 @@ def viz_and_log(
 
         if log_curves:
             hiddens = [initial_hidden] + [out.hidden for out in outputs]
-            n_reg = avp.n_registers
 
             # Spatial hidden norm vs timestep (excludes registers)
             spatial_norms = [
@@ -114,16 +112,6 @@ def viz_and_log(
                 y=spatial_norms,
                 step=step,
             )
-
-            # Register norm vs timestep (if enabled and any exist)
-            if log_register_curves and n_reg > 0:
-                reg_norms = [h[:, :n_reg].norm(dim=-1).mean().item() for h in hiddens]
-                exp.log_curve(
-                    f"{prefix}/register_norm_vs_timestep",
-                    x=list(range(len(reg_norms))),
-                    y=reg_norms,
-                    step=step,
-                )
 
             # Step-to-step spatial difference norm
             diff_norms = [
