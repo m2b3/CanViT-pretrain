@@ -31,37 +31,12 @@ class ResolutionStage:
         return self.scene_grid_size * self.patch_size
 
     @property
-    def n_scene_tokens(self) -> int:
-        return self.scene_grid_size**2
-
-    @property
     def min_viewpoint_scale(self) -> float:
         return self.glimpse_grid_size / self.scene_grid_size
 
     @property
-    def n_eval(self) -> int:
-        return _n_eval_viewpoints(self.scene_grid_size)
-
-    @property
-    def fresh_ratio_desired(self) -> float:
-        return self.n_viewpoints_per_step / self.n_eval
-
-    @property
-    def fresh_ratio_actual(self) -> float:
+    def fresh_ratio(self) -> float:
         return self.fresh_count / self.batch_size
-
-    @property
-    def e_glimpses_desired(self) -> float:
-        return self.n_viewpoints_per_step / self.fresh_ratio_desired
-
-    @property
-    def e_glimpses_actual(self) -> float:
-        return self.n_viewpoints_per_step / self.fresh_ratio_actual
-
-
-def _n_eval_viewpoints(grid_size: int) -> int:
-    """Expected viewpoints for evaluation. Linear in G since glimpses reuse hidden state."""
-    return max(4, round(grid_size / 16))
 
 
 def _batch_size_for_grid(
@@ -80,22 +55,18 @@ def _batch_size_for_grid(
     return max(1, round(bs_at_min + t * (bs_at_max - bs_at_min)))
 
 
-def _fresh_ratio(grid_size: int, n_viewpoints_per_step: int) -> float:
-    """Fresh ratio to achieve expected viewpoint count: E[glimpses] = n_vp / fresh_ratio."""
-    return n_viewpoints_per_step / _n_eval_viewpoints(grid_size)
-
-
 def create_resolution_stage(
     scene_grid_size: int,
     glimpse_grid_size: int,
     patch_size: int,
     batch_size: int,
+    fresh_ratio: float,
     n_viewpoints_per_step: int,
 ) -> ResolutionStage:
-    """Create a resolution stage with given batch size."""
-    fresh_count = max(
-        1, round(_fresh_ratio(scene_grid_size, n_viewpoints_per_step) * batch_size)
-    )
+    """Create a resolution stage with given batch size and fresh ratio."""
+    assert batch_size >= 2, f"batch_size must be >= 2, got {batch_size}"
+    assert 0 < fresh_ratio < 1, f"fresh_ratio must be in (0, 1), got {fresh_ratio}"
+    fresh_count = max(1, min(batch_size - 1, round(fresh_ratio * batch_size)))
     return ResolutionStage(
         scene_grid_size=scene_grid_size,
         glimpse_grid_size=glimpse_grid_size,
@@ -140,6 +111,7 @@ def create_resolution_stages(
             glimpse_grid_size=cfg.avp.glimpse_grid_size,
             patch_size=patch_size,
             batch_size=bs,
+            fresh_ratio=cfg.fresh_ratio,
             n_viewpoints_per_step=cfg.n_viewpoints_per_step,
         )
     return stages
