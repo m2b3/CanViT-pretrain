@@ -22,13 +22,16 @@ def warmup_cosine_scheduler(
     Args:
         optimizer: The optimizer to schedule.
         total_steps: Total training steps.
-        warmup_steps: Number of warmup steps.
+        warmup_steps: Number of warmup steps (0 = no warmup, pure cosine).
 
     Returns:
-        SequentialLR combining warmup and cosine phases.
+        LRScheduler (SequentialLR if warmup, else CosineAnnealingLR).
     """
-    assert warmup_steps > 0, "warmup_steps must be positive"
+    assert warmup_steps >= 0, "warmup_steps must be non-negative"
     assert warmup_steps < total_steps, "warmup_steps must be less than total_steps"
+
+    if warmup_steps == 0:
+        return CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=0.0)
 
     start_factor = 1.0 / warmup_steps
     warmup = LinearLR(
