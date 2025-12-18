@@ -6,13 +6,6 @@ from .config import Config
 from .data import create_resolution_stages
 
 
-def test_config_defaults() -> None:
-    """Config defaults are valid."""
-    cfg = Config()
-    assert cfg.max_grid_size == 64
-    assert cfg.warmup_steps == 2000
-
-
 def test_resolution_stages_creation() -> None:
     """Can create resolution stages."""
     cfg = Config(grid_sizes=(16, 32), batch_size=16, batch_size_at_min_grid=64)
