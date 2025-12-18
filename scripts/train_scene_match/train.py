@@ -17,14 +17,13 @@ from avp_vit import AVPConfig, AVPViT
 from avp_vit.backbone.dinov3 import NormFeatures
 from avp_vit.checkpoint import load as load_checkpoint
 from avp_vit.checkpoint import save as save_checkpoint
-from avp_vit.train import InfiniteLoader, SurvivalBatch
+from avp_vit.train import InfiniteLoader, SurvivalBatch, warmup_cosine_scheduler
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import random_viewpoint
 
 from .config import Config
 from .data import ResolutionStage, create_loaders, create_resolution_stages
 from .model import compile_avp, compile_teacher, create_avp, load_student_backbone, load_teacher
-from .scheduler import create_scheduler
 from .viz import eval_and_log, log_norm_stats, val_metrics_only, viz_and_log
 
 log = logging.getLogger(__name__)
@@ -188,7 +187,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
     optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
-    scheduler = create_scheduler(optimizer, cfg)
+    scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, cfg.warmup_steps)
     log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
 
     # Load AVP weights from checkpoint if specified
