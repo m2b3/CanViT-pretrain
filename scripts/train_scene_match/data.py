@@ -21,7 +21,6 @@ class ResolutionStage:
     patch_size: int
     batch_size: int
     fresh_count: int
-    n_viewpoints_per_step: int
 
     @property
     def scene_size_px(self) -> int:
@@ -63,7 +62,6 @@ def create_resolution_stages(cfg: Config, patch_size: int) -> dict[int, Resoluti
             patch_size=patch_size,
             batch_size=bs,
             fresh_count=fresh_count,
-            n_viewpoints_per_step=cfg.n_viewpoints_per_step,
         )
         log.info(f"  G={G}: {stages[G].scene_size_px}px, batch={bs}, fresh={fresh_count}")
 
