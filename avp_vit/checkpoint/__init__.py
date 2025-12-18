@@ -2,7 +2,7 @@
 
 import logging
 import subprocess
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
@@ -12,6 +12,14 @@ from torch import Tensor
 
 from avp_vit import AVPConfig, AVPViT
 from avp_vit.attention import CrossAttentionConfig
+
+# Field renames for legacy checkpoint migration
+_CROSS_ATTN_RENAMES = {
+    "normalize_q": "pre_proj_q_ln",
+    "normalize_k": "pre_proj_k_ln",
+    "normalize_v": "pre_proj_v_ln",
+}
+_CROSS_ATTN_FIELDS = {f.name for f in fields(CrossAttentionConfig)}
 
 log = logging.getLogger(__name__)
 
@@ -108,12 +116,16 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     if "avp" in raw and "state_dict" not in raw:
         raw["state_dict"] = raw.pop("avp")
 
-    # Reconstruct nested dataclasses in avp_config
+    # Reconstruct nested dataclasses in avp_config (migrate renamed fields from legacy checkpoints)
     avp_config = raw["avp_config"].copy()
-    if isinstance(avp_config.get("read_attention"), dict):
-        avp_config["read_attention"] = CrossAttentionConfig(**avp_config["read_attention"])
-    if isinstance(avp_config.get("write_attention"), dict):
-        avp_config["write_attention"] = CrossAttentionConfig(**avp_config["write_attention"])
+    for key in ("read_attention", "write_attention"):
+        if isinstance(avp_config.get(key), dict):
+            old_dict = avp_config[key]
+            # Rename old fields to new names
+            migrated = {_CROSS_ATTN_RENAMES.get(k, k): v for k, v in old_dict.items()}
+            # Filter to valid fields only (in case of truly removed fields)
+            filtered = {k: v for k, v in migrated.items() if k in _CROSS_ATTN_FIELDS}
+            avp_config[key] = CrossAttentionConfig(**filtered)
 
     data: CheckpointData = {
         "state_dict": _strip_orig_mod(raw["state_dict"]),
