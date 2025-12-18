@@ -22,7 +22,8 @@ class Config:
     # AVP
     avp: AVPConfig = field(default_factory=AVPConfig)
     grid_sizes: tuple[int, ...] = (64,)
-    batch_size: int = 16  # Max batch size (at max grid size)
+    batch_size: int = 16  # Batch size at max grid size
+    batch_size_at_min_grid: int | None = None  # If set, linearly interpolate BS between grids
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
@@ -60,6 +61,10 @@ class Config:
     )
     # Runtime
     device: torch.device = field(default_factory=get_sensible_device)
+
+    @property
+    def min_grid_size(self) -> int:
+        return min(self.grid_sizes)
 
     @property
     def max_grid_size(self) -> int:

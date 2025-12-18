@@ -65,11 +65,19 @@ def _n_eval_viewpoints(grid_size: int) -> int:
 
 
 def _batch_size_for_grid(
-    grid_size: int, max_grid_size: int, max_batch_size: int
+    grid_size: int,
+    min_grid_size: int,
+    max_grid_size: int,
+    bs_at_min: int,
+    bs_at_max: int,
 ) -> int:
-    """Batch size scales inversely with token count (∝ G²)."""
-    ratio = max_grid_size / grid_size
-    return max(1, round(max_batch_size * ratio * ratio))
+    """Linear interpolation in token count (G²), i.e., quadratic in G."""
+    if min_grid_size == max_grid_size:
+        return bs_at_max
+    T = grid_size ** 2
+    T_min, T_max = min_grid_size ** 2, max_grid_size ** 2
+    t = (T - T_min) / (T_max - T_min)
+    return max(1, round(bs_at_min + t * (bs_at_max - bs_at_min)))
 
 
 def _fresh_ratio(grid_size: int, n_viewpoints_per_step: int) -> float:
@@ -81,12 +89,10 @@ def create_resolution_stage(
     scene_grid_size: int,
     glimpse_grid_size: int,
     patch_size: int,
-    max_grid_size: int,
-    max_batch_size: int,
+    batch_size: int,
     n_viewpoints_per_step: int,
 ) -> ResolutionStage:
-    """Create a resolution stage with computed batch size and fresh count."""
-    batch_size = _batch_size_for_grid(scene_grid_size, max_grid_size, max_batch_size)
+    """Create a resolution stage with given batch size."""
     fresh_count = max(
         1, round(_fresh_ratio(scene_grid_size, n_viewpoints_per_step) * batch_size)
     )
@@ -122,17 +128,21 @@ def create_resolution_stages(
     cfg: Config, patch_size: int
 ) -> dict[int, ResolutionStage]:
     """Create resolution stages for each grid size."""
-    return {
-        G: create_resolution_stage(
+    # Default: old quadratic behavior (bs ∝ 1/G²)
+    ratio = cfg.max_grid_size / cfg.min_grid_size
+    bs_at_min = cfg.batch_size_at_min_grid or round(cfg.batch_size * ratio * ratio)
+
+    stages: dict[int, ResolutionStage] = {}
+    for G in cfg.grid_sizes:
+        bs = _batch_size_for_grid(G, cfg.min_grid_size, cfg.max_grid_size, bs_at_min, cfg.batch_size)
+        stages[G] = create_resolution_stage(
             scene_grid_size=G,
             glimpse_grid_size=cfg.avp.glimpse_grid_size,
             patch_size=patch_size,
-            max_grid_size=cfg.max_grid_size,
-            max_batch_size=cfg.batch_size,
+            batch_size=bs,
             n_viewpoints_per_step=cfg.n_viewpoints_per_step,
         )
-        for G in cfg.grid_sizes
-    }
+    return stages
 
 
 def create_loaders(
