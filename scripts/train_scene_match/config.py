@@ -39,6 +39,7 @@ class Config:
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
+    index_dir: Path | None = None  # If set, use IndexedImageFolder for train (needed for IN21k)
     ckpt_dir: Path = Path("checkpoints")
     resume_ckpt: Path | None = None  # AVP checkpoint to resume from
     # Training

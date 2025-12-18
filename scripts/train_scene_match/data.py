@@ -3,10 +3,11 @@
 import logging
 from dataclasses import dataclass
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets import ImageFolder
 
 from avp_vit.train import InfiniteLoader, train_transform, val_transform
+from drac_imagenet import IndexedImageFolder
 
 from .config import Config
 
@@ -74,14 +75,24 @@ def create_loaders(
     assert cfg.train_dir.is_dir(), f"train_dir not found: {cfg.train_dir}"
     assert cfg.val_dir.is_dir(), f"val_dir not found: {cfg.val_dir}"
 
+    use_indexed = cfg.index_dir is not None
+    if use_indexed:
+        log.info(f"Using IndexedImageFolder for train (index_dir={cfg.index_dir})")
+
     train_loaders: dict[int, InfiniteLoader] = {}
     val_loaders: dict[int, InfiniteLoader] = {}
 
     for G, stage in stages.items():
         sz = stage.scene_size_px
+        train_tf = train_transform(sz, (cfg.crop_scale_min, 1.0))
+        val_tf = val_transform(sz)
 
-        train_ds = ImageFolder(str(cfg.train_dir), train_transform(sz, (cfg.crop_scale_min, 1.0)))
-        val_ds = ImageFolder(str(cfg.val_dir), val_transform(sz))
+        if use_indexed:
+            assert cfg.index_dir is not None
+            train_ds: Dataset[tuple] = IndexedImageFolder(cfg.train_dir, cfg.index_dir, train_tf)
+        else:
+            train_ds = ImageFolder(str(cfg.train_dir), train_tf)
+        val_ds: Dataset[tuple] = ImageFolder(str(cfg.val_dir), val_tf)
 
         assert len(train_ds) > 0, "train dataset empty"
         assert len(val_ds) > 0, "val dataset empty"
