@@ -327,18 +327,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             exp.log_metrics(metrics, step=step)
             pbar.set_postfix_str(f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
-        # Validation (metrics only, fast)
+        # Validation - always log gradient norms and report to Optuna at val_every
         if step % cfg.val_every == 0:
-            val_images = val_loader.next_batch().to(cfg.device)
-            val_scene_l1 = val_metrics_only(
-                exp, step, avp, compute_raw_targets, scene_norm, cls_norm,
-                val_images, G, f"grid{G}/val",
-            )
-            exp.log_metric("val/scene_l1", val_scene_l1, step=step)
-
-            # Log gradient norms by module
             for name, norm in grad_norms_by_module(avp, depth=1).items():
                 exp.log_metric(f"grad_norm/{name}", norm, step=step)
+
+            # Fast validation (skip at viz_every - eval_and_log covers the same metrics)
+            if step % cfg.viz_every != 0:
+                val_images = val_loader.next_batch().to(cfg.device)
+                val_scene_l1 = val_metrics_only(
+                    exp, step, avp, compute_raw_targets, scene_norm, cls_norm,
+                    val_images, G, f"grid{G}/val",
+                )
+                exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
             if step > 0:
                 trial.report(ema_loss_t.item(), step)
@@ -357,13 +358,14 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 exp.log_metric(f"grid{G}/train/viz_{name}", losses[-1], step=step)
 
             val_images = val_loader.next_batch().to(cfg.device)
-            eval_and_log(
+            val_scene_l1 = eval_and_log(
                 exp, step, avp, teacher, compute_raw_targets, scene_norm, cls_norm,
                 val_images, G, f"grid{G}/val",
                 log_spatial_stats=cfg.log_spatial_stats,
                 log_curves=(step % cfg.curve_every == 0),
                 loss_type=cfg.loss,
             )
+            exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
         # Checkpointing
         if step % cfg.ckpt_every == 0:
