@@ -71,7 +71,7 @@ class AVPConfig:
     glimpse_grid_size: int = 8  # 256px^2
     n_scene_registers: int = 32  # 0 = disabled, >0 = fixed count
     layer_scale_init: float = 1e-3  # Init for LayerScale (reference: 0.01)
-    use_recurrence_ln: bool = False  # LN at recurrence boundary (False = Identity)
+    use_recurrence_ln: bool = True  # LN at recurrence boundary (False = Identity)
     gradient_checkpointing: bool = False  # Checkpoint at timestep boundaries
     gating: GatingMode = "none"  # none=LayerScale, cheap=CheapConvex, full=ConvexGated
     adapter_stride: int = 2  # Adapters every N backbone blocks (reference: 1)
@@ -417,7 +417,9 @@ class AVPViT(nn.Module):
             scene_loss = scene_loss + loss_fn(out.scene, target)
             if self.cls_proj is not None:
                 assert cls_target is not None and cls_loss_acc is not None
-                cls_loss_acc = cls_loss_acc + loss_fn(self.compute_cls(hidden), cls_target)
+                cls_loss_acc = cls_loss_acc + loss_fn(
+                    self.compute_cls(hidden), cls_target
+                )
 
         losses = LossOutputs(
             scene=scene_loss / (n + 1),
