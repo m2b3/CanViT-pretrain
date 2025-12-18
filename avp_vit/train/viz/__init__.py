@@ -161,7 +161,8 @@ def plot_trajectory(
         ax.plot(box.center_x, box.center_y, "o", color=colors[i], markersize=6, zorder=2)
 
     ax.set_title("Viewpoint Trajectory")
-    ax.legend(loc="upper right", fontsize=8)
+    if boxes:
+        ax.legend(loc="upper right", fontsize=8)
     ax.axis("off")
     plt.tight_layout()
     return fig
