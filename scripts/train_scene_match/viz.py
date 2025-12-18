@@ -249,7 +249,6 @@ def viz_and_log(
         hidden_spatials=hidden_spatials,
         initial_hidden_spatial=initial_hidden_spatial,
         locals_teacher_cropped=locals_teacher_cropped,
-        use_local_loss=False,
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
