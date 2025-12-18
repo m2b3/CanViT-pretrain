@@ -5,6 +5,7 @@ import io
 import logging
 import math
 from collections.abc import Callable
+from typing import NamedTuple
 
 import comet_ml
 import matplotlib.pyplot as plt
@@ -12,7 +13,7 @@ import torch
 from matplotlib.figure import Figure
 from torch import Tensor
 
-from avp_vit import AVPViT
+from avp_vit import AVPViT, StepOutput
 from avp_vit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
 from avp_vit.train import LOSS_FNS, LossType, imagenet_denormalize, plot_multistep_pca, plot_norm_stats
@@ -20,6 +21,13 @@ from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import make_eval_viewpoints
 
 log = logging.getLogger(__name__)
+
+
+class VizResult(NamedTuple):
+    """Result from viz_and_log: per-timestep losses and model outputs."""
+
+    losses: dict[str, list[float]]  # {loss_name: [loss_t0, loss_t1, ...]}
+    outputs: list[StepOutput]  # Model outputs at each timestep
 
 
 def _infer_scene_grid_size(target: Tensor) -> int:
@@ -81,8 +89,8 @@ def viz_and_log(
     log_spatial_stats: bool = True,
     log_curves: bool = True,
     loss_type: LossType = "mse",
-) -> dict[str, list[float]]:
-    """Run forward trajectory and log visualization. Returns {l1, mse, cos} losses per timestep."""
+) -> VizResult:
+    """Run forward trajectory and log visualization."""
     assert isinstance(avp.backbone, DINOv3Backbone)
     avp_backbone = avp.backbone
     scene_grid_size = _infer_scene_grid_size(target)
@@ -254,7 +262,7 @@ def viz_and_log(
     )
     log_figure(exp, fig_pca, f"{prefix}/pca", step)
 
-    return all_losses
+    return VizResult(losses=all_losses, outputs=outputs)
 
 
 def val_metrics_only(
@@ -320,35 +328,33 @@ def eval_and_log(
         target = scene_normalizer(raw_feats.patches)
         hidden = avp.init_hidden(B, scene_grid_size)
 
-    all_losses = viz_and_log(
+    viz = viz_and_log(
         exp, step, prefix, avp, teacher, scene_normalizer,
         images, viewpoints, target, hidden,
         log_spatial_stats=log_spatial_stats, log_curves=log_curves, loss_type=loss_type,
     )
 
     # Log normalized scene metrics - per timestep and final
-    n_timesteps = len(all_losses["l1"])
+    n_timesteps = len(viz.losses["l1"])
     for t in range(n_timesteps):
-        for name, losses in all_losses.items():
+        for name, losses in viz.losses.items():
             exp.log_metric(f"{prefix}/scene_{name}_t{t}", losses[t], step=step)
-    for name, losses in all_losses.items():
+    for name, losses in viz.losses.items():
         exp.log_metric(f"{prefix}/scene_{name}", losses[-1], step=step)
 
-    # Raw scene metrics (for cross-run comparison)
-    with torch.inference_mode():
-        outputs, _ = avp.forward_trajectory_full(images, viewpoints, hidden)
-        final_scene = outputs[-1].scene
+    # Raw scene metrics (for cross-run comparison) - reuse outputs from viz_and_log
+    final_scene = viz.outputs[-1].scene
+    for name, fn in LOSS_FNS.items():
+        exp.log_metric(f"{prefix}/scene_{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
+
+    # CLS metrics (if enabled)
+    if avp.cls_proj is not None:
+        cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
+        cls_pred = avp.compute_cls(viz.outputs[-1].hidden)
         for name, fn in LOSS_FNS.items():
-            exp.log_metric(f"{prefix}/scene_{name}_raw", fn(final_scene, raw_feats.patches).item(), step=step)
+            exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
 
-        # CLS metrics (if enabled)
-        if avp.cls_proj is not None:
-            cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
-            cls_pred = avp.compute_cls(outputs[-1].hidden)
-            for name, fn in LOSS_FNS.items():
-                exp.log_metric(f"{prefix}/cls_{name}", fn(cls_pred, cls_target).item(), step=step)
-
-    return all_losses["l1"][-1]
+    return viz.losses["l1"][-1]
 
 
 def log_norm_stats(
