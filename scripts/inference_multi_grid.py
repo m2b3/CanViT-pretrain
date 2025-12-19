@@ -10,6 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 import tyro
 from PIL import Image
 from torchvision import transforms
@@ -36,8 +37,10 @@ class Args:
     device: str = "mps"
 
 
-def load_model(ckpt_path: Path, backbone_weights: Path | None, device: torch.device) -> AVPViT:
-    """Load AVP model from checkpoint."""
+def load_model(
+    ckpt_path: Path, backbone_weights: Path | None, device: torch.device
+) -> tuple[AVPViT, DINOv3Backbone]:
+    """Load AVP model and teacher backbone from checkpoint."""
     ckpt = load_checkpoint(ckpt_path, device)
     cfg = AVPConfig(**ckpt["avp_config"])
     backbone_slug = ckpt["backbone"]
@@ -59,9 +62,22 @@ def load_model(ckpt_path: Path, backbone_weights: Path | None, device: torch.dev
     avp.load_state_dict(ckpt["state_dict"])
     avp.eval()
 
+    # Load TEACHER backbone separately - must use same weights as training!
+    # The teacher during training uses explicit checkpoint path, not default hub weights
+    teacher_ckpt = backbone_weights if backbone_weights is not None else None
+    if teacher_ckpt is not None:
+        log.info(f"Loading TEACHER backbone {backbone_slug} from {teacher_ckpt}")
+        raw_teacher = factory(pretrained=True, weights=str(teacher_ckpt))
+    else:
+        log.info(f"Loading TEACHER backbone {backbone_slug} with default pretrained weights")
+        raw_teacher = factory(pretrained=True)
+    teacher = DINOv3Backbone(raw_teacher.to(device).eval())
+    for p in teacher.parameters():
+        p.requires_grad = False
+
     log.info(f"Model loaded: {backbone_slug}, teacher_dim={teacher_dim}")
     log.info(f"  glimpse_grid_size={cfg.glimpse_grid_size}, registers={cfg.n_scene_registers}")
-    return avp
+    return avp, teacher
 
 
 def load_image(path: Path, size: int, device: torch.device) -> torch.Tensor:
@@ -84,8 +100,8 @@ def main(args: Args) -> None:
     device = torch.device(args.device)
     log.info(f"Device: {device}")
 
-    avp = load_model(args.checkpoint, args.backbone_weights, device)
-    patch_size = avp.backbone.patch_size
+    avp, teacher = load_model(args.checkpoint, args.backbone_weights, device)
+    patch_size = teacher.patch_size
 
     max_grid = max(args.grid_sizes)
     img_size = max_grid * patch_size
@@ -98,19 +114,48 @@ def main(args: Args) -> None:
     viewpoints = make_eval_viewpoints(1, device)
     log.info(f"Viewpoints: {[vp.name for vp in viewpoints]}")
 
-    # Collect scenes at each grid size
+    # Collect: AVP scenes + teacher at G res upsampled to max_grid
     all_scenes: dict[int, list[np.ndarray]] = {}
+    teacher_upsampled: dict[int, np.ndarray] = {}  # teacher at G res, latents upsampled to max_grid
 
     with torch.no_grad():
+        # Teacher at max resolution (ground truth + PCA fitting)
+        teacher_patches = teacher.forward_norm_features(image).patches
+        assert teacher_patches.shape == (1, max_grid * max_grid, teacher_patches.shape[-1])
+        teacher_dim = teacher_patches.shape[-1]
+        teacher_full_flat = teacher_patches[0].cpu().numpy()
+        log.info(f"Teacher at full res: {max_grid}×{max_grid}")
+
+        # Teacher at FIXED 16×16 resolution (256px input)
+        teacher_base_grid = 16
+        teacher_base_px = teacher_base_grid * patch_size  # 256px
+        img_at_base = F.interpolate(image, size=(teacher_base_px, teacher_base_px), mode="bilinear", align_corners=False)
+        teacher_base = teacher.forward_norm_features(img_at_base).patches  # [1, 16*16, D]
+        assert teacher_base.shape == (1, teacher_base_grid * teacher_base_grid, teacher_dim)
+        teacher_base_spatial = teacher_base.view(1, teacher_base_grid, teacher_base_grid, teacher_dim).permute(0, 3, 1, 2)  # [1, D, 16, 16]
+        log.info(f"Teacher baseline: {teacher_base_px}px → {teacher_base_grid}×{teacher_base_grid} tokens")
+
         for G in args.grid_sizes:
-            log.info(f"Grid size {G}x{G}...")
+            # Upsample the SAME 16×16 teacher tokens to G×G
+            teacher_at_G = F.interpolate(teacher_base_spatial, size=(G, G), mode="bilinear", align_corners=False)
+            teacher_upsampled[G] = teacher_at_G[0].permute(1, 2, 0).cpu().numpy().reshape(-1, teacher_dim)
+            log.info(f"G={G}: teacher 16×16 → upsample to {G}×{G}")
+
+            # AVP at this grid size
             hidden = avp.init_hidden(1, G)
             outputs, _ = avp.forward_trajectory_full(image, viewpoints, hidden)
-            all_scenes[G] = [out.scene[0].cpu().numpy() for out in outputs]
 
-    # Create figure: rows = grid sizes, cols = input image + timesteps
+            # AVP scene at G×G
+            scenes_list = []
+            for out in outputs:
+                scene = out.scene[0].cpu().numpy()  # [G*G, D]
+                assert scene.shape == (G * G, teacher_dim)
+                scenes_list.append(scene)
+            all_scenes[G] = scenes_list
+
+    # Create figure: 1 row teacher full + 2 rows per grid size (AVP, Teacher@G↑)
     n_viewpoints = len(viewpoints)
-    n_rows = len(args.grid_sizes)
+    n_rows = 1 + 2 * len(args.grid_sizes)
     n_cols = n_viewpoints + 1  # +1 for input image column
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows))
 
@@ -122,31 +167,61 @@ def main(args: Args) -> None:
     boxes = [vp.to_pixel_box(0, H, W) for vp in viewpoints]
     colors = timestep_colors(n_viewpoints)
 
-    for row_idx, G in enumerate(args.grid_sizes):
-        scenes = all_scenes[G]
-        pca = fit_pca(scenes[-1])
+    # Fit PCA on teacher full features (ground truth basis)
+    pca = fit_pca(teacher_full_flat)
 
-        # First column: input image with viewpoint boxes
-        ax = axes[row_idx, 0]
-        ax.imshow(img_np)
-        for box, color in zip(boxes, colors, strict=True):
-            rect = Rectangle(
-                (box.left, box.top), box.width, box.height,
-                linewidth=2, edgecolor=color, facecolor="none",
-            )
-            ax.add_patch(rect)
-        ax.set_title("Input + viewpoints" if row_idx == 0 else "")
-        ax.set_ylabel(f"G={G}")
+    # Row 0: Teacher at full resolution (ground truth)
+    teacher_full_rgb = pca_rgb(pca, teacher_full_flat, max_grid, max_grid)
+    ax = axes[0, 0]
+    ax.imshow(img_np)
+    for box, color in zip(boxes, colors, strict=True):
+        rect = Rectangle(
+            (box.left, box.top), box.width, box.height,
+            linewidth=2, edgecolor=color, facecolor="none",
+        )
+        ax.add_patch(rect)
+    ax.set_ylabel("Teacher full")
+    ax.set_title("Input")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for t in range(n_viewpoints):
+        ax = axes[0, t + 1]
+        ax.imshow(teacher_full_rgb)
+        ax.set_title(f"t={t} ({viewpoints[t].name})")
         ax.set_xticks([])
         ax.set_yticks([])
 
-        # Remaining columns: scene PCA at each timestep
+    # Per grid size: AVP and Teacher 16×16→G upsampled
+    for g_idx, G in enumerate(args.grid_sizes):
+        scenes = all_scenes[G]
+        teacher_rgb = pca_rgb(pca, teacher_upsampled[G], G, G)
+
+        # AVP row
+        row_avp = 1 + g_idx * 2
+        ax = axes[row_avp, 0]
+        ax.imshow(img_np)
+        ax.set_ylabel(f"G={G} AVP")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
         for t, scene in enumerate(scenes):
-            ax = axes[row_idx, t + 1]
+            ax = axes[row_avp, t + 1]
             rgb = pca_rgb(pca, scene, G, G)
             ax.imshow(rgb)
-            vp_name = viewpoints[t].name
-            ax.set_title(f"t={t} ({vp_name})" if row_idx == 0 else "")
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        # Teacher 16×16→G row (static)
+        row_teacher = 1 + g_idx * 2 + 1
+        ax = axes[row_teacher, 0]
+        ax.imshow(img_np)
+        ax.set_ylabel(f"G={G} T16↑")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        for t in range(n_viewpoints):
+            ax = axes[row_teacher, t + 1]
+            ax.imshow(teacher_rgb)
             ax.set_xticks([])
             ax.set_yticks([])
 
