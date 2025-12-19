@@ -15,9 +15,9 @@ import tyro
 from PIL import Image
 from torchvision import transforms
 
-from avp_vit import AVPConfig, AVPViT
-from canvit.backbone.dinov3 import DINOv3Backbone
+from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.checkpoint import load as load_checkpoint
+from canvit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.train.data import imagenet_normalize
 from avp_vit.train.viewpoint import make_eval_viewpoints
 from avp_vit.train.viz import fit_pca, pca_rgb, imagenet_denormalize, timestep_colors
@@ -39,10 +39,10 @@ class Args:
 
 def load_model(
     ckpt_path: Path, backbone_weights: Path | None, device: torch.device
-) -> tuple[AVPViT, DINOv3Backbone]:
-    """Load AVP model and teacher backbone from checkpoint."""
+) -> tuple[ActiveCanViT, DINOv3Backbone]:
+    """Load model and teacher backbone from checkpoint."""
     ckpt = load_checkpoint(ckpt_path, device)
-    cfg = AVPConfig(**ckpt["avp_config"])
+    cfg = ActiveCanViTConfig(**ckpt["model_config"])
     backbone_slug = ckpt["backbone"]
     teacher_dim = ckpt["teacher_dim"]
 
@@ -58,9 +58,9 @@ def load_model(
     for p in backbone.parameters():
         p.requires_grad = False
 
-    avp = AVPViT(backbone, cfg, teacher_dim).to(device)
-    avp.load_state_dict(ckpt["state_dict"])
-    avp.eval()
+    model = ActiveCanViT(backbone, cfg, teacher_dim).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
 
     # Load TEACHER backbone separately - must use same weights as training!
     # The teacher during training uses explicit checkpoint path, not default hub weights
@@ -76,8 +76,8 @@ def load_model(
         p.requires_grad = False
 
     log.info(f"Model loaded: {backbone_slug}, teacher_dim={teacher_dim}")
-    log.info(f"  glimpse_grid_size={cfg.glimpse_grid_size}, registers={cfg.n_scene_registers}")
-    return avp, teacher
+    log.info(f"  glimpse_grid_size={cfg.glimpse_grid_size}, registers={cfg.canvit.n_canvas_registers}")
+    return model, teacher
 
 
 def load_image(path: Path, size: int, device: torch.device) -> torch.Tensor:
@@ -100,8 +100,8 @@ def main(args: Args) -> None:
     device = torch.device(args.device)
     log.info(f"Device: {device}")
 
-    avp, teacher = load_model(args.checkpoint, args.backbone_weights, device)
-    patch_size = teacher.patch_size
+    model, teacher = load_model(args.checkpoint, args.backbone_weights, device)
+    patch_size = teacher.patch_size_px
 
     max_grid = max(args.grid_sizes)
     img_size = max_grid * patch_size
@@ -141,9 +141,9 @@ def main(args: Args) -> None:
             teacher_upsampled[G] = teacher_at_G[0].permute(1, 2, 0).cpu().numpy().reshape(-1, teacher_dim)
             log.info(f"G={G}: teacher 16×16 → upsample to {G}×{G}")
 
-            # AVP at this grid size
-            hidden = avp.init_hidden(1, G)
-            outputs, _ = avp.forward_trajectory_full(image, viewpoints, hidden)
+            # Model at this grid size
+            canvas = model.init_canvas(1, G)
+            outputs, _ = model.forward_trajectory_full(image, viewpoints, canvas)
 
             # AVP scene at G×G
             scenes_list = []
