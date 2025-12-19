@@ -24,7 +24,7 @@ class CrossAttentionConfig:
     pre_proj_k_ln: bool = True
     pre_proj_v_ln: bool = True
     post_proj_qk_ln: bool = False
-    use_ewa_transforms: bool = True
+    use_ewa_transforms: bool = False
 
 
 def _ln_or_identity(dim: int, normalize: bool) -> nn.Module:
