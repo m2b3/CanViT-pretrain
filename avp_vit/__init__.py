@@ -1,4 +1,14 @@
-from .attention import CrossAttentionConfig
-from .model import AVPConfig, AVPViT, StepOutput
+from canvit import CanViT, CanViTConfig
+from canvit.attention import CrossAttentionConfig
 
-__all__ = ["CrossAttentionConfig", "AVPConfig", "AVPViT", "StepOutput"]
+from .active import ActiveCanViT, ActiveCanViTConfig, LossOutputs, StepOutput
+
+__all__ = [
+    "CanViT",
+    "CanViTConfig",
+    "CrossAttentionConfig",
+    "ActiveCanViT",
+    "ActiveCanViTConfig",
+    "LossOutputs",
+    "StepOutput",
+]

@@ -58,8 +58,9 @@ def test_rope_write_cross_attention():
 def test_scaled_residual_attention():
     from canvit.attention import ScaledResidualAttention, RoPEReadCrossAttention, CrossAttentionConfig
     from canvit.rope import compute_rope, make_rope_periods
+    torch.manual_seed(42)
     attn = RoPEReadCrossAttention(64, num_heads=8, cfg=CrossAttentionConfig())
-    scaled = ScaledResidualAttention(attn, scale_init=1e-3)
+    scaled = ScaledResidualAttention(attn, scale_init=1e-6)
     x = torch.randn(2, 16, 64)
     kv = torch.randn(2, 32, 64)
     periods = make_rope_periods(8, torch.float32)
@@ -67,5 +68,4 @@ def test_scaled_residual_attention():
     kv_rope = compute_rope(torch.randn(2, 32, 2), periods)
     out = scaled(x, kv, x_rope, kv_rope)
     assert out.shape == x.shape
-    # Residual: output should be close to input when scale is small
-    assert (out - x).abs().mean() < 0.1
+    assert torch.allclose(out, x, atol=1e-4)
