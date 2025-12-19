@@ -81,12 +81,10 @@ class CanvasCrossAttention(nn.Module):
         if isinstance(module, nn.Linear):
             return 2 * n_tokens * module.in_features * module.out_features
         if isinstance(module, nn.Sequential):
-            return sum(
-                2 * n_tokens * m.in_features * m.out_features
-                for m in module
-                if isinstance(m, nn.Linear)
-            )
-        return 0
+            return sum(self._proj_flops(m, n_tokens) for m in module)
+        if isinstance(module, (nn.Identity, nn.LayerNorm, ElementwiseAffine)):
+            return 0
+        raise TypeError(f"Unexpected module type for FLOPs: {type(module)}")
 
     def flops(self, n_q: int, n_kv: int) -> int:
         """FLOPs for one forward pass.

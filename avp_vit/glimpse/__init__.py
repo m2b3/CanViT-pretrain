@@ -1,6 +1,6 @@
-"""Glimpse extraction and tokenization for AVP.
+"""Glimpse extraction and tokenization.
 
-Coordinate convention (shared with avp_vit.rope):
+Coordinate convention (shared with canvit.rope):
 - Coordinates are in [-1, 1]^2 (DINOv3/PyTorch convention)
 - (0, 0) is image center, (-1, -1) is top-left, (1, 1) is bottom-right
 - centers specify where the glimpse is centered in scene space
