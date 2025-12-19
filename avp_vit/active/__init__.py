@@ -86,6 +86,13 @@ class ActiveCanViT(nn.Module):
             else None
         )
 
+        # Scale down output projection weights (no grad, simpler than scaling in CanViT)
+        scale = 1.0 / math.sqrt(dim)
+        with torch.no_grad():
+            self.scene_proj[1].weight.mul_(scale)
+            if self.cls_proj is not None:
+                self.cls_proj[1].weight.mul_(scale)
+
     @property
     def backbone(self) -> ViTBackbone:
         return self.canvit.backbone
