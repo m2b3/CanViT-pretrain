@@ -23,14 +23,19 @@ class TeacherFLOPs(NamedTuple):
 
 
 class AVPStepFLOPs(NamedTuple):
-    """FLOPs for one AVP step, computed via model introspection."""
+    """FLOPs for one AVP step, computed via model introspection.
+
+    Training includes scene_proj (projects to teacher_dim for loss).
+    Inference excludes scene_proj (hidden state used directly).
+    """
 
     glimpse_embed: int
     read_attn: int
     backbone: int
     write_attn: int
-    scene_proj: int
-    total: int
+    scene_proj: int  # Only needed for training (loss computation)
+    total_train: int
+    total_infer: int
     # Token counts for reference
     n_local: int
     n_scene: int
@@ -67,10 +72,15 @@ def avp_step_flops(model: AVPViT, scene_grid_size: int) -> AVPStepFLOPs:
     # scene_proj = LayerNorm + Linear(D -> teacher_dim)
     # LayerNorm: ~4*D per token, Linear: 2*D*teacher_dim per token
     # Linear dominates, so we approximate as just the Linear cost
+    # Only needed for training (loss computation against teacher)
     scene_proj = 2 * spatial_patches * D * model.teacher_dim
 
-    total = glimpse_embed + read_attn + blocks + write_attn + scene_proj
-    return AVPStepFLOPs(glimpse_embed, read_attn, blocks, write_attn, scene_proj, total, n_local, n_scene, n_adapters)
+    total_infer = glimpse_embed + read_attn + blocks + write_attn
+    total_train = total_infer + scene_proj
+    return AVPStepFLOPs(
+        glimpse_embed, read_attn, blocks, write_attn, scene_proj,
+        total_train, total_infer, n_local, n_scene, n_adapters,
+    )
 
 
 def hypothetical_full_linear_flops(
@@ -129,8 +139,11 @@ def print_detailed_breakdown(avp: AVPViT, scene_grid: int) -> None:
     t_scene = teacher_flops(backbone, scene_grid**2)
     t_glimpse = teacher_flops(backbone, cfg.glimpse_grid_size**2)
 
-    def pct(x: int) -> str:
-        return f"({100 * x / a.total:4.1f}%)"
+    def pct_train(x: int) -> str:
+        return f"({100 * x / a.total_train:4.1f}%)"
+
+    def pct_infer(x: int) -> str:
+        return f"({100 * x / a.total_infer:4.1f}%)"
 
     print("=" * 80)
     print(f"DETAILED: {scene_grid}x{scene_grid} scene ({scene_px}x{scene_px} px), gating={cfg.gating}")
@@ -139,24 +152,27 @@ def print_detailed_breakdown(avp: AVPViT, scene_grid: int) -> None:
     print(f"Adapters: {a.n_adapters} (backbone has {n_blocks} blocks, stride={cfg.adapter_stride})")
     print()
 
-    print(f"  Glimpse embed: {fmt(a.glimpse_embed):>10}  {pct(a.glimpse_embed)}")
-    print(f"  Read attn:     {fmt(a.read_attn):>10}  {pct(a.read_attn)}  [{a.n_adapters} adapters, local queries scene]")
-    print(f"  Backbone:      {fmt(a.backbone):>10}  {pct(a.backbone)}  [{n_blocks} blocks on {a.n_local} tokens]")
-    print(f"  Write attn:    {fmt(a.write_attn):>10}  {pct(a.write_attn)}  [{a.n_adapters} adapters, scene queries local]")
-    print(f"  Scene proj:    {fmt(a.scene_proj):>10}  {pct(a.scene_proj)}  [LayerNorm + Linear on {n_spatial} tokens]")
+    print("--- INFERENCE (no scene_proj) ---")
+    print(f"  Glimpse embed: {fmt(a.glimpse_embed):>10}  {pct_infer(a.glimpse_embed)}")
+    print(f"  Read attn:     {fmt(a.read_attn):>10}  {pct_infer(a.read_attn)}  [{a.n_adapters} adapters]")
+    print(f"  Backbone:      {fmt(a.backbone):>10}  {pct_infer(a.backbone)}  [{n_blocks} blocks on {a.n_local} tokens]")
+    print(f"  Write attn:    {fmt(a.write_attn):>10}  {pct_infer(a.write_attn)}  [{a.n_adapters} adapters]")
+    print(f"  TOTAL:         {fmt(a.total_infer):>10}")
     print()
-    print(f"  TOTAL:         {fmt(a.total):>10}")
+    print("--- TRAINING (+scene_proj) ---")
+    print(f"  Scene proj:    {fmt(a.scene_proj):>10}  {pct_train(a.scene_proj)}  [Linear on {n_spatial} tokens]")
+    print(f"  TOTAL:         {fmt(a.total_train):>10}")
     print()
 
-    # EWA savings: compare actual AVP vs hypothetical full-Linear
+    # EWA savings: compare actual AVP vs hypothetical full-Linear (inference mode)
     convex = cfg.gating == "full"
     full_linear_attn = hypothetical_full_linear_flops(a.n_local, a.n_scene, D, a.n_adapters, convex)
-    full_linear_total = a.glimpse_embed + full_linear_attn + a.backbone + a.scene_proj
+    full_linear_infer = a.glimpse_embed + full_linear_attn + a.backbone
     actual_attn = a.read_attn + a.write_attn
     attn_savings = full_linear_attn - actual_attn
 
     print("=" * 80)
-    print(f"EWA SAVINGS ({scene_grid}x{scene_grid} scene)")
+    print(f"EWA SAVINGS ({scene_grid}x{scene_grid} scene, inference)")
     print("=" * 80)
     print("Cross-attention uses EWA (ElementwiseAffine) instead of Linear for:")
     print("  Read:  K, V (on scene tokens)")
@@ -166,9 +182,9 @@ def print_detailed_breakdown(avp: AVPViT, scene_grid: int) -> None:
     print(f"  Hypothetical full-Linear:{fmt(full_linear_attn):>10}")
     print(f"  Savings:                 {fmt(attn_savings):>10}  ({100 * attn_savings / full_linear_attn:.0f}% of full-Linear attn)")
     print()
-    print(f"  Actual total:            {fmt(a.total):>10}")
-    print(f"  Hypothetical total:      {fmt(full_linear_total):>10}")
-    print(f"  Savings:                 {fmt(full_linear_total - a.total):>10}  ({100 * (full_linear_total - a.total) / full_linear_total:.0f}% of full-Linear total)")
+    print(f"  Actual infer total:      {fmt(a.total_infer):>10}")
+    print(f"  Hypothetical infer total:{fmt(full_linear_infer):>10}")
+    print(f"  Savings:                 {fmt(full_linear_infer - a.total_infer):>10}  ({100 * (full_linear_infer - a.total_infer) / full_linear_infer:.0f}% of full-Linear)")
     print()
 
     print("=" * 80)
@@ -176,10 +192,11 @@ def print_detailed_breakdown(avp: AVPViT, scene_grid: int) -> None:
     print("=" * 80)
     print(f"  Teacher @ {scene_grid}x{scene_grid} ({scene_px}px):   {fmt(t_scene.total):>10}")
     print(f"  Teacher @ {cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({glimpse_px}px):    {fmt(t_glimpse.total):>10}")
-    print(f"  AVP step:                  {fmt(a.total):>10}")
+    print(f"  AVP infer:                 {fmt(a.total_infer):>10}")
+    print(f"  AVP train:                 {fmt(a.total_train):>10}")
     print()
-    print(f"  AVP steps per Teacher({scene_grid}x{scene_grid}):    {t_scene.total / a.total:6.1f}")
-    print(f"  Teacher({cfg.glimpse_grid_size}x{cfg.glimpse_grid_size}) per AVP step:       {a.total / t_glimpse.total:6.2f}")
+    print(f"  AVP infer steps per Teacher({scene_grid}x{scene_grid}): {t_scene.total / a.total_infer:6.1f}")
+    print(f"  Teacher({cfg.glimpse_grid_size}x{cfg.glimpse_grid_size}) per AVP infer:        {a.total_infer / t_glimpse.total:6.2f}")
 
 
 def main() -> None:
@@ -201,9 +218,8 @@ def main() -> None:
     print()
 
     # Table header
-    print(f"{'Scene':<10} {'Teacher':<12} {'AVP':<12} {'AVP cvx':<12}")
-    print(f"{'grid':<10} {'(scene)':<12} {'(default)':<12} {'(full)':<12}")
-    print("-" * 58)
+    print(f"{'Scene':<8} {'Teacher':<10} {'AVP infer':<10} {'AVP train':<10} {'cvx infer':<10} {'cvx train':<10}")
+    print("-" * 68)
 
     for scene_grid in SCENE_GRIDS:
         t_scene = teacher_flops(backbone, scene_grid**2)
@@ -216,17 +232,20 @@ def main() -> None:
         a_cvx = avp_step_flops(avp_cvx, scene_grid)
 
         print(
-            f"{scene_grid}x{scene_grid:<7} "
-            f"{fmt(t_scene.total):<12} "
-            f"{fmt(a_default.total):<12} "
-            f"{fmt(a_cvx.total):<12}"
+            f"{scene_grid}x{scene_grid:<5} "
+            f"{fmt(t_scene.total):<10} "
+            f"{fmt(a_default.total_infer):<10} "
+            f"{fmt(a_default.total_train):<10} "
+            f"{fmt(a_cvx.total_infer):<10} "
+            f"{fmt(a_cvx.total_train):<10}"
         )
 
     print()
     print("Legend:")
-    print("  Teacher (scene) = Full ViT at scene resolution")
-    print(f"  AVP (default)   = gating={cfg.gating}, adapter_stride={cfg.adapter_stride}")
-    print("  AVP cvx (full)  = ConvexGating (2x attention per adapter)")
+    print("  Teacher        = Full ViT at scene resolution")
+    print(f"  AVP infer      = gating={cfg.gating}, no scene_proj")
+    print(f"  AVP train      = gating={cfg.gating}, +scene_proj for loss")
+    print("  cvx infer/train = ConvexGating (2x attention per adapter)")
     print()
 
     # Detailed breakdown for largest scene using default config
