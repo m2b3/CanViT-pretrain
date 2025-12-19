@@ -51,7 +51,7 @@ class CanViT(nn.Module):
     # Canvas init
     cls_init: nn.Parameter
     spatial_init: nn.Parameter
-    registers: nn.Parameter | None
+    registers: nn.Parameter
     # Canvas normalization (always enabled)
     cls_ln: nn.LayerNorm
     reg_ln: nn.LayerNorm
@@ -87,11 +87,7 @@ class CanViT(nn.Module):
         # Canvas init params
         self.cls_init = nn.Parameter(torch.randn(1, 1, dim) * scale)
         self.spatial_init = nn.Parameter(torch.randn(1, 1, dim) * scale)
-        self.registers = (
-            nn.Parameter(torch.randn(1, cfg.n_registers, dim) * scale)
-            if cfg.n_registers > 0
-            else None
-        )
+        self.registers = nn.Parameter(torch.randn(1, cfg.n_registers, dim) * scale)
 
         # Canvas normalization (always enabled)
         self.cls_ln = nn.LayerNorm(dim)
@@ -119,14 +115,9 @@ class CanViT(nn.Module):
         B = batch_size
         n_spatial = canvas_grid_size ** 2
         cls = self.cls_init.expand(B, -1, -1)
+        regs = self.registers.expand(B, -1, -1)
         spatial = self.spatial_init.expand(B, n_spatial, -1)
-
-        if self.registers is not None:
-            regs = self.registers.expand(B, -1, -1)
-            out = torch.cat([cls, regs, spatial], dim=1)
-        else:
-            out = torch.cat([cls, spatial], dim=1)
-
+        out = torch.cat([cls, regs, spatial], dim=1)
         assert out.shape == (B, self.n_prefix + n_spatial, self.backbone.embed_dim)
         return out
 
@@ -159,12 +150,12 @@ class CanViT(nn.Module):
         # Interleaved read-backbone-write
         stride = self.cfg.adapter_stride
         for i in range(self.backbone.n_blocks):
-            if i >= stride and i % stride == 0:
+            should_adapt = i >= stride and i % stride == 0
+            if should_adapt:
                 a = i // stride - 1
                 local = self.read_attn[a](local, canvas, local_rope, canvas_rope)
             local = self.backbone.forward_block(i, local, local_rope)
-            if i >= stride and i % stride == 0:
-                a = i // stride - 1
+            if should_adapt:
                 canvas = self.write_attn[a](canvas, local, canvas_rope, local_rope)
 
         return local, canvas
