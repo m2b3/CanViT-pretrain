@@ -49,7 +49,7 @@ def grid_offsets(grid_h: int, grid_w: int, device: torch.device, dtype: torch.dt
 def make_grid_positions(
     grid_h: int, grid_w: int, device: torch.device, dtype: torch.dtype
 ) -> Tensor:
-    """Fixed grid positions in [-1, 1]^2 (DINOv3 convention)."""
+    """Fixed grid positions in [-1, 1]^2."""
     out = grid_offsets(grid_h, grid_w, device, dtype)
     assert out.shape == (grid_h * grid_w, 2)
     return out
