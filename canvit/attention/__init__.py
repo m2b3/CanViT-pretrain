@@ -5,7 +5,6 @@ from typing import final
 
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from ytch.attention.mh import from_multihead, to_multihead
 from ytch.nn.elementwise_affine import ElementwiseAffine
 from ytch.nn.layer_scale import LayerScale
@@ -76,8 +75,7 @@ class CanvasCrossAttention(nn.Module):
         q = rope_apply_with_prefix(q, q_rope)
         k = rope_apply_with_prefix(k, kv_rope)
 
-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-            out = F.scaled_dot_product_attention(q, k, v)
+        out = F.scaled_dot_product_attention(q, k, v)
         return self.out_transform(from_multihead(out))
 
     def _proj_flops(self, module: nn.Module, n_tokens: int) -> int:

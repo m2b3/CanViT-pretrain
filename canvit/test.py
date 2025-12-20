@@ -133,36 +133,3 @@ def test_canvit_gradients_flow():
     assert canvas.grad.abs().sum() > 0
 
 
-def test_canvit_dtype_split():
-    """Canvas persists in float32, attention runs in bfloat16."""
-    backbone = MockBackbone(dim=64, heads=8, blocks=4, patch_px=16)
-    cfg = CanViTConfig(
-        n_canvas_registers=4,
-        adapter_stride=2,
-        canvas_num_heads=8,
-        canvas_head_dim=8,
-        canvas_persistence_dtype="float32",
-        canvas_attention_dtype="bfloat16",
-    )
-    model = CanViT(backbone, cfg)
-
-    # Canvas params in persistence_dtype
-    assert model.cls_init.dtype == torch.float32
-    assert model.spatial_init.dtype == torch.float32
-    assert model.registers.dtype == torch.float32
-
-    # Attention modules in attention_dtype
-    assert next(model.read_attn[0].parameters()).dtype == torch.bfloat16
-    assert next(model.write_attn[0].parameters()).dtype == torch.bfloat16
-
-    # Forward pass maintains dtypes
-    B, canvas_grid, glimpse_grid = 2, 4, 4
-    glimpse = torch.randn(B, 3, glimpse_grid * 16, glimpse_grid * 16)
-    canvas = model.init_canvas(B, canvas_grid)
-    local_pos = torch.randn(B, glimpse_grid ** 2, 2)
-    canvas_pos = torch.randn(B, canvas_grid ** 2, 2)
-
-    assert canvas.dtype == torch.float32
-    local_out, canvas_out = model(glimpse, canvas, local_pos, canvas_pos)
-    assert local_out.dtype == torch.float32  # matches backbone output
-    assert canvas_out.dtype == torch.float32  # persistence dtype

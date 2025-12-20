@@ -10,6 +10,11 @@ import optuna
 import torch
 from torch import Tensor, nn
 from tqdm import tqdm
+
+# Force FlashAttention for SDPA - fail loud if unavailable
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(False)
 from ymc.lr import get_linear_scaled_lr
 from ytch.model import count_parameters
 
