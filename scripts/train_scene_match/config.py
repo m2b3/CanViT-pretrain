@@ -50,7 +50,7 @@ class Config:
     num_workers: int = 8
     crop_scale_min: float = 0.8
     image_resolution: int = 512  # Source image size (independent of grid size)
-    loss: LossType = "cos"
+    loss: LossType = "mse"
     # Logging
     log_every: int = 20
     val_every: int = 250
