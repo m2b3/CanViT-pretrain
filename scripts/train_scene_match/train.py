@@ -296,14 +296,25 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             ema_scene_t, ema_cls_t, ema_loss_t = scene_t, cls_t, total_t
 
         if step % cfg.log_every == 0:
-            ema_loss = ema_loss_t.item()
-            ema_scene = ema_scene_t.item()
-            ema_cls = ema_cls_t.item()
+            # Raw (instantaneous) values
+            loss_raw = total_t.item()
+            scene_raw = scene_t.item()
+            cls_raw = cls_t.item()
+            # EMA-smoothed values
+            loss_ema = ema_loss_t.item()
+            scene_ema = ema_scene_t.item()
+            cls_ema = ema_cls_t.item()
+
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
             metrics = {
-                f"grid{G}/train/loss": ema_loss,
-                "train/loss": ema_loss,
+                # Raw losses
+                f"grid{G}/train/loss": loss_raw,
+                "train/loss": loss_raw,
+                # EMA losses
+                f"grid{G}/train/loss_ema": loss_ema,
+                "train/loss_ema": loss_ema,
+                # Other
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
                 "train/grid_size": G,
@@ -315,13 +326,17 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 assert isinstance(cls_linear, torch.nn.Linear)
                 metrics["train/cls_proj_weight_norm"] = cls_linear.weight.norm().item()
             if losses.scene is not None:
-                metrics[f"grid{G}/train/scene_loss"] = ema_scene
-                metrics["train/scene_loss"] = ema_scene
+                metrics[f"grid{G}/train/scene_loss"] = scene_raw
+                metrics["train/scene_loss"] = scene_raw
+                metrics[f"grid{G}/train/scene_loss_ema"] = scene_ema
+                metrics["train/scene_loss_ema"] = scene_ema
             if losses.cls is not None:
-                metrics[f"grid{G}/train/cls_loss"] = ema_cls
-                metrics["train/cls_loss"] = ema_cls
+                metrics[f"grid{G}/train/cls_loss"] = cls_raw
+                metrics["train/cls_loss"] = cls_raw
+                metrics[f"grid{G}/train/cls_loss_ema"] = cls_ema
+                metrics["train/cls_loss_ema"] = cls_ema
             exp.log_metrics(metrics, step=step)
-            pbar.set_postfix_str(f"G={G} loss={ema_loss:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
+            pbar.set_postfix_str(f"G={G} loss={loss_ema:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
         # Validation - always log gradient norms and report to Optuna at val_every
         if step % cfg.val_every == 0:
