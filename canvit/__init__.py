@@ -33,19 +33,17 @@ class RoPE(NamedTuple):
 class CanViTConfig:
     """CanViT configuration.
 
-    canvas_dim_mult: Canvas embedding dimension as multiple of backbone embed_dim.
-        canvas_dim = embed_dim * canvas_dim_mult.
     canvas_num_heads: Number of attention heads for cross-attention.
-        Independent of backbone's num_heads. canvas_dim must be divisible by this.
+    canvas_head_dim: Dimension per attention head. Common values: 64, 96, 128.
+        canvas_dim = canvas_num_heads * canvas_head_dim.
+        Unusual head_dim values can cause kernel failures (e.g., cutlassF).
     """
 
     n_canvas_registers: int = 32
     adapter_stride: int = 1
     layer_scale_init: float = 1e-3
-    canvas_dim_mult: int = 1
-    # Bringing this to 1 can cause "cutlassF: no kernel found to launch!"
-    # It's a rather unusual setting.
     canvas_num_heads: int = 2
+    canvas_head_dim: int = 256  # canvas_dim = 2 * 256 = 512
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
 
@@ -61,7 +59,7 @@ class CanViT(nn.Module):
       - READ: Q, O are Linear on local; K, V are EWA on canvas
       - WRITE: Q, O are EWA on canvas; K, V are Linear on local
 
-    Canvas tokens live in canvas_dim = local_dim * canvas_dim_mult.
+    Canvas tokens live in canvas_dim = canvas_num_heads * canvas_head_dim.
     Attention happens in canvas_dim space; local tokens projected up/down.
     """
 
@@ -81,7 +79,7 @@ class CanViT(nn.Module):
     spatial_ln: nn.LayerNorm
     # RoPE periods for cross-attention
     # Backbone self-attn uses backbone.rope_periods (backbone_head_dim = local_dim / backbone.num_heads)
-    # Cross-attn uses canvas_rope_periods (canvas_head_dim = canvas_dim / canvas_num_heads)
+    # Cross-attn uses canvas_rope_periods (canvas_head_dim from config)
     canvas_rope_periods: Tensor
 
     def __init__(self, backbone: ViTBackbone, cfg: CanViTConfig) -> None:
@@ -90,19 +88,12 @@ class CanViT(nn.Module):
         self.cfg = cfg
 
         local_dim = backbone.embed_dim
-        canvas_dim = local_dim * cfg.canvas_dim_mult
         canvas_num_heads = cfg.canvas_num_heads
-        assert canvas_dim % canvas_num_heads == 0, (
-            f"canvas_dim={canvas_dim} not divisible by canvas_num_heads={canvas_num_heads}"
-        )
+        canvas_head_dim = cfg.canvas_head_dim
+        canvas_dim = canvas_num_heads * canvas_head_dim
 
         self.local_dim = local_dim
         self.canvas_dim = canvas_dim
-
-        # head_dim distinction:
-        # - backbone_head_dim = local_dim // backbone.num_heads (for backbone self-attention)
-        # - canvas_head_dim = canvas_dim // canvas_num_heads (for cross-attention)
-        canvas_head_dim = canvas_dim // canvas_num_heads
 
         n_blocks = backbone.n_blocks
         n_adapters = (n_blocks - 1) // cfg.adapter_stride

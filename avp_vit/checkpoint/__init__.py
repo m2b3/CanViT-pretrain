@@ -22,6 +22,13 @@ _CROSS_ATTN_RENAMES = {
 }
 _CROSS_ATTN_FIELDS = {f.name for f in fields(CrossAttentionConfig)}
 
+# Backbone embed_dim for canvas_dim_mult migration
+_BACKBONE_EMBED_DIM = {
+    "dinov3_vits16": 384,
+    "dinov3_vitb16": 768,
+    "dinov3_vitl16": 1024,
+}
+
 log = logging.getLogger(__name__)
 
 
@@ -129,6 +136,14 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
             migrated = {_CROSS_ATTN_RENAMES.get(k, k): v for k, v in old_dict.items()}
             filtered = {k: v for k, v in migrated.items() if k in _CROSS_ATTN_FIELDS}
             canvit_config[key] = CrossAttentionConfig(**filtered)
+    # Migrate canvas_dim_mult → canvas_head_dim
+    if "canvas_dim_mult" in canvit_config:
+        embed_dim = _BACKBONE_EMBED_DIM.get(raw["backbone"])
+        assert embed_dim is not None, f"Unknown backbone for migration: {raw['backbone']}"
+        canvas_dim = embed_dim * canvit_config.pop("canvas_dim_mult")
+        canvas_num_heads = canvit_config.get("canvas_num_heads", 2)
+        canvit_config["canvas_head_dim"] = canvas_dim // canvas_num_heads
+        log.info(f"  Migrated canvas_dim_mult → canvas_head_dim={canvit_config['canvas_head_dim']}")
     model_config["canvit"] = CanViTConfig(**canvit_config)
 
     data: CheckpointData = {

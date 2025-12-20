@@ -116,8 +116,7 @@ def main() -> None:
 
     # ViT-S/16 parameters
     local_dim = 384
-    canvas_dim_mult = 2
-    canvas_dim = local_dim * canvas_dim_mult
+    canvas_dim = 768  # 2x local_dim
     n_registers = 32
     n_prefix = 1  # CLS
 
@@ -202,14 +201,14 @@ def verify_formulas() -> None:
         return
 
     backbone = DINOv3Backbone(dinov3_vits16(weights=str(ckpt), pretrained=True))
-    # Use 24 heads to divide canvas_dim=768 evenly (768/24=32 head_dim)
-    cfg = CanViTConfig(canvas_num_heads=24)
+    cfg = CanViTConfig()
     model = CanViT(backbone, cfg)
 
     local_dim = model.local_dim
     canvas_dim = model.canvas_dim
-    n_local = 65  # 8×8 + 1 CLS
-    n_canvas = 288  # 16×16 + 32 registers
+    glimpse_grid, canvas_grid = 8, 16
+    n_local = backbone.n_prefix_tokens + glimpse_grid * glimpse_grid
+    n_canvas = model.n_prefix + canvas_grid * canvas_grid
 
     # Get actual FLOPs from model
     read_attn: ScaledResidualAttention = model.read_attn[0]  # type: ignore[assignment]

@@ -78,7 +78,7 @@ def test_scaled_residual_attention():
 
 
 def test_asymmetric_dimensions():
-    """Test cross-attention with canvas_dim > local_dim (canvas_dim_mult > 1)."""
+    """Test cross-attention with canvas_dim > local_dim."""
     from canvit.attention import ReadCrossAttention, WriteCrossAttention, CrossAttentionConfig
     from canvit.rope import compute_rope, make_rope_periods
     local_dim, canvas_dim, num_heads = 64, 128, 8  # canvas is 2x local
