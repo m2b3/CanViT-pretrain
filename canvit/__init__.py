@@ -40,10 +40,12 @@ class CanViTConfig:
     """
 
     n_canvas_registers: int = 32
-    adapter_stride: int = 2
+    adapter_stride: int = 1
     layer_scale_init: float = 1e-3
-    canvas_dim_mult: int = 2
-    canvas_num_heads: int = 24
+    canvas_dim_mult: int = 1
+    # Bringing this to 1 can cause "cutlassF: no kernel found to launch!"
+    # It's a rather unusual setting.
+    canvas_num_heads: int = 2
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
 
