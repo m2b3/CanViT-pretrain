@@ -10,11 +10,10 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
+from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
 from canvit import CanViT, CanViTConfig
 from canvit.backbone import ViTBackbone
 from canvit.rope import glimpse_positions, make_grid_positions
-
-from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
 
 T = TypeVar("T")
 
@@ -40,7 +39,7 @@ class LossOutputs(NamedTuple):
 class ActiveCanViTConfig:
     """Config for ActiveCanViT (active vision wrapper)."""
 
-    glimpse_grid_size: int = 2  # 2x2 patches = 32px for patch_size=16
+    glimpse_grid_size: int = 3  # 2x2 patches = 32px for patch_size=16
     gradient_checkpointing: bool = False
     use_scene_loss: bool = True
     use_cls_loss: bool = True
@@ -117,7 +116,7 @@ class ActiveCanViT(nn.Module):
         return canvas[:, 0]
 
     def get_spatial(self, canvas: Tensor) -> Tensor:
-        return canvas[:, self.n_prefix:]
+        return canvas[:, self.n_prefix :]
 
     def compute_scene(self, canvas: Tensor) -> Tensor:
         return self.scene_proj(self.get_spatial(canvas))
@@ -137,9 +136,16 @@ class ActiveCanViT(nn.Module):
         G = self.cfg.glimpse_grid_size
         canvas_grid_size = self._infer_canvas_grid_size(canvas)
 
-        local_pos = glimpse_positions(centers, scales, G, G, dtype=self.backbone.rope_dtype)
+        local_pos = glimpse_positions(
+            centers, scales, G, G, dtype=self.backbone.rope_dtype
+        )
         canvas_pos = (
-            make_grid_positions(canvas_grid_size, canvas_grid_size, glimpse.device, self.backbone.rope_dtype)
+            make_grid_positions(
+                canvas_grid_size,
+                canvas_grid_size,
+                glimpse.device,
+                self.backbone.rope_dtype,
+            )
             .unsqueeze(0)
             .expand(B, -1, -1)
         )
@@ -168,7 +174,9 @@ class ActiveCanViT(nn.Module):
                     use_reentrant=False,
                 ),
             )
-        return self._process_glimpse(glimpse, viewpoint.centers, viewpoint.scales, canvas)
+        return self._process_glimpse(
+            glimpse, viewpoint.centers, viewpoint.scales, canvas
+        )
 
     def forward_reduce(
         self,
@@ -215,7 +223,9 @@ class ActiveCanViT(nn.Module):
                 scene_loss_acc = scene_loss_acc + loss_fn(out.scene, target)
             if self.cls_proj is not None:
                 assert cls_target is not None and cls_loss_acc is not None
-                cls_loss_acc = cls_loss_acc + loss_fn(self.compute_cls(canvas), cls_target)
+                cls_loss_acc = cls_loss_acc + loss_fn(
+                    self.compute_cls(canvas), cls_target
+                )
 
         return LossOutputs(
             scene=scene_loss_acc / (n + 1) if scene_loss_acc is not None else None,
@@ -228,8 +238,11 @@ class ActiveCanViT(nn.Module):
         viewpoints: list[Viewpoint],
         canvas: Tensor,
     ) -> tuple[list[StepOutput], Tensor]:
-        def reducer(acc: list[StepOutput], out: StepOutput, _vp: Viewpoint) -> list[StepOutput]:
+        def reducer(
+            acc: list[StepOutput], out: StepOutput, _vp: Viewpoint
+        ) -> list[StepOutput]:
             return [*acc, out]
+
         return self.forward_reduce(images, viewpoints, canvas, reducer, init=[])
 
     def forward(
@@ -240,5 +253,6 @@ class ActiveCanViT(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         def reducer(acc: Tensor, out: StepOutput, _vp: Viewpoint) -> Tensor:
             return out.scene
+
         dummy = torch.empty(0, device=images.device)
         return self.forward_reduce(images, viewpoints, canvas, reducer, init=dummy)
