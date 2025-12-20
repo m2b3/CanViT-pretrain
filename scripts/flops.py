@@ -51,7 +51,7 @@ def step_flops(model: ActiveCanViT, canvas_grid_size: int) -> StepFLOPs:
     canvit = model.canvit
     cfg = model.cfg
 
-    D = backbone.embed_dim
+    canvas_dim = canvit.canvas_dim
     n_blocks = backbone.n_blocks
     glimpse_patches = cfg.glimpse_grid_size ** 2
     spatial_patches = canvas_grid_size ** 2
@@ -65,7 +65,8 @@ def step_flops(model: ActiveCanViT, canvas_grid_size: int) -> StepFLOPs:
     blocks = n_blocks * backbone.block_flops(n_local)
     write_attn = sum(cast(ScaledResidualAttention, canvit.write_attn[i]).flops(n_canvas, n_local) for i in range(n_adapters))
 
-    scene_proj = 2 * spatial_patches * D * model.teacher_dim
+    # scene_proj: LayerNorm + Linear(canvas_dim -> teacher_dim)
+    scene_proj = 2 * spatial_patches * canvas_dim * model.teacher_dim
 
     total_infer = glimpse_embed + read_attn + blocks + write_attn
     total_train = total_infer + scene_proj
@@ -78,21 +79,44 @@ def step_flops(model: ActiveCanViT, canvas_grid_size: int) -> StepFLOPs:
 def hypothetical_full_linear_flops(
     n_local: int,
     n_canvas: int,
-    dim: int,
+    local_dim: int,
+    canvas_dim: int,
     n_adapters: int,
 ) -> int:
-    """Hypothetical FLOPs if all cross-attention used full Linear projections (no EWA)."""
+    """Hypothetical FLOPs if all cross-attention used full Linear projections (no EWA).
 
-    def single_attn_flops(n_q: int, n_kv: int) -> int:
-        sdpa = 4 * n_q * n_kv * dim
-        q_proj = 2 * n_q * dim * dim
-        k_proj = 2 * n_kv * dim * dim
-        v_proj = 2 * n_kv * dim * dim
-        o_proj = 2 * n_q * dim * dim
+    Currently EWA is used for:
+      Read: K, V (canvas side)
+      Write: Q, O (canvas side)
+
+    Full linear would use Linear(canvas_dim, canvas_dim) instead of EWA for those.
+    """
+
+    def read_flops(n_q: int, n_kv: int) -> int:
+        # Read: local queries canvas. Attention in canvas_dim.
+        # Q: Linear(local_dim, canvas_dim), O: Linear(canvas_dim, local_dim)
+        # K, V: currently EWA, hypothetically Linear(canvas_dim, canvas_dim)
+        sdpa = 4 * n_q * n_kv * canvas_dim
+        q_proj = 2 * n_q * local_dim * canvas_dim
+        k_proj = 2 * n_kv * canvas_dim * canvas_dim  # hypothetical
+        v_proj = 2 * n_kv * canvas_dim * canvas_dim  # hypothetical
+        o_proj = 2 * n_q * canvas_dim * local_dim
         return sdpa + q_proj + k_proj + v_proj + o_proj
 
-    read_per_adapter = single_attn_flops(n_local, n_canvas)
-    write_per_adapter = single_attn_flops(n_canvas, n_local)
+    def write_flops(n_q: int, n_kv: int) -> int:
+        # Write: canvas queries local. Attention in canvas_dim.
+        # Q: currently EWA, hypothetically Linear(canvas_dim, canvas_dim)
+        # K, V: Linear(local_dim, canvas_dim)
+        # O: currently EWA, hypothetically Linear(canvas_dim, canvas_dim)
+        sdpa = 4 * n_q * n_kv * canvas_dim
+        q_proj = 2 * n_q * canvas_dim * canvas_dim  # hypothetical
+        k_proj = 2 * n_kv * local_dim * canvas_dim
+        v_proj = 2 * n_kv * local_dim * canvas_dim
+        o_proj = 2 * n_q * canvas_dim * canvas_dim  # hypothetical
+        return sdpa + q_proj + k_proj + v_proj + o_proj
+
+    read_per_adapter = read_flops(n_local, n_canvas)
+    write_per_adapter = write_flops(n_canvas, n_local)
     return n_adapters * (read_per_adapter + write_per_adapter)
 
 
@@ -109,10 +133,12 @@ def fmt(f: int | float) -> str:
 def print_detailed_breakdown(model: ActiveCanViT, canvas_grid: int) -> None:
     assert isinstance(model.backbone, DINOv3Backbone)
     backbone = model.backbone
+    canvit = model.canvit
     cfg = model.cfg
     canvit_cfg = cfg.canvit
 
-    D = backbone.embed_dim
+    local_dim = canvit.local_dim
+    canvas_dim = canvit.canvas_dim
     P = backbone.patch_size_px
     n_blocks = backbone.n_blocks
     canvas_px = canvas_grid * P
@@ -148,7 +174,7 @@ def print_detailed_breakdown(model: ActiveCanViT, canvas_grid: int) -> None:
     print(f"  TOTAL:         {fmt(s.total_train):>10}")
     print()
 
-    full_linear_attn = hypothetical_full_linear_flops(s.n_local, s.n_canvas, D, s.n_adapters)
+    full_linear_attn = hypothetical_full_linear_flops(s.n_local, s.n_canvas, local_dim, canvas_dim, s.n_adapters)
     full_linear_infer = s.glimpse_embed + full_linear_attn + s.backbone
     actual_attn = s.read_attn + s.write_attn
     attn_savings = full_linear_attn - actual_attn

@@ -25,26 +25,36 @@ class CrossAttentionConfig:
 class CanvasCrossAttention(nn.Module):
     """Canvas cross-attention with RoPE. Subclasses configure Q/K/V/O transforms."""
 
-    dim: int
+    canvas_dim: int
+    out_dim: int  # for LayerScale (local_dim for Read, canvas_dim for Write)
     num_heads: int
     q_transform: nn.Module
     k_transform: nn.Module
     v_transform: nn.Module
     out_transform: nn.Module
 
-    def __init__(self, dim: int, num_heads: int, cfg: CrossAttentionConfig) -> None:
+    def __init__(
+        self,
+        q_in_dim: int,
+        kv_in_dim: int,
+        canvas_dim: int,
+        out_dim: int,
+        num_heads: int,
+        cfg: CrossAttentionConfig,
+    ) -> None:
         super().__init__()
-        assert dim % num_heads == 0
-        self.dim = dim
+        assert canvas_dim % num_heads == 0
+        self.canvas_dim = canvas_dim
+        self.out_dim = out_dim
         self.num_heads = num_heads
-        head_dim = dim // num_heads
+        head_dim = canvas_dim // num_heads
 
         def ln_or_id(d: int, use: bool) -> nn.Module:
             return nn.LayerNorm(d, elementwise_affine=False) if use else nn.Identity()
 
-        self.pre_proj_q_ln = ln_or_id(dim, cfg.pre_proj_q_ln)
-        self.pre_proj_k_ln = ln_or_id(dim, cfg.pre_proj_k_ln)
-        self.pre_proj_v_ln = ln_or_id(dim, cfg.pre_proj_v_ln)
+        self.pre_proj_q_ln = ln_or_id(q_in_dim, cfg.pre_proj_q_ln)
+        self.pre_proj_k_ln = ln_or_id(kv_in_dim, cfg.pre_proj_k_ln)
+        self.pre_proj_v_ln = ln_or_id(kv_in_dim, cfg.pre_proj_v_ln)
         self.post_proj_q_ln = ln_or_id(head_dim, cfg.post_proj_qk_ln)
         self.post_proj_k_ln = ln_or_id(head_dim, cfg.post_proj_qk_ln)
 
@@ -83,7 +93,7 @@ class CanvasCrossAttention(nn.Module):
         Counts: SDPA matmuls (Q@K^T, softmax@V), Linear projections.
         Ignores (<<1% of total): LayerNorm (~5D/token), EWA (~2D/token), softmax (~3 n_q*n_kv).
         """
-        f = 4 * n_q * n_kv * self.dim  # Q@K^T + softmax@V
+        f = 4 * n_q * n_kv * self.canvas_dim  # Q@K^T + softmax@V
         f += self._proj_flops(self.q_transform, n_q)
         f += self._proj_flops(self.k_transform, n_kv)
         f += self._proj_flops(self.v_transform, n_kv)
@@ -93,26 +103,58 @@ class CanvasCrossAttention(nn.Module):
 
 @final
 class ReadCrossAttention(CanvasCrossAttention):
-    """Read: local queries canvas. Q/O Linear on local, K/V on canvas."""
+    """Read: local queries canvas. Q/O Linear on local, K/V EWA on canvas.
 
-    def __init__(self, dim: int, num_heads: int, cfg: CrossAttentionConfig) -> None:
-        super().__init__(dim, num_heads, cfg)
-        self.q_transform = nn.Linear(dim, dim)
-        self.k_transform = ElementwiseAffine(dim) if cfg.use_ewa_transforms else nn.Identity()
-        self.v_transform = ElementwiseAffine(dim) if cfg.use_ewa_transforms else nn.Identity()
-        self.out_transform = nn.Linear(dim, dim)
+    Attention in canvas_dim space. Local projected up, output projected back down.
+    """
+
+    def __init__(
+        self,
+        local_dim: int,
+        canvas_dim: int,
+        num_heads: int,
+        cfg: CrossAttentionConfig,
+    ) -> None:
+        super().__init__(
+            q_in_dim=local_dim,
+            kv_in_dim=canvas_dim,
+            canvas_dim=canvas_dim,
+            out_dim=local_dim,
+            num_heads=num_heads,
+            cfg=cfg,
+        )
+        self.q_transform = nn.Linear(local_dim, canvas_dim)
+        self.k_transform = ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        self.v_transform = ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        self.out_transform = nn.Linear(canvas_dim, local_dim)
 
 
 @final
 class WriteCrossAttention(CanvasCrossAttention):
-    """Write: canvas queries local. K/V Linear on local, Q/O on canvas."""
+    """Write: canvas queries local. K/V Linear on local, Q/O EWA on canvas.
 
-    def __init__(self, dim: int, num_heads: int, cfg: CrossAttentionConfig) -> None:
-        super().__init__(dim, num_heads, cfg)
-        self.q_transform = ElementwiseAffine(dim) if cfg.use_ewa_transforms else nn.Identity()
-        self.k_transform = nn.Linear(dim, dim)
-        self.v_transform = nn.Linear(dim, dim)
-        self.out_transform = ElementwiseAffine(dim) if cfg.use_ewa_transforms else nn.Identity()
+    Attention in canvas_dim space. Local K/V projected up, canvas stays in canvas_dim.
+    """
+
+    def __init__(
+        self,
+        local_dim: int,
+        canvas_dim: int,
+        num_heads: int,
+        cfg: CrossAttentionConfig,
+    ) -> None:
+        super().__init__(
+            q_in_dim=canvas_dim,
+            kv_in_dim=local_dim,
+            canvas_dim=canvas_dim,
+            out_dim=canvas_dim,
+            num_heads=num_heads,
+            cfg=cfg,
+        )
+        self.q_transform = ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        self.k_transform = nn.Linear(local_dim, canvas_dim)
+        self.v_transform = nn.Linear(local_dim, canvas_dim)
+        self.out_transform = ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
 
 
 @final
@@ -122,7 +164,7 @@ class ScaledResidualAttention(nn.Module):
     def __init__(self, attn: CanvasCrossAttention, scale_init: float) -> None:
         super().__init__()
         self.attn = attn
-        self.scale = LayerScale(attn.dim, init_values=scale_init)
+        self.scale = LayerScale(attn.out_dim, init_values=scale_init)
 
     def forward(
         self,

@@ -18,7 +18,7 @@ from canvit.attention import (
     ScaledResidualAttention,
 )
 from canvit.backbone import ViTBackbone
-from canvit.rope import compute_rope
+from canvit.rope import compute_rope, make_rope_periods
 
 
 class RoPE(NamedTuple):
@@ -31,11 +31,19 @@ class RoPE(NamedTuple):
 @final
 @dataclass
 class CanViTConfig:
-    """CanViT configuration."""
+    """CanViT configuration.
+
+    canvas_dim_mult: Canvas embedding dimension as multiple of backbone embed_dim.
+        canvas_dim = embed_dim * canvas_dim_mult.
+    canvas_num_heads: Number of attention heads for cross-attention.
+        Independent of backbone's num_heads. canvas_dim must be divisible by this.
+    """
 
     n_canvas_registers: int = 32
     adapter_stride: int = 2
     layer_scale_init: float = 1e-3
+    canvas_dim_mult: int = 1
+    canvas_num_heads: int = 32
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
 
@@ -50,10 +58,15 @@ class CanViT(nn.Module):
     Asymmetric projections avoid O(D²) cost on large canvas:
       - READ: Q, O are Linear on local; K, V are EWA on canvas
       - WRITE: Q, O are EWA on canvas; K, V are Linear on local
+
+    Canvas tokens live in canvas_dim = local_dim * canvas_dim_mult.
+    Attention happens in canvas_dim space; local tokens projected up/down.
     """
 
     backbone: ViTBackbone
     cfg: CanViTConfig
+    local_dim: int
+    canvas_dim: int
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     # Canvas init
@@ -64,45 +77,68 @@ class CanViT(nn.Module):
     cls_ln: nn.LayerNorm
     reg_ln: nn.LayerNorm
     spatial_ln: nn.LayerNorm
+    # RoPE periods for cross-attention
+    # Backbone self-attn uses backbone.rope_periods (backbone_head_dim = local_dim / backbone.num_heads)
+    # Cross-attn uses canvas_rope_periods (canvas_head_dim = canvas_dim / canvas_num_heads)
+    canvas_rope_periods: Tensor
 
     def __init__(self, backbone: ViTBackbone, cfg: CanViTConfig) -> None:
         super().__init__()
         self.backbone = backbone
         self.cfg = cfg
 
-        dim = backbone.embed_dim
-        heads = backbone.num_heads
+        local_dim = backbone.embed_dim
+        canvas_dim = local_dim * cfg.canvas_dim_mult
+        canvas_num_heads = cfg.canvas_num_heads
+        assert canvas_dim % canvas_num_heads == 0, (
+            f"canvas_dim={canvas_dim} not divisible by canvas_num_heads={canvas_num_heads}"
+        )
+
+        self.local_dim = local_dim
+        self.canvas_dim = canvas_dim
+
+        # head_dim distinction:
+        # - backbone_head_dim = local_dim // backbone.num_heads (for backbone self-attention)
+        # - canvas_head_dim = canvas_dim // canvas_num_heads (for cross-attention)
+        canvas_head_dim = canvas_dim // canvas_num_heads
+
         n_blocks = backbone.n_blocks
         n_adapters = (n_blocks - 1) // cfg.adapter_stride
 
         self.read_attn = nn.ModuleList([
             ScaledResidualAttention(
-                ReadCrossAttention(dim, heads, cfg.read_attention),
+                ReadCrossAttention(local_dim, canvas_dim, canvas_num_heads, cfg.read_attention),
                 cfg.layer_scale_init,
             )
             for _ in range(n_adapters)
         ])
         self.write_attn = nn.ModuleList([
             ScaledResidualAttention(
-                WriteCrossAttention(dim, heads, cfg.write_attention),
+                WriteCrossAttention(local_dim, canvas_dim, canvas_num_heads, cfg.write_attention),
                 cfg.layer_scale_init,
             )
             for _ in range(n_adapters)
         ])
 
         # Canvas init (1/sqrt(dim) for unit L2 norm)
-        scale = 1.0 / math.sqrt(dim)
-        self.cls_init = nn.Parameter(torch.randn(1, 1, dim) * scale)
-        self.spatial_init = nn.Parameter(torch.randn(1, 1, dim) * scale)
-        self.registers = nn.Parameter(torch.randn(1, cfg.n_canvas_registers, dim) * scale)
+        scale = 1.0 / math.sqrt(canvas_dim)
+        self.cls_init = nn.Parameter(torch.randn(1, 1, canvas_dim) * scale)
+        self.spatial_init = nn.Parameter(torch.randn(1, 1, canvas_dim) * scale)
+        self.registers = nn.Parameter(torch.randn(1, cfg.n_canvas_registers, canvas_dim) * scale)
 
         # Canvas normalization (gamma = 1/sqrt(dim) to preserve scale)
-        self.cls_ln = nn.LayerNorm(dim)
-        self.reg_ln = nn.LayerNorm(dim)
-        self.spatial_ln = nn.LayerNorm(dim)
+        self.cls_ln = nn.LayerNorm(canvas_dim)
+        self.reg_ln = nn.LayerNorm(canvas_dim)
+        self.spatial_ln = nn.LayerNorm(canvas_dim)
         nn.init.constant_(self.cls_ln.weight, scale)
         nn.init.constant_(self.reg_ln.weight, scale)
         nn.init.constant_(self.spatial_ln.weight, scale)
+
+        # RoPE periods for cross-attention (canvas_head_dim)
+        self.register_buffer(
+            "canvas_rope_periods",
+            make_rope_periods(canvas_head_dim, backbone.rope_dtype),
+        )
 
     @property
     def n_canvas_registers(self) -> int:
@@ -126,14 +162,14 @@ class CanViT(nn.Module):
         return torch.cat([cls, reg, spatial], dim=1)
 
     def init_canvas(self, batch_size: int, canvas_grid_size: int) -> Tensor:
-        """Create initial canvas [B, 1 + n_reg + G*G, D]."""
+        """Create initial canvas [B, 1 + n_reg + G*G, canvas_dim]."""
         B = batch_size
         n_spatial = canvas_grid_size ** 2
         cls = self.cls_init.expand(B, -1, -1)
         regs = self.registers.expand(B, -1, -1)
         spatial = self.spatial_init.expand(B, n_spatial, -1)
         out = torch.cat([cls, regs, spatial], dim=1)
-        assert out.shape == (B, self.n_prefix + n_spatial, self.backbone.embed_dim)
+        assert out.shape == (B, self.n_prefix + n_spatial, self.canvas_dim)
         return out
 
     def forward(
@@ -143,22 +179,32 @@ class CanViT(nn.Module):
         local_positions: Tensor,
         canvas_positions: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        """Process glimpse and update canvas via interleaved read-backbone-write."""
+        """Process glimpse and update canvas via interleaved read-backbone-write.
+
+        Two RoPE encodings used:
+        - backbone_rope_periods: for backbone self-attention (head_dim = local_dim/H)
+        - canvas_rope_periods: for cross-attention (head_dim = canvas_dim/H)
+        Same positions, different frequency encodings.
+        """
         local, H, W = self.backbone.prepare_tokens(glimpse)
         assert local_positions.shape[1] == H * W
 
-        local_rope = RoPE(*compute_rope(local_positions, self.backbone.rope_periods))
-        canvas_rope = RoPE(*compute_rope(canvas_positions, self.backbone.rope_periods))
+        # RoPE for backbone self-attention
+        local_rope_backbone = RoPE(*compute_rope(local_positions, self.backbone.rope_periods))
+        # RoPE for cross-attention (canvas_dim head_dim)
+        local_rope_xattn = RoPE(*compute_rope(local_positions, self.canvas_rope_periods))
+        canvas_rope = RoPE(*compute_rope(canvas_positions, self.canvas_rope_periods))
+
         canvas = self.prepare_canvas(canvas)
 
         stride = self.cfg.adapter_stride
         for i in range(self.backbone.n_blocks):
             if i >= stride and i % stride == 0:
                 a = i // stride - 1
-                local = self.read_attn[a](local, canvas, local_rope, canvas_rope)
-                local = self.backbone.forward_block(i, local, local_rope)
-                canvas = self.write_attn[a](canvas, local, canvas_rope, local_rope)
+                local = self.read_attn[a](local, canvas, local_rope_xattn, canvas_rope)
+                local = self.backbone.forward_block(i, local, local_rope_backbone)
+                canvas = self.write_attn[a](canvas, local, canvas_rope, local_rope_xattn)
             else:
-                local = self.backbone.forward_block(i, local, local_rope)
+                local = self.backbone.forward_block(i, local, local_rope_backbone)
 
         return local, canvas

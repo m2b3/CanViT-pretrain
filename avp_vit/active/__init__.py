@@ -75,13 +75,14 @@ class ActiveCanViT(nn.Module):
         self.cfg = cfg
         self.teacher_dim = teacher_dim
 
-        dim = backbone.embed_dim
+        # Canvas tokens live in canvas_dim, scene_proj projects to teacher_dim
+        canvas_dim = self.canvit.canvas_dim
         self.scene_proj = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, teacher_dim),
+            nn.LayerNorm(canvas_dim),
+            nn.Linear(canvas_dim, teacher_dim),
         )
         self.cls_proj = (
-            nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, teacher_dim))
+            nn.Sequential(nn.LayerNorm(canvas_dim), nn.Linear(canvas_dim, teacher_dim))
             if cfg.use_cls_loss
             else None
         )

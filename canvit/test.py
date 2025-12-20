@@ -66,7 +66,7 @@ class MockBackbone(ViTBackbone, nn.Module):
 
 def test_canvit_init_canvas():
     backbone = MockBackbone(dim=64)
-    cfg = CanViTConfig(n_canvas_registers=8)
+    cfg = CanViTConfig(n_canvas_registers=8, canvas_num_heads=8)
     model = CanViT(backbone, cfg)
 
     canvas = model.init_canvas(batch_size=2, canvas_grid_size=4)
@@ -76,7 +76,7 @@ def test_canvit_init_canvas():
 
 def test_canvit_forward():
     backbone = MockBackbone(dim=64, heads=8, blocks=6, patch_px=16)
-    cfg = CanViTConfig(n_canvas_registers=8, adapter_stride=2, layer_scale_init=1e-3)
+    cfg = CanViTConfig(n_canvas_registers=8, adapter_stride=2, layer_scale_init=1e-3, canvas_num_heads=8)
     model = CanViT(backbone, cfg)
 
     B, D = 2, 64
@@ -98,18 +98,18 @@ def test_canvit_forward():
 
 def test_canvit_n_adapters():
     backbone = MockBackbone(blocks=12)
-    cfg = CanViTConfig(adapter_stride=2)
+    cfg = CanViTConfig(adapter_stride=2, canvas_num_heads=8)
     model = CanViT(backbone, cfg)
     assert model.n_adapters == 5  # (12-1) // 2 = 5
 
-    cfg3 = CanViTConfig(adapter_stride=3)
+    cfg3 = CanViTConfig(adapter_stride=3, canvas_num_heads=8)
     model3 = CanViT(backbone, cfg3)
     assert model3.n_adapters == 3  # (12-1) // 3 = 3
 
 
 def test_canvit_gradients_flow():
     backbone = MockBackbone(dim=64, heads=8, blocks=4, patch_px=16)
-    cfg = CanViTConfig(n_canvas_registers=4, adapter_stride=2)
+    cfg = CanViTConfig(n_canvas_registers=4, adapter_stride=2, canvas_num_heads=8)
     model = CanViT(backbone, cfg)
 
     B = 2

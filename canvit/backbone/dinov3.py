@@ -97,9 +97,9 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
 
     @property
     def ffn_ratio(self) -> float:
-        ratio = self.vit.mlp_ratio
-        assert isinstance(ratio, (int, float))
-        return float(ratio)
+        """FFN hidden dimension ratio, queried from first block's MLP."""
+        fc1: nn.Linear = self.vit.blocks[0].mlp.fc1  # type: ignore[assignment]
+        return fc1.out_features / fc1.in_features
 
     def block_flops(self, n_tokens: int) -> int:
         """FLOPs for one DINOv3 transformer block."""
