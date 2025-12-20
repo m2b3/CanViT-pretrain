@@ -44,7 +44,7 @@ class CanViTConfig:
     layer_scale_init: float = 1e-3
     canvas_num_heads: int = 2
     canvas_head_dim: int = 256  # canvas_dim = 2 * 256 = 512
-    canvas_dtype: str = "float32"  # getattr(torch, canvas_dtype)
+    canvas_dtype: str = "bfloat16"  # getattr(torch, canvas_dtype)
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
 
@@ -120,7 +120,9 @@ class CanViT(nn.Module):
         scale = 1.0 / math.sqrt(canvas_dim)
         self.cls_init = nn.Parameter(torch.randn(1, 1, canvas_dim, dtype=canvas_dtype) * scale)
         self.spatial_init = nn.Parameter(torch.randn(1, 1, canvas_dim, dtype=canvas_dtype) * scale)
-        self.registers = nn.Parameter(torch.randn(1, cfg.n_canvas_registers, canvas_dim, dtype=canvas_dtype) * scale)
+        self.registers = nn.Parameter(
+            torch.randn(1, cfg.n_canvas_registers, canvas_dim, dtype=canvas_dtype) * scale
+        )
 
         # Canvas normalization (gamma = 1/sqrt(dim) to preserve scale)
         self.cls_ln = nn.LayerNorm(canvas_dim)
