@@ -36,7 +36,7 @@ class Config:
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)
     )
-    warmup_steps: int = 100_000
+    warmup_steps: int = 500_000
     grad_clip: float = 1.0
     # at 128 fresh images per optimizer step, that's
     # ~100 IN1k epochs
