@@ -24,16 +24,17 @@ class Config:
     grid_size: int = 16
     batch_size: int = 128
     p_reset: float = 0.5  # Probability of resetting canvas each step
-    ref_lr: float = 5e-6
+    ref_lr: float = 1e-6
     weight_decay: float = 1e-3
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)
     )
-    warmup_steps: int = 500_000
+    warmup_steps: int = 100_000
     grad_clip: float = 1.0
     # at 128 fresh images per optimizer step, that's
     # ~100 IN1k epochs
-    n_steps: int = 1_000_000
+    # do take p_reset into account!
+    n_steps: int = 2_000_000
     # Target normalization
     norm_warmup_images: int = 4096  # Images to warm up running stats before training
     norm_momentum: float = 0.1  # Momentum for running mean/var updates
