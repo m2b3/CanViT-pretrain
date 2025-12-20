@@ -16,7 +16,7 @@ class Config:
     teacher_model: str = "dinov3_vits16"
     teacher_ckpt: Path = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
     # Student
-    student_model: str = "dinov3_vitb16"
+    student_model: str = "dinov3_vitl16"
     student_ckpt: Path | None = None  # None = random init
     freeze_student_backbone: bool = False
     # Model

@@ -43,7 +43,7 @@ class CanViTConfig:
     """
 
     n_canvas_registers: int = 32
-    adapter_stride: int = 1
+    adapter_stride: int = 4
     layer_scale_init: float = 1e-3
     canvas_num_heads: int = 4
     canvas_head_dim: int = 128  # canvas_dim = 512
