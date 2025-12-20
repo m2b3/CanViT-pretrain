@@ -60,3 +60,7 @@ class ViTBackbone(ABC):
     def prepare_tokens(self, images: Tensor) -> tuple[Tensor, int, int]:
         """Patchify images. Returns (tokens, grid_h, grid_w)."""
         ...
+
+    def compile(self, **kwargs) -> None:
+        """Compile backbone blocks for faster execution. Override in subclasses."""
+        pass

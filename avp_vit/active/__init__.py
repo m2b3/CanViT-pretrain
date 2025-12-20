@@ -1,5 +1,6 @@
 """Active vision wrapper for CanViT."""
 
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -14,6 +15,8 @@ from avp_vit.glimpse import Viewpoint, sample_at_viewpoint
 from canvit import CanViT, CanViTConfig
 from canvit.backbone import ViTBackbone
 from canvit.rope import glimpse_positions, make_grid_positions
+
+log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -105,6 +108,14 @@ class ActiveCanViT(nn.Module):
     def init_canvas(self, batch_size: int, canvas_grid_size: int) -> Tensor:
         """Create initial canvas (delegates to CanViT)."""
         return self.canvit.init_canvas(batch_size, canvas_grid_size)
+
+    def compile(self, **kwargs) -> None:
+        """Compile model components for faster execution."""
+        self.canvit.compile(**kwargs)
+        log.info("Compiling projection heads")
+        self.scene_proj.compile(**kwargs)
+        if self.cls_proj is not None:
+            self.cls_proj.compile(**kwargs)
 
     def _infer_canvas_grid_size(self, canvas: Tensor) -> int:
         n_spatial = canvas.shape[1] - self.n_prefix

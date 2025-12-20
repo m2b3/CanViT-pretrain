@@ -3,8 +3,14 @@
 Formulas verified against model introspection.
 """
 
+from typing import TYPE_CHECKING
+
 from rich.console import Console
 from rich.table import Table
+
+if TYPE_CHECKING:
+    from canvit import CanViT
+    from canvit.backbone.dinov3 import DINOv3Backbone
 
 
 # =============================================================================
@@ -114,26 +120,39 @@ def fmt(flops: int) -> str:
 def main() -> None:
     from canvit import CanViT, CanViTConfig
     from canvit.backbone.dinov3 import DINOv3Backbone
-    from dinov3.hub.backbones import dinov3_vits16
+    from dinov3.hub.backbones import dinov3_vitb16, dinov3_vitl16, dinov3_vits16  # pyright: ignore[reportAttributeAccessIssue]
 
     console = Console()
 
-    # Query model for dimensions (no hardcoding)
-    backbone = DINOv3Backbone(dinov3_vits16(pretrained=False))
-    cfg = CanViTConfig()
-    model = CanViT(backbone, cfg)
+    backbones = [
+        ("ViT-S", DINOv3Backbone(dinov3_vits16(pretrained=False))),
+        ("ViT-B", DINOv3Backbone(dinov3_vitb16(pretrained=False))),
+        ("ViT-L", DINOv3Backbone(dinov3_vitl16(pretrained=False))),
+    ]
 
+    for name, backbone in backbones:
+        model = CanViT(backbone, CanViTConfig())
+        _print_tables(console, name, backbone, model)
+        console.print()
+
+
+def _print_tables(console: Console, name: str, backbone: "DINOv3Backbone", model: "CanViT") -> None:
     local_dim = model.local_dim
     canvas_dim = model.canvas_dim
     n_backbone_prefix = backbone.n_prefix_tokens
-    n_canvas_registers = cfg.n_canvas_registers
+    n_canvas_registers = model.n_canvas_registers
     patch_size = backbone.patch_size_px
+    n_blocks = backbone.n_blocks
+    n_adapters = model.n_adapters
 
-    glimpse_grids = [2]
+    glimpse_grids = [2, 3]
     canvas_grids = [16, 32, 64, 128, 256, 512]
 
-    # Table: Cross-Attention FLOPs per Adapter
-    table = Table(title=f"Cross-Attention FLOPs per Adapter (local={local_dim}, canvas={canvas_dim})")
+    console.rule(f"[bold]{name}[/bold] (local={local_dim}, canvas={canvas_dim})")
+
+    # Table 1: Cross-Attention FLOPs per Adapter
+    table = Table(title="Cross-Attention FLOPs per Adapter")
+    table.add_column("Glimpse", style="bold")
     table.add_column("Canvas", style="bold")
     table.add_column("Pixels", style="dim")
     table.add_column("Tokens", style="dim", justify="right")
@@ -160,6 +179,7 @@ def main() -> None:
             can_total = sdpa + can_proj
 
             table.add_row(
+                f"{g}×{g}",
                 f"{c}×{c}",
                 f"{canvas_px}px",
                 f"{n_canvas:,}",
@@ -172,13 +192,14 @@ def main() -> None:
                 "",
                 "",
                 "",
+                "",
                 "[cyan]Canvas[/cyan]",
                 fmt(sdpa),
                 f"[cyan]{fmt(can_proj)}[/cyan]",
                 f"[cyan]{fmt(can_total)}[/cyan]",
             )
-            # Multiplier row
             table.add_row(
+                "",
                 "",
                 "",
                 "",
@@ -198,6 +219,44 @@ def main() -> None:
     console.print("[bold]Params per adapter:[/bold]")
     console.print(f"  Canvas:  {fmt(canvas_p)}")
     console.print(f"  Regular: {fmt(regular_p)} (×{regular_p / canvas_p:.1f})")
+    console.print()
+
+    # Table 2: Full Model FLOPs per Glimpse
+    table2 = Table(title=f"Full Model FLOPs per Glimpse ({n_blocks} blocks, {n_adapters} adapters)")
+    table2.add_column("Glimpse", style="bold")
+    table2.add_column("Canvas", style="bold")
+    table2.add_column("Backbone", justify="right")
+    table2.add_column("Read (all)", justify="right")
+    table2.add_column("Write (all)", justify="right")
+    table2.add_column("Total", justify="right", style="bold")
+
+    for g in glimpse_grids:
+        n_local = n_backbone_prefix + g * g
+        n_patches = g * g
+        patch_embed = backbone.patch_embed_flops(n_patches)
+        backbone_total = patch_embed + n_blocks * backbone.block_flops(n_local)
+
+        for c in canvas_grids:
+            n_canvas = 1 + n_canvas_registers + c * c
+
+            read_flops_one: int = model.read_attn[0].flops(n_local, n_canvas)  # pyright: ignore[reportCallIssue]
+            write_flops_one: int = model.write_attn[0].flops(n_canvas, n_local)  # pyright: ignore[reportCallIssue]
+            read_total = n_adapters * read_flops_one
+            write_total = n_adapters * write_flops_one
+
+            total = backbone_total + read_total + write_total
+
+            table2.add_row(
+                f"{g}×{g}",
+                f"{c}×{c}",
+                fmt(backbone_total),
+                fmt(read_total),
+                fmt(write_total),
+                fmt(total),
+            )
+        table2.add_section()
+
+    console.print(table2)
 
 
 def verify_formulas() -> None:

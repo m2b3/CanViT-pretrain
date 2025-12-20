@@ -4,13 +4,13 @@ Resolution-decoupled ViT backbone using asymmetric cross-attention
 between a small local stream and a large canvas state.
 """
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import NamedTuple, final
 
 import torch
 from torch import Tensor, nn
-from ytch.nn.layer_scale import LayerScale
 
 from canvit.attention import (
     CrossAttentionConfig,
@@ -20,6 +20,8 @@ from canvit.attention import (
 )
 from canvit.backbone import ViTBackbone
 from canvit.rope import compute_rope, make_rope_periods
+
+log = logging.getLogger(__name__)
 
 
 class RoPE(NamedTuple):
@@ -79,7 +81,9 @@ class CanViT(nn.Module):
     cls_ln: nn.LayerNorm
     reg_ln: nn.LayerNorm
     spatial_ln: nn.LayerNorm
-    canvas_layer_scale: LayerScale | None
+    cls_scale: nn.Parameter | None
+    reg_scales: nn.Parameter | None
+    spatial_scale: nn.Parameter | None
     # RoPE periods for cross-attention
     # Backbone self-attn uses backbone.rope_periods (backbone_head_dim = local_dim / backbone.num_heads)
     # Cross-attn uses canvas_rope_periods (canvas_head_dim from config)
@@ -141,11 +145,16 @@ class CanViT(nn.Module):
         nn.init.constant_(self.spatial_ln.weight, scale)
 
         if cfg.use_canvas_layer_scale:
-            self.canvas_layer_scale = LayerScale(canvas_dim, init_values=cfg.layer_scale_init).to(
-                attention_dtype
+            init = cfg.layer_scale_init
+            self.cls_scale = nn.Parameter(torch.full((canvas_dim,), init, dtype=attention_dtype))
+            self.reg_scales = nn.Parameter(
+                torch.full((cfg.n_canvas_registers, canvas_dim), init, dtype=attention_dtype)
             )
+            self.spatial_scale = nn.Parameter(torch.full((canvas_dim,), init, dtype=attention_dtype))
         else:
-            self.canvas_layer_scale = None
+            self.cls_scale = None
+            self.reg_scales = None
+            self.spatial_scale = None
 
         # RoPE periods for cross-attention (canvas_head_dim)
         self.register_buffer(
@@ -188,10 +197,11 @@ class CanViT(nn.Module):
         cls = self.cls_ln(canvas[:, :1])
         reg = self.reg_ln(canvas[:, 1 : 1 + n_reg])
         spatial = self.spatial_ln(canvas[:, 1 + n_reg :])
-        out = torch.cat([cls, reg, spatial], dim=1)
-        if self.canvas_layer_scale is not None:
-            out = self.canvas_layer_scale(out)
-        return out
+        if self.cls_scale is not None:
+            cls = cls * self.cls_scale
+            reg = reg * self.reg_scales
+            spatial = spatial * self.spatial_scale
+        return torch.cat([cls, reg, spatial], dim=1)
 
     def init_canvas(self, batch_size: int, canvas_grid_size: int) -> Tensor:
         """Create initial canvas [B, 1 + n_reg + G*G, canvas_dim]."""
@@ -203,6 +213,15 @@ class CanViT(nn.Module):
         out = torch.cat([cls, regs, spatial], dim=1)
         assert out.shape == (B, self.n_prefix + n_spatial, self.canvas_dim)
         return out
+
+    def compile(self, **kwargs) -> None:
+        """Compile model components for faster execution."""
+        self.backbone.compile(**kwargs)
+        log.info(f"Compiling {self.n_adapters} read/write attention pairs")
+        for attn in self.read_attn:
+            attn.compile(**kwargs)
+        for attn in self.write_attn:
+            attn.compile(**kwargs)
 
     def forward(
         self,

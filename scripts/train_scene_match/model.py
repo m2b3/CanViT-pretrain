@@ -106,32 +106,9 @@ def create_model(
 
 def compile_teacher(teacher: DINOv3Backbone) -> None:
     """Compile teacher DINOv3 blocks in-place."""
-    n_blocks = teacher.n_blocks
-    log.info(f"Compiling teacher: {n_blocks} self-attention blocks")
-
-    blocks = teacher.vit.blocks
-    for i in range(n_blocks):
-        blocks[i].compile(dynamic=True)
-
-    log.info("Teacher compilation complete")
+    teacher.compile()
 
 
 def compile_model(model: ActiveCanViT) -> None:
-    """Compile ActiveCanViT DINOv3 blocks and cross-attention in-place."""
-    canvit = model.canvit
-    n_blocks = canvit.backbone.n_blocks
-    n_adapters = canvit.n_adapters
-    log.info(
-        f"Compiling model: {n_blocks} backbone blocks + {n_adapters} read/write attention pairs"
-    )
-
-    assert isinstance(canvit.backbone, DINOv3Backbone)
-    blocks = canvit.backbone.vit.blocks
-    for i in range(n_blocks):
-        blocks[i].compile(dynamic=True)
-
-    for i in range(n_adapters):
-        canvit.read_attn[i].compile(dynamic=True)
-        canvit.write_attn[i].compile(dynamic=True)
-
-    log.info("Model compilation complete")
+    """Compile ActiveCanViT in-place."""
+    model.compile()

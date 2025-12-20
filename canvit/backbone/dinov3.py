@@ -1,5 +1,6 @@
 """DINOv3 backbone wrapper for CanViT."""
 
+import logging
 from typing import Any, NamedTuple, cast, override
 
 import torch
@@ -7,6 +8,8 @@ from dinov3.models.vision_transformer import DinoVisionTransformer
 from torch import Tensor, nn
 
 from canvit.backbone import ViTBackbone
+
+log = logging.getLogger(__name__)
 
 
 class NormFeatures(NamedTuple):
@@ -114,3 +117,9 @@ class DINOv3Backbone(ViTBackbone, nn.Module):
         """FLOPs for patch embedding Conv2d(3, D, kernel=P, stride=P)."""
         D, P = self.embed_dim, self.patch_size_px
         return 2 * D * 3 * P * P * n_patches
+
+    def compile(self, **kwargs) -> None:
+        """Compile all transformer blocks."""
+        log.info(f"Compiling {self.n_blocks} backbone blocks")
+        for block in self.vit.blocks:
+            block.compile(**kwargs)
