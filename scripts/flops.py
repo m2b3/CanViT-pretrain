@@ -145,7 +145,7 @@ def _print_tables(console: Console, name: str, backbone: "DINOv3Backbone", model
     n_blocks = backbone.n_blocks
     n_adapters = model.n_adapters
 
-    glimpse_grids = [2, 3]
+    glimpse_grids = [2, 3, 4]
     canvas_grids = [16, 32, 64, 128, 256, 512]
 
     console.rule(f"[bold]{name}[/bold] (local={local_dim}, canvas={canvas_dim})")
