@@ -3,6 +3,7 @@
 import logging
 import random
 from collections.abc import Callable
+from contextlib import nullcontext
 
 import comet_ml
 import numpy as np
@@ -209,6 +210,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     curve_steps = log_spaced_steps(cfg.total_curves, cfg.n_steps)
     log.info(f"Viz steps: {len(viz_steps)} points, curves: {len(curve_steps)} points")
 
+    # AMP context (nullcontext if disabled)
+    amp_ctx = (
+        torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16)
+        if cfg.amp else nullcontext()
+    )
+    log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
+
     # Load model weights from checkpoint if specified
     if cfg.resume_ckpt is not None:
         ckpt_data = load_checkpoint(cfg.resume_ckpt, cfg.device)
@@ -223,7 +231,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     def compute_raw_targets(images: Tensor) -> NormFeatures:
         """Compute teacher features (not normalized)."""
-        with torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16):
+        with amp_ctx:
             feats = teacher.forward_norm_features(images)
             return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
@@ -280,29 +288,30 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             random_viewpoint(stage.batch_size, cfg.device)
             for _ in range(cfg.n_viewpoints_per_step)
         ]
-        losses, final_canvas = model.forward_loss(
-            state.images,
-            viewpoints,
-            state.targets,
-            state.canvas,
-            cls_target=state.cls_targets,
-            loss_fn=loss_fn,
-        )
+        with amp_ctx:
+            losses, final_canvas = model.forward_loss(
+                state.images,
+                viewpoints,
+                state.targets,
+                state.canvas,
+                cls_target=state.cls_targets,
+                loss_fn=loss_fn,
+            )
 
-        # Combine losses (trainer's responsibility)
-        total_loss = torch.tensor(0.0, device=cfg.device)
-        if losses.scene is not None:
-            total_loss = total_loss + losses.scene
-        if losses.cls is not None:
-            total_loss = total_loss + losses.cls
+            # Combine losses (trainer's responsibility)
+            total_loss = torch.tensor(0.0, device=cfg.device)
+            if losses.scene is not None:
+                total_loss = total_loss + losses.scene
+            if losses.cls is not None:
+                total_loss = total_loss + losses.cls
 
-        if not torch.isfinite(total_loss):
-            log.warning(f"NaN/Inf loss at step {step}, pruning trial")
-            exp.end()
-            raise optuna.TrialPruned()
+            if not torch.isfinite(total_loss):
+                log.warning(f"NaN/Inf loss at step {step}, pruning trial")
+                exp.end()
+                raise optuna.TrialPruned()
 
-        optimizer.zero_grad()
-        total_loss.backward()
+            optimizer.zero_grad()
+            total_loss.backward()
         grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
         optimizer.step()
         scheduler.step()
@@ -369,10 +378,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             # Fast validation (skip at viz steps - eval_and_log covers the same metrics)
             if step not in viz_steps:
                 val_images = val_loader.next_batch().to(cfg.device)
-                val_scene_l1 = val_metrics_only(
-                    exp, step, model, compute_raw_targets, scene_norm, cls_norm,
-                    val_images, G, f"grid{G}/val",
-                )
+                with amp_ctx:
+                    val_scene_l1 = val_metrics_only(
+                        exp, step, model, compute_raw_targets, scene_norm, cls_norm,
+                        val_images, G, f"grid{G}/val",
+                    )
                 exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
             if step > 0:
@@ -383,22 +393,24 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # Full viz with PCA (expensive, log-spaced)
         if step in viz_steps:
-            train_viz = viz_and_log(
-                exp, step, f"grid{G}/train", model, teacher, scene_norm,
-                state.images, viewpoints, state.targets, state.canvas,
-                log_spatial_stats=cfg.log_spatial_stats, log_curves=False, loss_type=cfg.loss,
-            )
+            with amp_ctx:
+                train_viz = viz_and_log(
+                    exp, step, f"grid{G}/train", model, teacher, scene_norm,
+                    state.images, viewpoints, state.targets, state.canvas,
+                    log_spatial_stats=cfg.log_spatial_stats, log_curves=False, loss_type=cfg.loss,
+                )
             for name, losses in train_viz.losses.items():
                 exp.log_metric(f"grid{G}/train/viz_{name}", losses[-1], step=step)
 
             val_images = val_loader.next_batch().to(cfg.device)
-            val_scene_l1 = eval_and_log(
-                exp, step, model, teacher, compute_raw_targets, scene_norm, cls_norm,
-                val_images, G, f"grid{G}/val",
-                log_spatial_stats=cfg.log_spatial_stats,
-                log_curves=(step in curve_steps),
-                loss_type=cfg.loss,
-            )
+            with amp_ctx:
+                val_scene_l1 = eval_and_log(
+                    exp, step, model, teacher, compute_raw_targets, scene_norm, cls_norm,
+                    val_images, G, f"grid{G}/val",
+                    log_spatial_stats=cfg.log_spatial_stats,
+                    log_curves=(step in curve_steps),
+                    loss_type=cfg.loss,
+                )
             exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
         # Checkpointing

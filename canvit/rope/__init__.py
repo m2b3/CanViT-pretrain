@@ -91,9 +91,16 @@ def rope_rotate_half(x: Tensor) -> Tensor:
 
 
 def rope_apply(x: Tensor, sin: Tensor, cos: Tensor) -> Tensor:
-    """Apply RoPE rotation to tensor."""
+    """Apply RoPE rotation to tensor, preserving input dtype.
+
+    Computation happens in sin/cos dtype (typically float32 for numerical stability),
+    then result is cast back to input dtype. Matches DINOv3's approach.
+    """
     assert x.shape[-2:] == sin.shape[-2:] == cos.shape[-2:]
-    return (x * cos) + (rope_rotate_half(x) * sin)
+    x_dtype = x.dtype
+    x = x.to(dtype=sin.dtype)
+    result = (x * cos) + (rope_rotate_half(x) * sin)
+    return result.to(dtype=x_dtype)
 
 
 def rope_apply_with_prefix(x: Tensor, rope: tuple[Tensor, Tensor]) -> Tensor:

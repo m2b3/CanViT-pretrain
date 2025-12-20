@@ -63,8 +63,9 @@ class Config:
     total_curves: int = 50  # Curve count (log-spaced)
     ckpt_every: int = 5000
     log_spatial_stats: bool = True  # Log target/pred spatial mean/std
-    # Compilation
+    # Compilation and precision
     compile: bool = True
+    amp: bool = True  # bfloat16 automatic mixed precision
     # Optuna
     n_trials: int = 100
     # Runtime
