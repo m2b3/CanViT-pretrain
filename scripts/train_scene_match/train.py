@@ -24,6 +24,7 @@ from avp_vit.checkpoint import load as load_checkpoint
 from avp_vit.checkpoint import save as save_checkpoint
 from avp_vit.train import InfiniteLoader, get_loss_fn, warmup_cosine_scheduler
 from avp_vit.train.norm import PositionAwareNorm
+from avp_vit.glimpse import Viewpoint
 from avp_vit.train.viewpoint import random_viewpoint
 
 from .config import Config
@@ -188,6 +189,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     targets: Tensor | None = None
     cls_targets: Tensor | None = None
     canvas: Tensor | None = None
+    # Reset sequence: when organic reset triggers, we do TWO consecutive resets:
+    # 1. Full-scene viewpoint (0,0,1) - gives model a "clean slate" view
+    # 2. Random viewpoints - then normal persist/reset behavior resumes
+    force_random_reset = False
 
     # EMA tracking
     ema_scene_t = torch.tensor(0.0, device=cfg.device)
@@ -199,8 +204,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
 
     for step in pbar:
-        # Stochastic reset
-        if canvas is None or random.random() < cfg.p_reset:
+        organic_reset = canvas is None or random.random() < cfg.p_reset
+        do_reset = organic_reset or force_random_reset
+
+        if do_reset:
             images = train_loader.next_batch().to(cfg.device)
             with torch.no_grad():
                 feats = compute_raw_targets(images, scene_size)
@@ -208,9 +215,14 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 cls_targets = cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
             canvas = model.init_canvas(cfg.batch_size, G)
 
-        assert images is not None and targets is not None and cls_targets is not None
+        assert images is not None and targets is not None and cls_targets is not None and canvas is not None
 
-        viewpoints = [random_viewpoint(cfg.batch_size, cfg.device) for _ in range(cfg.n_viewpoints_per_step)]
+        if organic_reset and not force_random_reset:
+            viewpoints = [Viewpoint.full_scene(cfg.batch_size, cfg.device) for _ in range(cfg.n_viewpoints_per_step)]
+            force_random_reset = True
+        else:
+            viewpoints = [random_viewpoint(cfg.batch_size, cfg.device) for _ in range(cfg.n_viewpoints_per_step)]
+            force_random_reset = False
 
         with amp_ctx:
             losses, canvas = model.forward_loss(
