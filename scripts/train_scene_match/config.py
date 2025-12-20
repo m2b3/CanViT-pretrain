@@ -35,7 +35,7 @@ class Config:
     ref_lr: float = 1e-5
     weight_decay: float = 1e-5
     n_viewpoints_per_step: int = (
-        4  # Inner loop viewpoints (>=2 for length generalization)
+        2  # Inner loop viewpoints (>=2 for length generalization)
     )
     viewpoint_scale: ViewpointScaleConfig = field(default_factory=ViewpointScaleConfig)
     warmup_steps: int = 100_000
