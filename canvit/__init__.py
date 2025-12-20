@@ -14,8 +14,8 @@ from torch import Tensor, nn
 from canvit.attention import (
     CrossAttentionConfig,
     ReadCrossAttention,
-    WriteCrossAttention,
     ScaledResidualAttention,
+    WriteCrossAttention,
 )
 from canvit.backbone import ViTBackbone
 from canvit.rope import compute_rope, make_rope_periods
@@ -42,8 +42,8 @@ class CanViTConfig:
     n_canvas_registers: int = 32
     adapter_stride: int = 2
     layer_scale_init: float = 1e-3
-    canvas_dim_mult: int = 1
-    canvas_num_heads: int = 32
+    canvas_dim_mult: int = 2
+    canvas_num_heads: int = 24
     read_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     write_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
 
@@ -105,20 +105,26 @@ class CanViT(nn.Module):
         n_blocks = backbone.n_blocks
         n_adapters = (n_blocks - 1) // cfg.adapter_stride
 
-        self.read_attn = nn.ModuleList([
-            ScaledResidualAttention(
-                ReadCrossAttention(local_dim, canvas_dim, canvas_num_heads, cfg.read_attention),
-                cfg.layer_scale_init,
-            )
-            for _ in range(n_adapters)
-        ])
-        self.write_attn = nn.ModuleList([
-            ScaledResidualAttention(
-                WriteCrossAttention(local_dim, canvas_dim, canvas_num_heads, cfg.write_attention),
-                cfg.layer_scale_init,
-            )
-            for _ in range(n_adapters)
-        ])
+        self.read_attn = nn.ModuleList(
+            [
+                ScaledResidualAttention(
+                    ReadCrossAttention(local_dim, canvas_dim, canvas_num_heads, cfg.read_attention),
+                    cfg.layer_scale_init,
+                )
+                for _ in range(n_adapters)
+            ]
+        )
+        self.write_attn = nn.ModuleList(
+            [
+                ScaledResidualAttention(
+                    WriteCrossAttention(
+                        local_dim, canvas_dim, canvas_num_heads, cfg.write_attention
+                    ),
+                    cfg.layer_scale_init,
+                )
+                for _ in range(n_adapters)
+            ]
+        )
 
         # Canvas init (1/sqrt(dim) for unit L2 norm)
         scale = 1.0 / math.sqrt(canvas_dim)
@@ -164,7 +170,7 @@ class CanViT(nn.Module):
     def init_canvas(self, batch_size: int, canvas_grid_size: int) -> Tensor:
         """Create initial canvas [B, 1 + n_reg + G*G, canvas_dim]."""
         B = batch_size
-        n_spatial = canvas_grid_size ** 2
+        n_spatial = canvas_grid_size**2
         cls = self.cls_init.expand(B, -1, -1)
         regs = self.registers.expand(B, -1, -1)
         spatial = self.spatial_init.expand(B, n_spatial, -1)
