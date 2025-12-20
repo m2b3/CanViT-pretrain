@@ -2,7 +2,7 @@
 
 import logging
 import subprocess
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
@@ -13,14 +13,6 @@ from torch import Tensor
 from avp_vit import ActiveCanViT
 from canvit import CanViTConfig
 from canvit.attention import CrossAttentionConfig
-
-# Field renames for legacy checkpoint migration
-_CROSS_ATTN_RENAMES = {
-    "normalize_q": "pre_proj_q_ln",
-    "normalize_k": "pre_proj_k_ln",
-    "normalize_v": "pre_proj_v_ln",
-}
-_CROSS_ATTN_FIELDS = {f.name for f in fields(CrossAttentionConfig)}
 
 log = logging.getLogger(__name__)
 
@@ -109,32 +101,12 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
 
     raw = torch.load(path, weights_only=False, map_location=device)
 
-    # Detect old format (missing model_config and avp_config)
-    if "model_config" not in raw and "avp_config" not in raw:
-        raise ValueError(f"Legacy checkpoint without config. Keys: {list(raw.keys())}")
-
-    # Handle key rename: old="avp", new="state_dict"
-    if "avp" in raw and "state_dict" not in raw:
-        raw["state_dict"] = raw.pop("avp")
-
-    # Handle config key rename: old="avp_config", new="model_config"
-    config_key = "model_config" if "model_config" in raw else "avp_config"
-    model_config = raw[config_key].copy()
-
-    # Reconstruct nested dataclasses in canvit config (migrate renamed fields)
+    # Reconstruct nested dataclasses in canvit config
+    model_config = raw["model_config"].copy()
     canvit_config = model_config.get("canvit", {})
     for key in ("read_attention", "write_attention"):
         if isinstance(canvit_config.get(key), dict):
-            old_dict = canvit_config[key]
-            migrated = {_CROSS_ATTN_RENAMES.get(k, k): v for k, v in old_dict.items()}
-            filtered = {k: v for k, v in migrated.items() if k in _CROSS_ATTN_FIELDS}
-            canvit_config[key] = CrossAttentionConfig(**filtered)
-    # Migrate canvas_dim_mult → canvas_head_dim (only vits16 checkpoints exist)
-    if "canvas_dim_mult" in canvit_config:
-        assert raw["backbone"] == "dinov3_vits16", f"Migration only supports vits16: {raw['backbone']}"
-        canvas_dim = 384 * canvit_config.pop("canvas_dim_mult")
-        canvas_num_heads = canvit_config.get("canvas_num_heads", 2)
-        canvit_config["canvas_head_dim"] = canvas_dim // canvas_num_heads
+            canvit_config[key] = CrossAttentionConfig(**canvit_config[key])
     model_config["canvit"] = CanViTConfig(**canvit_config)
 
     data: CheckpointData = {
