@@ -69,9 +69,9 @@ def test_canvit_init_canvas():
     cfg = CanViTConfig(n_canvas_registers=8, canvas_num_heads=8)
     model = CanViT(backbone, cfg)
 
-    canvas = model.init_canvas(batch_size=2, canvas_grid_size=4)
-    # 1 cls + 8 registers + 16 spatial = 25
-    assert canvas.shape == (2, 1 + 8 + 16, 64)
+    B, G = 2, 4
+    canvas = model.init_canvas(batch_size=B, canvas_grid_size=G)
+    assert canvas.shape == (B, model.n_prefix + G * G, model.canvas_dim)
 
 
 def test_canvit_forward():

@@ -1,254 +1,233 @@
-"""FLOPs calculations for ActiveCanViT and teacher backbone.
+"""Cross-attention FLOPs comparison: Canvas Attention vs Regular Cross-Attention.
 
-Uses introspection on actual model instances - no hardcoded formulas that can drift.
+Formulas verified against model introspection.
 """
 
-from pathlib import Path
-from typing import NamedTuple, cast
-
-from avp_vit import ActiveCanViT, ActiveCanViTConfig
-from canvit.attention import ScaledResidualAttention
-from canvit.backbone.dinov3 import DINOv3Backbone
-
-CKPT_PATH = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
-
-CANVAS_GRIDS = [16, 32, 64, 128]
+from rich.console import Console
+from rich.table import Table
 
 
-class TeacherFLOPs(NamedTuple):
-    patch_embed: int
-    blocks: int
-    total: int
-    n_tokens: int
+# =============================================================================
+# Constants
+# =============================================================================
+
+# Linear(in, out) costs 2 * in * out FLOPs (matmul)
+FLOPS_PER_LINEAR = 2
+# Adapter = read + write = 2 directions
+N_DIRECTIONS = 2
 
 
-class StepFLOPs(NamedTuple):
-    """FLOPs for one forward step, computed via model introspection."""
-
-    glimpse_embed: int
-    read_attn: int
-    backbone: int
-    write_attn: int
-    scene_proj: int
-    total_train: int
-    total_infer: int
-    n_local: int
-    n_canvas: int
-    n_adapters: int
+# =============================================================================
+# Building block FLOPs
+# =============================================================================
 
 
-def teacher_flops(backbone: DINOv3Backbone, n_patches: int) -> TeacherFLOPs:
-    n_tokens = n_patches + backbone.n_prefix_tokens
-    patch_embed = backbone.patch_embed_flops(n_patches)
-    blocks = backbone.n_blocks * backbone.block_flops(n_tokens)
-    return TeacherFLOPs(patch_embed, blocks, patch_embed + blocks, n_tokens)
+def sdpa_flops(n_q: int, n_kv: int, dim: int) -> int:
+    """SDPA FLOPs: Q@K^T (2*n_q*n_kv*dim) + softmax@V (2*n_q*n_kv*dim)."""
+    return 2 * FLOPS_PER_LINEAR * n_q * n_kv * dim
 
 
-def step_flops(model: ActiveCanViT, canvas_grid_size: int) -> StepFLOPs:
-    """FLOPs for one step. Uses introspection on actual model modules."""
-    assert isinstance(model.backbone, DINOv3Backbone)
-    backbone = model.backbone
-    canvit = model.canvit
-    cfg = model.cfg
+def canvas_proj_flops(n_local: int, local_dim: int, canvas_dim: int) -> int:
+    """Canvas attention projection FLOPs (read + write): only local-side Linears.
 
-    canvas_dim = canvit.canvas_dim
-    n_blocks = backbone.n_blocks
-    glimpse_patches = cfg.glimpse_grid_size ** 2
-    spatial_patches = canvas_grid_size ** 2
-    n_local = glimpse_patches + backbone.n_prefix_tokens
-    n_canvas = model.n_canvas_registers + spatial_patches
-
-    glimpse_embed = backbone.patch_embed_flops(glimpse_patches)
-
-    n_adapters = canvit.n_adapters
-    read_attn = sum(cast(ScaledResidualAttention, canvit.read_attn[i]).flops(n_local, n_canvas) for i in range(n_adapters))
-    blocks = n_blocks * backbone.block_flops(n_local)
-    write_attn = sum(cast(ScaledResidualAttention, canvit.write_attn[i]).flops(n_canvas, n_local) for i in range(n_adapters))
-
-    # scene_proj: LayerNorm + Linear(canvas_dim -> teacher_dim)
-    scene_proj = 2 * spatial_patches * canvas_dim * model.teacher_dim
-
-    total_infer = glimpse_embed + read_attn + blocks + write_attn
-    total_train = total_infer + scene_proj
-    return StepFLOPs(
-        glimpse_embed, read_attn, blocks, write_attn, scene_proj,
-        total_train, total_infer, n_local, n_canvas, n_adapters,
-    )
-
-
-def hypothetical_full_linear_flops(
-    n_local: int,
-    n_canvas: int,
-    local_dim: int,
-    canvas_dim: int,
-    n_adapters: int,
-) -> int:
-    """Hypothetical FLOPs if all cross-attention used full Linear projections (no EWA).
-
-    Currently EWA is used for:
-      Read: K, V (canvas side)
-      Write: Q, O (canvas side)
-
-    Full linear would use Linear(canvas_dim, canvas_dim) instead of EWA for those.
+    Per direction: 2 projections on local side (Q+O for read, K+V for write)
+    Canvas side uses EWA (elementwise) → 0 FLOPs
     """
-
-    def read_flops(n_q: int, n_kv: int) -> int:
-        # Read: local queries canvas. Attention in canvas_dim.
-        # Q: Linear(local_dim, canvas_dim), O: Linear(canvas_dim, local_dim)
-        # K, V: currently EWA, hypothetically Linear(canvas_dim, canvas_dim)
-        sdpa = 4 * n_q * n_kv * canvas_dim
-        q_proj = 2 * n_q * local_dim * canvas_dim
-        k_proj = 2 * n_kv * canvas_dim * canvas_dim  # hypothetical
-        v_proj = 2 * n_kv * canvas_dim * canvas_dim  # hypothetical
-        o_proj = 2 * n_q * canvas_dim * local_dim
-        return sdpa + q_proj + k_proj + v_proj + o_proj
-
-    def write_flops(n_q: int, n_kv: int) -> int:
-        # Write: canvas queries local. Attention in canvas_dim.
-        # Q: currently EWA, hypothetically Linear(canvas_dim, canvas_dim)
-        # K, V: Linear(local_dim, canvas_dim)
-        # O: currently EWA, hypothetically Linear(canvas_dim, canvas_dim)
-        sdpa = 4 * n_q * n_kv * canvas_dim
-        q_proj = 2 * n_q * canvas_dim * canvas_dim  # hypothetical
-        k_proj = 2 * n_kv * local_dim * canvas_dim
-        v_proj = 2 * n_kv * local_dim * canvas_dim
-        o_proj = 2 * n_q * canvas_dim * canvas_dim  # hypothetical
-        return sdpa + q_proj + k_proj + v_proj + o_proj
-
-    read_per_adapter = read_flops(n_local, n_canvas)
-    write_per_adapter = write_flops(n_canvas, n_local)
-    return n_adapters * (read_per_adapter + write_per_adapter)
+    projs_per_direction = 2  # Q+O or K+V on local side
+    flops_per_proj = FLOPS_PER_LINEAR * n_local * local_dim * canvas_dim
+    return N_DIRECTIONS * projs_per_direction * flops_per_proj
 
 
-def fmt(f: int | float) -> str:
-    if f >= 1e12:
-        return f"{f / 1e12:.2f}T"
-    if f >= 1e9:
-        return f"{f / 1e9:.2f}G"
-    if f >= 1e6:
-        return f"{f / 1e6:.2f}M"
-    return f"{f:.0f}"
+def regular_proj_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: int) -> int:
+    """Regular cross-attention projection FLOPs (read + write): local + canvas Linears.
+
+    Per direction: 2 projections on local side + 2 projections on canvas side
+    """
+    projs_per_side = 2
+    local_flops = N_DIRECTIONS * projs_per_side * FLOPS_PER_LINEAR * n_local * local_dim * canvas_dim
+    canvas_flops = N_DIRECTIONS * projs_per_side * FLOPS_PER_LINEAR * n_canvas * canvas_dim * canvas_dim
+    return local_flops + canvas_flops
 
 
-def print_detailed_breakdown(model: ActiveCanViT, canvas_grid: int) -> None:
-    assert isinstance(model.backbone, DINOv3Backbone)
-    backbone = model.backbone
-    canvit = model.canvit
-    cfg = model.cfg
-    canvit_cfg = cfg.canvit
+# =============================================================================
+# Aggregate FLOPs (per adapter = one read + one write)
+# =============================================================================
 
-    local_dim = canvit.local_dim
-    canvas_dim = canvit.canvas_dim
-    P = backbone.patch_size_px
-    n_blocks = backbone.n_blocks
-    canvas_px = canvas_grid * P
-    glimpse_px = cfg.glimpse_grid_size * P
-    n_spatial = canvas_grid ** 2
 
-    s = step_flops(model, canvas_grid)
-    t_canvas = teacher_flops(backbone, canvas_grid ** 2)
-    t_glimpse = teacher_flops(backbone, cfg.glimpse_grid_size ** 2)
+def canvas_attention_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: int) -> int:
+    """Canvas attention: EWA on canvas side, Linear on local side."""
+    proj = canvas_proj_flops(n_local, local_dim, canvas_dim)
+    sdpa = sdpa_flops(n_local, n_canvas, canvas_dim) + sdpa_flops(n_canvas, n_local, canvas_dim)
+    return proj + sdpa
 
-    def pct_train(x: int) -> str:
-        return f"({100 * x / s.total_train:4.1f}%)"
 
-    def pct_infer(x: int) -> str:
-        return f"({100 * x / s.total_infer:4.1f}%)"
+def regular_attention_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: int) -> int:
+    """Regular cross-attention: all Linear projections (fair comparison with canvas_dim)."""
+    proj = regular_proj_flops(n_local, n_canvas, local_dim, canvas_dim)
+    sdpa = sdpa_flops(n_local, n_canvas, canvas_dim) + sdpa_flops(n_canvas, n_local, canvas_dim)
+    return proj + sdpa
 
-    print("=" * 80)
-    print(f"DETAILED: {canvas_grid}x{canvas_grid} canvas ({canvas_px}x{canvas_px} px)")
-    print("=" * 80)
-    print(f"Tokens: local={s.n_local}, canvas={s.n_canvas} (spatial={n_spatial} + registers={canvit_cfg.n_canvas_registers})")
-    print(f"Adapters: {s.n_adapters} (backbone has {n_blocks} blocks, stride={canvit_cfg.adapter_stride})")
-    print()
 
-    print("--- INFERENCE (no scene_proj) ---")
-    print(f"  Glimpse embed: {fmt(s.glimpse_embed):>10}  {pct_infer(s.glimpse_embed)}")
-    print(f"  Read attn:     {fmt(s.read_attn):>10}  {pct_infer(s.read_attn)}  [{s.n_adapters} adapters]")
-    print(f"  Backbone:      {fmt(s.backbone):>10}  {pct_infer(s.backbone)}  [{n_blocks} blocks on {s.n_local} tokens]")
-    print(f"  Write attn:    {fmt(s.write_attn):>10}  {pct_infer(s.write_attn)}  [{s.n_adapters} adapters]")
-    print(f"  TOTAL:         {fmt(s.total_infer):>10}")
-    print()
-    print("--- TRAINING (+scene_proj) ---")
-    print(f"  Scene proj:    {fmt(s.scene_proj):>10}  {pct_train(s.scene_proj)}  [Linear on {n_spatial} tokens]")
-    print(f"  TOTAL:         {fmt(s.total_train):>10}")
-    print()
+# =============================================================================
+# Param formulas (per adapter)
+# =============================================================================
 
-    full_linear_attn = hypothetical_full_linear_flops(s.n_local, s.n_canvas, local_dim, canvas_dim, s.n_adapters)
-    full_linear_infer = s.glimpse_embed + full_linear_attn + s.backbone
-    actual_attn = s.read_attn + s.write_attn
-    attn_savings = full_linear_attn - actual_attn
 
-    print("=" * 80)
-    print(f"EWA SAVINGS ({canvas_grid}x{canvas_grid} canvas, inference)")
-    print("=" * 80)
-    print("Cross-attention uses EWA (ElementwiseAffine) instead of Linear for:")
-    print("  Read:  K, V (on canvas tokens)")
-    print("  Write: Q, O (on canvas tokens)")
-    print()
-    print(f"  Actual cross-attn:       {fmt(actual_attn):>10}")
-    print(f"  Hypothetical full-Linear:{fmt(full_linear_attn):>10}")
-    print(f"  Savings:                 {fmt(attn_savings):>10}  ({100 * attn_savings / full_linear_attn:.0f}% of full-Linear attn)")
-    print()
-    print(f"  Actual infer total:      {fmt(s.total_infer):>10}")
-    print(f"  Hypothetical infer total:{fmt(full_linear_infer):>10}")
-    print(f"  Savings:                 {fmt(full_linear_infer - s.total_infer):>10}  ({100 * (full_linear_infer - s.total_infer) / full_linear_infer:.0f}% of full-Linear)")
-    print()
+def canvas_attention_params(local_dim: int, canvas_dim: int) -> int:
+    """Canvas attention params: 4 Linear(local_dim, canvas_dim) + 4 EWA(canvas_dim)."""
+    n_linear = 4  # Q, O for read; K, V for write
+    linear = n_linear * local_dim * canvas_dim
+    ewa = n_linear * 2 * canvas_dim  # scale + bias per EWA
+    return linear + ewa
 
-    print("=" * 80)
-    print(f"COMPARISON ({canvas_grid}x{canvas_grid} canvas = {canvas_px}x{canvas_px} px)")
-    print("=" * 80)
-    print(f"  Teacher @ {canvas_grid}x{canvas_grid} ({canvas_px}px):   {fmt(t_canvas.total):>10}")
-    print(f"  Teacher @ {cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({glimpse_px}px):    {fmt(t_glimpse.total):>10}")
-    print(f"  Model infer:               {fmt(s.total_infer):>10}")
-    print(f"  Model train:               {fmt(s.total_train):>10}")
-    print()
-    print(f"  Model infer steps per Teacher({canvas_grid}x{canvas_grid}): {t_canvas.total / s.total_infer:6.1f}")
-    print(f"  Teacher({cfg.glimpse_grid_size}x{cfg.glimpse_grid_size}) per Model infer:      {s.total_infer / t_glimpse.total:6.2f}")
+
+def regular_attention_params(local_dim: int, canvas_dim: int) -> int:
+    """Regular cross-attention params: 4 Linear on local + 4 Linear on canvas."""
+    n_linear_per_side = 4
+    local_linear = n_linear_per_side * local_dim * canvas_dim
+    canvas_linear = n_linear_per_side * canvas_dim * canvas_dim
+    return local_linear + canvas_linear
+
+
+# =============================================================================
+# Formatting
+# =============================================================================
+
+
+def fmt(flops: int) -> str:
+    if flops >= 1e12:
+        return f"{flops / 1e12:.2f}T"
+    if flops >= 1e9:
+        return f"{flops / 1e9:.2f}G"
+    if flops >= 1e6:
+        return f"{flops / 1e6:.1f}M"
+    if flops >= 1e3:
+        return f"{flops / 1e3:.1f}K"
+    return str(flops)
+
+
+# =============================================================================
+# Main
+# =============================================================================
 
 
 def main() -> None:
+    console = Console()
+
+    # ViT-S/16 parameters
+    local_dim = 384
+    canvas_dim_mult = 2
+    canvas_dim = local_dim * canvas_dim_mult
+    n_registers = 32
+    n_prefix = 1  # CLS
+
+    glimpse_grids = [8, 16]
+    canvas_grids = [16, 128]
+
+    # Table: Cross-Attention FLOPs per Adapter
+    table = Table(title=f"Cross-Attention FLOPs per Adapter (ViT-S local={local_dim}, canvas={canvas_dim})")
+    table.add_column("Glimpse", style="bold")
+    table.add_column("Canvas", style="bold")
+    table.add_column("Attention", style="bold")
+    table.add_column("SDPA", justify="right")
+    table.add_column("Proj", justify="right")
+    table.add_column("Total", justify="right")
+
+    for g in glimpse_grids:
+        for c in canvas_grids:
+            n_local = g * g + n_prefix
+            n_canvas = c * c + n_registers
+
+            # SDPA is same for both (read + write, in canvas_dim space)
+            sdpa = sdpa_flops(n_local, n_canvas, canvas_dim) + sdpa_flops(n_canvas, n_local, canvas_dim)
+
+            # Regular: local + canvas projections
+            reg_proj = regular_proj_flops(n_local, n_canvas, local_dim, canvas_dim)
+            reg_total = sdpa + reg_proj
+
+            # Canvas: only local projections (canvas uses EWA)
+            can_proj = canvas_proj_flops(n_local, local_dim, canvas_dim)
+            can_total = sdpa + can_proj
+
+            table.add_row(
+                f"{g}×{g}",
+                f"{c}×{c}",
+                "Regular",
+                fmt(sdpa),
+                fmt(reg_proj),
+                fmt(reg_total),
+            )
+            table.add_row(
+                "",
+                "",
+                "[cyan]Canvas[/cyan]",
+                fmt(sdpa),
+                f"[cyan]{fmt(can_proj)}[/cyan]",
+                f"[cyan]{fmt(can_total)}[/cyan]",
+            )
+            # Multiplier row
+            table.add_row(
+                "",
+                "",
+                "[green]×[/green]",
+                "—",
+                f"[green]×{reg_proj / can_proj:.1f}[/green]",
+                f"[green]×{reg_total / can_total:.1f}[/green]",
+                end_section=True,
+            )
+
+    console.print(table)
+    console.print()
+
+    # Params comparison
+    canvas_p = canvas_attention_params(local_dim, canvas_dim)
+    regular_p = regular_attention_params(local_dim, canvas_dim)
+    console.print("[bold]Params per adapter:[/bold]")
+    console.print(f"  Canvas:  {fmt(canvas_p)}")
+    console.print(f"  Regular: {fmt(regular_p)} (×{regular_p / canvas_p:.1f})")
+
+
+def verify_formulas() -> None:
+    """Verify formulas match actual model introspection."""
+    from pathlib import Path
+
+    from canvit import CanViT, CanViTConfig
+    from canvit.attention import ScaledResidualAttention
+    from canvit.backbone.dinov3 import DINOv3Backbone
     from dinov3.hub.backbones import dinov3_vits16
 
-    backbone = DINOv3Backbone(dinov3_vits16(weights=str(CKPT_PATH), pretrained=True))
-    D = backbone.embed_dim
-    P = backbone.patch_size_px
+    ckpt = Path("dinov3_vits16_pretrain_lvd1689m-08c60483.pth")
+    if not ckpt.exists():
+        print(f"Skipping verification: {ckpt} not found")
+        return
 
-    model = ActiveCanViT(backbone, ActiveCanViTConfig(), teacher_dim=D)
-    cfg = model.cfg
-    canvit_cfg = cfg.canvit
+    backbone = DINOv3Backbone(dinov3_vits16(weights=str(ckpt), pretrained=True))
+    # Use 24 heads to divide canvas_dim=768 evenly (768/24=32 head_dim)
+    cfg = CanViTConfig(canvas_num_heads=24)
+    model = CanViT(backbone, cfg)
 
-    print("=" * 80)
-    print("FLOPs Calculator for ActiveCanViT")
-    print("=" * 80)
-    print(f"Backbone: DINOv3 ViT-S/16 (D={D}, heads={backbone.num_heads}, blocks={backbone.n_blocks}, P={P})")
-    print(f"Config: glimpse={cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({cfg.glimpse_grid_size * P}px), "
-          f"registers={canvit_cfg.n_canvas_registers}, stride={canvit_cfg.adapter_stride}")
-    print()
+    local_dim = model.local_dim
+    canvas_dim = model.canvas_dim
+    n_local = 65  # 8×8 + 1 CLS
+    n_canvas = 288  # 16×16 + 32 registers
 
-    print(f"{'Canvas':<10} {'Teacher':<10} {'Infer':<10} {'Train':<10}")
-    print("-" * 44)
+    # Get actual FLOPs from model
+    read_attn: ScaledResidualAttention = model.read_attn[0]  # type: ignore[assignment]
+    write_attn: ScaledResidualAttention = model.write_attn[0]  # type: ignore[assignment]
+    actual_read = read_attn.flops(n_local, n_canvas)
+    actual_write = write_attn.flops(n_canvas, n_local)
+    actual_total = actual_read + actual_write
 
-    for canvas_grid in CANVAS_GRIDS:
-        t = teacher_flops(backbone, canvas_grid ** 2)
-        s = step_flops(model, canvas_grid)
+    # Formula prediction
+    predicted = canvas_attention_flops(n_local, n_canvas, local_dim, canvas_dim)
 
-        print(
-            f"{canvas_grid}x{canvas_grid:<7} "
-            f"{fmt(t.total):<10} "
-            f"{fmt(s.total_infer):<10} "
-            f"{fmt(s.total_train):<10}"
-        )
-
-    print()
-    print("Legend:")
-    print("  Teacher = Full ViT at canvas resolution")
-    print("  Infer   = One step without scene_proj")
-    print("  Train   = One step with scene_proj for loss")
-    print()
-
-    print_detailed_breakdown(model, CANVAS_GRIDS[-1])
+    print(f"\n[bold]Formula verification (8×8 → 16×16, local={local_dim}, canvas={canvas_dim}):[/bold]")
+    print(f"  Actual (model):   {actual_total:,}")
+    print(f"  Predicted:        {predicted:,}")
+    assert actual_total == predicted, f"Mismatch: {actual_total} != {predicted}"
+    print("  ✓ Match!")
 
 
 if __name__ == "__main__":
     main()
+    verify_formulas()
