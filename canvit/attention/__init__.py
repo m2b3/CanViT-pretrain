@@ -18,7 +18,7 @@ class CrossAttentionConfig:
     pre_proj_q_ln: bool = True
     pre_proj_k_ln: bool = True
     pre_proj_v_ln: bool = True
-    post_proj_qk_ln: bool = False
+    post_proj_qk_ln: bool = True
     use_ewa_transforms: bool = True
 
 
@@ -124,8 +124,12 @@ class ReadCrossAttention(CanvasCrossAttention):
             cfg=cfg,
         )
         self.q_transform = nn.Linear(local_dim, canvas_dim)
-        self.k_transform = ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
-        self.v_transform = ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        self.k_transform = (
+            ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        )
+        self.v_transform = (
+            ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        )
         self.out_transform = nn.Linear(canvas_dim, local_dim)
 
 
@@ -151,10 +155,14 @@ class WriteCrossAttention(CanvasCrossAttention):
             num_heads=num_heads,
             cfg=cfg,
         )
-        self.q_transform = ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        self.q_transform = (
+            ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        )
         self.k_transform = nn.Linear(local_dim, canvas_dim)
         self.v_transform = nn.Linear(local_dim, canvas_dim)
-        self.out_transform = ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        self.out_transform = (
+            ElementwiseAffine(canvas_dim) if cfg.use_ewa_transforms else nn.Identity()
+        )
 
 
 @final
