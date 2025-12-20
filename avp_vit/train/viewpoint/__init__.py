@@ -15,39 +15,53 @@ from avp_vit.glimpse import Viewpoint
 class ViewpointScaleConfig:
     """Viewpoint scale distribution: Beta over area fraction.
 
-    Samples area_fraction ~ Beta(alpha, beta) on [min_area, max_area],
-    then computes scale = sqrt(area_fraction).
-
-    Relationship: area_fraction = scale², so scale = sqrt(area_fraction).
+    For each sample:
+    1. Center sampled uniformly in [-1, 1]²
+    2. max_scale = min(1 - |y|, 1 - |x|) (viewpoint must fit)
+    3. area ~ Beta(alpha, beta) on [min_area, max_scale²]
+    4. scale = sqrt(area)
     """
 
     alpha: float = 1.0  # Uniform by default
     beta: float = 1.0
     min_area: float = (1 / 128) ** 2  # scale=1/128 → area=1/16384
-    max_area: float = 1.0
 
 
-def sample_scales(B: int, device: torch.device, cfg: ViewpointScaleConfig) -> Tensor:
-    """Sample scales from Beta distribution over area fraction."""
-    # MPS doesn't support Dirichlet (used by Beta), sample on CPU and transfer
-    # CUDA/CPU sample directly on device (no sync)
+def _sample_unit_beta(B: int, device: torch.device, alpha: float, beta: float) -> Tensor:
+    """Sample from Beta(alpha, beta) on [0, 1], directly on device (no sync)."""
     if device.type == "mps":
-        unit_area = torch.distributions.Beta(cfg.alpha, cfg.beta).sample((B,)).to(device)
+        # MPS doesn't support Dirichlet (used by Beta internally)
+        return torch.distributions.Beta(alpha, beta).sample((B,)).to(device)
     else:
-        alpha = torch.tensor(cfg.alpha, device=device)
-        beta = torch.tensor(cfg.beta, device=device)
-        unit_area = torch.distributions.Beta(alpha, beta).sample((B,))
-    # Scale to [min_area, max_area]
-    area = cfg.min_area + (cfg.max_area - cfg.min_area) * unit_area
-    # area = scale² → scale = sqrt(area)
-    return torch.sqrt(area)
+        a = torch.tensor(alpha, device=device)
+        b = torch.tensor(beta, device=device)
+        return torch.distributions.Beta(a, b).sample((B,))
 
 
 def random_viewpoint(B: int, device: torch.device, cfg: ViewpointScaleConfig) -> Viewpoint:
-    """Random viewpoint with Beta-distributed area, center constrained to stay in bounds."""
-    scales = sample_scales(B, device, cfg)
-    max_offset = (1 - scales).unsqueeze(1)
-    centers = (torch.rand(B, 2, device=device) * 2 - 1) * max_offset
+    """Random viewpoint: uniform center (constrained), then scale from Beta over area.
+
+    1. min_scale = sqrt(min_area)
+    2. Sample centers uniformly in [-(1 - min_scale), (1 - min_scale)]²
+    3. max_scale = min(1 - |y|, 1 - |x|) ≥ min_scale (guaranteed by center constraint)
+    4. Sample area from Beta on [min_area, max_scale²], scale = sqrt(area)
+    """
+    min_scale = cfg.min_area ** 0.5
+    max_center = 1 - min_scale
+
+    # 1. Uniform centers in valid range
+    centers = (torch.rand(B, 2, device=device) * 2 - 1) * max_center  # (y, x)
+
+    # 2. Max scale per sample (≥ min_scale by construction)
+    max_scale = (1 - centers.abs()).min(dim=1).values  # [B]
+
+    # 3. Sample area from Beta on [min_area, max_scale²]
+    unit = _sample_unit_beta(B, device, cfg.alpha, cfg.beta)
+    min_area = cfg.min_area
+    max_area = max_scale.square()
+    area = min_area + (max_area - min_area) * unit
+    scales = torch.sqrt(area)
+
     return Viewpoint(name="random", centers=centers, scales=scales)
 
 

@@ -15,15 +15,37 @@ def test_random_viewpoint_shapes():
     assert vp.scales.shape == (B,)
 
 
-def test_random_viewpoint_bounds():
-    """Scale bounds derived from area bounds: scale = sqrt(area)."""
-    B = 1000
-    min_area, max_area = 0.1, 0.5
-    cfg = ViewpointScaleConfig(min_area=min_area, max_area=max_area)
+def test_random_viewpoint_centers_uniform():
+    """Centers sampled uniformly, constrained to allow min_scale."""
+    B = 10000
+    cfg = ViewpointScaleConfig()
+    min_scale = cfg.min_area ** 0.5
+    max_center = 1 - min_scale
     vp = random_viewpoint(B, torch.device("cpu"), cfg)
-    # scale = sqrt(area), so bounds are sqrt(min_area) to sqrt(max_area)
+    # All centers in valid range
+    assert (vp.centers >= -max_center - 1e-6).all()
+    assert (vp.centers <= max_center + 1e-6).all()
+    # Roughly uniform (mean ≈ 0)
+    assert vp.centers.mean().abs() < 0.05
+
+
+def test_random_viewpoint_fits():
+    """Viewpoint always fits: |center| + scale ≤ 1."""
+    B = 10000
+    cfg = ViewpointScaleConfig()
+    vp = random_viewpoint(B, torch.device("cpu"), cfg)
+    # For each dim: |center| + scale ≤ 1
+    margin = vp.centers.abs() + vp.scales.unsqueeze(1)
+    assert (margin <= 1 + 1e-6).all()
+
+
+def test_random_viewpoint_min_scale():
+    """Scale never below sqrt(min_area)."""
+    B = 10000
+    min_area = 0.01
+    cfg = ViewpointScaleConfig(min_area=min_area)
+    vp = random_viewpoint(B, torch.device("cpu"), cfg)
     assert (vp.scales >= math.sqrt(min_area) - 1e-6).all()
-    assert (vp.scales <= math.sqrt(max_area) + 1e-6).all()
 
 
 def test_eval_viewpoints():
