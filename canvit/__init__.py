@@ -65,8 +65,6 @@ class CanViT(nn.Module):
 
     backbone: ViTBackbone
     cfg: CanViTConfig
-    local_dim: int
-    canvas_dim: int
     read_attn: nn.ModuleList
     write_attn: nn.ModuleList
     # Canvas init
@@ -91,9 +89,6 @@ class CanViT(nn.Module):
         canvas_num_heads = cfg.canvas_num_heads
         canvas_head_dim = cfg.canvas_head_dim
         canvas_dim = canvas_num_heads * canvas_head_dim
-
-        self.local_dim = local_dim
-        self.canvas_dim = canvas_dim
 
         n_blocks = backbone.n_blocks
         n_adapters = (n_blocks - 1) // cfg.adapter_stride
@@ -138,6 +133,14 @@ class CanViT(nn.Module):
             "canvas_rope_periods",
             make_rope_periods(canvas_head_dim, backbone.rope_dtype),
         )
+
+    @property
+    def local_dim(self) -> int:
+        return self.backbone.embed_dim
+
+    @property
+    def canvas_dim(self) -> int:
+        return self.cfg.canvas_num_heads * self.cfg.canvas_head_dim
 
     @property
     def n_canvas_registers(self) -> int:
