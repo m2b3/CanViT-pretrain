@@ -40,7 +40,7 @@ class LossOutputs(NamedTuple):
 class ActiveCanViTConfig:
     """Config for ActiveCanViT (active vision wrapper)."""
 
-    glimpse_grid_size: int = 8  # 8x8 patches = 128px for patch_size=16
+    glimpse_grid_size: int = 2  # 2x2 patches = 32px for patch_size=16
     gradient_checkpointing: bool = False
     use_scene_loss: bool = True
     use_cls_loss: bool = True

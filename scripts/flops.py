@@ -120,8 +120,8 @@ def main() -> None:
     n_registers = 32
     n_prefix = 1  # CLS
 
-    glimpse_grids = [8, 16]
-    canvas_grids = [16, 128]
+    glimpse_grids = [2, 4, 8]
+    canvas_grids = [16, 32]
 
     # Table: Cross-Attention FLOPs per Adapter
     table = Table(title=f"Cross-Attention FLOPs per Adapter (ViT-S local={local_dim}, canvas={canvas_dim})")
