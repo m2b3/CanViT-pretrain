@@ -75,10 +75,10 @@ class CanViT(nn.Module):
     cls_init: nn.Parameter
     spatial_init: nn.Parameter
     registers: nn.Parameter
-    # Canvas layer scales (gate previous canvas contribution)
-    cls_scale: nn.Parameter | None
-    reg_scales: nn.Parameter | None
-    spatial_scale: nn.Parameter | None
+    # Canvas gate logits (sigmoid → λ ∈ (0,1) for leaky integration)
+    cls_gate_logit: nn.Parameter | None
+    reg_gate_logits: nn.Parameter | None
+    spatial_gate_logit: nn.Parameter | None
     # RoPE periods for cross-attention
     # Backbone self-attn uses backbone.rope_periods (backbone_head_dim = local_dim / backbone.num_heads)
     # Cross-attn uses canvas_rope_periods (canvas_head_dim from config)
@@ -124,14 +124,17 @@ class CanViT(nn.Module):
         self.registers = nn.Parameter(torch.randn(1, cfg.n_canvas_registers, canvas_dim) * scale)
 
         if cfg.use_canvas_layer_scale:
-            init = cfg.layer_scale_init
-            self.cls_scale = nn.Parameter(torch.full((canvas_dim,), init))
-            self.reg_scales = nn.Parameter(torch.full((cfg.n_canvas_registers, canvas_dim), init))
-            self.spatial_scale = nn.Parameter(torch.full((canvas_dim,), init))
+            # Initialize logits so sigmoid(logit) = layer_scale_init
+            # logit(p) = ln(p / (1-p))
+            p = cfg.layer_scale_init
+            logit_init = math.log(p / (1 - p))
+            self.cls_gate_logit = nn.Parameter(torch.full((canvas_dim,), logit_init))
+            self.reg_gate_logits = nn.Parameter(torch.full((cfg.n_canvas_registers, canvas_dim), logit_init))
+            self.spatial_gate_logit = nn.Parameter(torch.full((canvas_dim,), logit_init))
         else:
-            self.cls_scale = None
-            self.reg_scales = None
-            self.spatial_scale = None
+            self.cls_gate_logit = None
+            self.reg_gate_logits = None
+            self.spatial_gate_logit = None
 
         # RoPE periods for cross-attention (canvas_head_dim)
         self.register_buffer(
@@ -177,14 +180,17 @@ class CanViT(nn.Module):
         reg_init = self.registers.expand(B, -1, -1)
         spatial_init = self.spatial_init.expand(B, n_spatial, -1)
 
-        if self.cls_scale is not None:
-            assert self.reg_scales is not None and self.spatial_scale is not None
-            # Leaky integration: inits + λ*(prev - inits)
-            cls = cls_init + self.cls_scale * (previous[:, :1] - cls_init)
-            reg = reg_init + self.reg_scales * (previous[:, 1 : 1 + n_reg] - reg_init)
-            spatial = spatial_init + self.spatial_scale * (previous[:, 1 + n_reg :] - spatial_init)
+        if self.cls_gate_logit is not None:
+            assert self.reg_gate_logits is not None and self.spatial_gate_logit is not None
+            # Leaky integration: inits + λ*(prev - inits), λ = sigmoid(logit) ∈ (0,1)
+            cls_gate = torch.sigmoid(self.cls_gate_logit)
+            reg_gates = torch.sigmoid(self.reg_gate_logits)
+            spatial_gate = torch.sigmoid(self.spatial_gate_logit)
+            cls = cls_init + cls_gate * (previous[:, :1] - cls_init)
+            reg = reg_init + reg_gates * (previous[:, 1 : 1 + n_reg] - reg_init)
+            spatial = spatial_init + spatial_gate * (previous[:, 1 + n_reg :] - spatial_init)
         else:
-            # No layer scale: pass through previous unchanged
+            # No gating: pass through previous unchanged
             cls = previous[:, :1]
             reg = previous[:, 1 : 1 + n_reg]
             spatial = previous[:, 1 + n_reg :]
