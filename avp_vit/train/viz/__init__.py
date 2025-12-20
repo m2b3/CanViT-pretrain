@@ -213,8 +213,8 @@ def plot_multistep_pca(
     full_img: NDArray[np.floating],
     teacher: NDArray[np.floating],
     scenes: list[NDArray[np.floating]],
-    locals_avp: list[NDArray[np.floating]],
-    locals_teacher: list[NDArray[np.floating]],
+    locals_avp: list[NDArray[np.floating]] | None,
+    locals_teacher: list[NDArray[np.floating]] | None,
     glimpses: list[NDArray[np.floating]],
     boxes: list[PixelBox],
     names: list[str],
@@ -259,11 +259,12 @@ def plot_multistep_pca(
         matplotlib Figure
     """
     n_views = len(scenes)
-    assert len(locals_avp) == n_views
-    assert len(locals_teacher) == n_views
     assert len(glimpses) == n_views
     assert len(boxes) == n_views
     assert len(names) == n_views
+    if show_locals:
+        assert locals_avp is not None and len(locals_avp) == n_views
+        assert locals_teacher is not None and len(locals_teacher) == n_views
 
     show_hidden = hidden_spatials is not None
     if show_hidden:
@@ -399,6 +400,7 @@ def plot_multistep_pca(
         local_teacher_rgb = None
         pca_cropped: PCA | None = None
         if show_locals:
+            assert locals_avp is not None and locals_teacher is not None
             pca_local_teacher = fit_pca(locals_teacher[t])
             local_teacher_rgb = pca_rgb(pca_local_teacher, locals_teacher[t], G, G)
             pca_local_avp = fit_pca(locals_avp[t])

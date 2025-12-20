@@ -185,46 +185,50 @@ def viz_and_log(
             canvas_spatials = None
             initial_canvas_spatial = None
 
-        # Local features from model backbone
-        locals_model_raw = [
-            model_backbone.output_norm(
-                out.local[sample_idx : sample_idx + 1, n_prefix:]
-            ).squeeze(0)
-            for out in outputs
-        ]
-        locals_teacher_raw = [
-            teacher.forward_norm_features(
-                out.glimpse[sample_idx : sample_idx + 1]
-            ).patches.squeeze(0)
-            for out in outputs
-        ]
+        # Local features (only computed if show_locals - teacher glimpse inference is expensive)
+        if show_locals:
+            locals_model_raw = [
+                model_backbone.output_norm(
+                    out.local[sample_idx : sample_idx + 1, n_prefix:]
+                ).squeeze(0)
+                for out in outputs
+            ]
+            locals_teacher_raw = [
+                teacher.forward_norm_features(
+                    out.glimpse[sample_idx : sample_idx + 1]
+                ).patches.squeeze(0)
+                for out in outputs
+            ]
 
-        locals_model = [
-            (feat).cpu().float().numpy()
-            for feat, vp in zip(locals_model_raw, viewpoints, strict=True)
-        ]
-        locals_teacher = [
-            (feat).cpu().float().numpy()
-            for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
-        ]
+            locals_model = [
+                (feat).cpu().float().numpy()
+                for feat, vp in zip(locals_model_raw, viewpoints, strict=True)
+            ]
+            locals_teacher = [
+                (feat).cpu().float().numpy()
+                for feat, vp in zip(locals_teacher_raw, viewpoints, strict=True)
+            ]
 
-        # Cropped teacher: sample normalized full-image targets at viewpoint positions
-        # Shows "what teacher thinks at these positions with FULL image context"
-        # Target is already normalized, so cropped features are too
-        target_spatial = target.view(
-            target.shape[0], canvas_grid_size, canvas_grid_size, -1
-        ).permute(0, 3, 1, 2)
-        locals_teacher_cropped = [
-            sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)[
-                sample_idx
-            ]  # [D, G, G]
-            .permute(1, 2, 0)
-            .reshape(-1, target.shape[-1])  # [G², D]
-            .cpu()
-            .float()
-            .numpy()
-            for vp in viewpoints
-        ]
+            # Cropped teacher: sample normalized full-image targets at viewpoint positions
+            # Shows "what teacher thinks at these positions with FULL image context"
+            target_spatial = target.view(
+                target.shape[0], canvas_grid_size, canvas_grid_size, -1
+            ).permute(0, 3, 1, 2)
+            locals_teacher_cropped = [
+                sample_at_viewpoint(target_spatial, vp, glimpse_grid_size)[
+                    sample_idx
+                ]  # [D, G, G]
+                .permute(1, 2, 0)
+                .reshape(-1, target.shape[-1])  # [G², D]
+                .cpu()
+                .float()
+                .numpy()
+                for vp in viewpoints
+            ]
+        else:
+            locals_model = None
+            locals_teacher = None
+            locals_teacher_cropped = None
 
         glimpses = [
             imagenet_denormalize(out.glimpse[sample_idx].cpu()).numpy()
