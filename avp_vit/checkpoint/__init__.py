@@ -2,6 +2,7 @@
 
 import logging
 import subprocess
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -141,3 +142,73 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         log.info(f"  comet={data['comet_id']}")
 
     return data
+
+
+BACKBONE_REGISTRY: dict[str, str] = {
+    "dinov3_vits16": "dinov3.hub.backbones.dinov3_vits16",
+    "dinov3_vits16plus": "dinov3.hub.backbones.dinov3_vits16plus",
+    "dinov3_vitb16": "dinov3.hub.backbones.dinov3_vitb16",
+    "dinov3_vitl16": "dinov3.hub.backbones.dinov3_vitl16",
+    "dinov3_vitl16plus": "dinov3.hub.backbones.dinov3_vitl16plus",
+}
+
+
+def _get_backbone_factory(name: str) -> Callable[..., torch.nn.Module]:
+    """Get backbone factory by name. Raises ValueError if unknown."""
+    if name not in BACKBONE_REGISTRY:
+        available = ", ".join(sorted(BACKBONE_REGISTRY.keys()))
+        raise ValueError(f"Unknown backbone: {name!r}. Available: {available}")
+
+    module_path = BACKBONE_REGISTRY[name]
+    module_name, func_name = module_path.rsplit(".", 1)
+
+    import importlib
+    module = importlib.import_module(module_name)
+    return getattr(module, func_name)
+
+
+def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = True) -> ActiveCanViT:
+    """Load ActiveCanViT from checkpoint.
+
+    Args:
+        path: Checkpoint file path.
+        device: Target device.
+        strict: If True (default), state_dict must match exactly. If False, ignores missing/extra keys.
+
+    Returns:
+        Model in eval mode on target device.
+
+    Raises:
+        ValueError: Unknown backbone or checkpoint format issues.
+        RuntimeError: State dict mismatch (if strict=True).
+    """
+    from avp_vit import ActiveCanViTConfig
+    from canvit.backbone.dinov3 import DINOv3Backbone
+
+    ckpt = load(path, device)
+
+    # Validate required fields
+    for key in ("backbone", "model_config", "teacher_dim", "state_dict"):
+        if key not in ckpt:
+            raise ValueError(f"Checkpoint missing required field: {key!r}")
+
+    factory = _get_backbone_factory(ckpt["backbone"])
+    raw_backbone = factory(pretrained=False)
+    backbone = DINOv3Backbone(raw_backbone)
+
+    cfg = ActiveCanViTConfig(**ckpt["model_config"])
+    model = ActiveCanViT(backbone, cfg, ckpt["teacher_dim"])
+
+    result = model.load_state_dict(ckpt["state_dict"], strict=strict)
+    if strict and (result.missing_keys or result.unexpected_keys):
+        raise RuntimeError(
+            f"State dict mismatch. Missing: {result.missing_keys}, Unexpected: {result.unexpected_keys}"
+        )
+    if result.missing_keys:
+        log.warning(f"Missing keys (ignored): {result.missing_keys}")
+    if result.unexpected_keys:
+        log.warning(f"Unexpected keys (ignored): {result.unexpected_keys}")
+
+    if isinstance(device, str):
+        device = torch.device(device)
+    return model.to(device).eval()

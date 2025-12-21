@@ -15,22 +15,22 @@ from tqdm import tqdm
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
-from ymc.lr import get_linear_scaled_lr
-from ytch.model import count_parameters
+from ymc.lr import get_linear_scaled_lr  # noqa: E402
+from ytch.model import count_parameters  # noqa: E402
 
-from avp_vit import ActiveCanViTConfig
-from canvit.backbone.dinov3 import NormFeatures
-from avp_vit.checkpoint import load as load_checkpoint
-from avp_vit.checkpoint import save as save_checkpoint
-from avp_vit.train import InfiniteLoader, get_loss_fn, warmup_cosine_scheduler
-from avp_vit.train.norm import PositionAwareNorm
-from avp_vit.glimpse import Viewpoint
-from avp_vit.train.viewpoint import random_viewpoint
+from avp_vit import ActiveCanViTConfig  # noqa: E402
+from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
+from avp_vit.checkpoint import load as load_checkpoint  # noqa: E402
+from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
+from avp_vit.train import InfiniteLoader, get_loss_fn, warmup_cosine_scheduler  # noqa: E402
+from avp_vit.train.norm import PositionAwareNorm  # noqa: E402
+from avp_vit.glimpse import Viewpoint  # noqa: E402
+from avp_vit.train.viewpoint import random_viewpoint  # noqa: E402
 
-from .config import Config
-from .data import create_loaders, scene_size_px
-from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher
-from .viz import eval_and_log, val_metrics_only, viz_and_log
+from .config import Config  # noqa: E402
+from .data import create_loaders, scene_size_px  # noqa: E402
+from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
+from .viz import eval_and_log, val_metrics_only, viz_and_log  # noqa: E402
 
 log = logging.getLogger(__name__)
 
