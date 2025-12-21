@@ -8,7 +8,15 @@ from avp_vit.train.data import (
     train_transform,
     val_transform,
 )
-from avp_vit.train.loss import LOSS_FNS, LossFn, LossType, cos_dissim, get_loss_fn
+from avp_vit.train.loss import (
+    LOSS_FNS,
+    LossFn,
+    LossType,
+    cos_dissim,
+    get_loss_fn,
+    gram_mse,
+    spatial_gram,
+)
 from avp_vit.train.scheduler import warmup_cosine_scheduler
 from avp_vit.train.state import SurvivalBatch
 from avp_vit.train.viewpoint import (
@@ -37,6 +45,7 @@ __all__ = [
     "cos_dissim",
     "fit_pca",
     "get_loss_fn",
+    "gram_mse",
     "imagenet_denormalize",
     "make_eval_viewpoints",
     "make_loader",
@@ -46,6 +55,7 @@ __all__ = [
     "plot_pca_grid",
     "plot_trajectory",
     "random_viewpoint",
+    "spatial_gram",
     "timestep_colors",
     "train_transform",
     "val_transform",

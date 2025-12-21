@@ -52,6 +52,7 @@ class Config:
     crop_scale_min: float = 0.8
     image_resolution: int = 512  # Source image size (independent of grid size)
     loss: LossType = "cos"
+    gram_loss_weight: float = 0.0  # 0 = metric only, >0 = add to training loss
     # Logging
     log_every: int = 20
     val_every: int = 250

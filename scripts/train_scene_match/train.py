@@ -21,7 +21,7 @@ from avp_vit import ActiveCanViTConfig  # noqa: E402
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 from avp_vit.checkpoint import load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
-from avp_vit.train import InfiniteLoader, get_loss_fn, warmup_cosine_scheduler  # noqa: E402
+from avp_vit.train import InfiniteLoader, get_loss_fn, gram_mse, warmup_cosine_scheduler  # noqa: E402
 from avp_vit.train.norm import PositionAwareNorm  # noqa: E402
 from avp_vit.glimpse import Viewpoint  # noqa: E402
 from avp_vit.train.viewpoint import random_viewpoint  # noqa: E402
@@ -193,10 +193,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     force_random_reset = False
 
     # EMA tracking
-    ema_scene_t = torch.tensor(0.0, device=cfg.device)
-    ema_cls_t = torch.tensor(0.0, device=cfg.device)
-    ema_loss_t = torch.tensor(0.0, device=cfg.device)
     alpha = 2 / (cfg.log_every + 1)
+    ema_scene: Tensor | None = None
+    ema_cls: Tensor | None = None
+    ema_gram: Tensor | None = None
+    ema_loss: Tensor | None = None
+
+    def ema_update(ema: Tensor | None, val: Tensor) -> Tensor:
+        v = val.detach()
+        return v if ema is None else alpha * v + (1 - alpha) * ema
 
     log.info(f"Starting training loop (p_reset={cfg.p_reset})...")
     pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
@@ -234,6 +239,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             if losses.cls is not None:
                 total_loss = total_loss + losses.cls
 
+            # Gram MSE: spatial covariance structure
+            final_scene = model.compute_scene(canvas)
+            gram_mse_t = gram_mse(final_scene, targets)
+            if cfg.gram_loss_weight > 0:
+                total_loss = total_loss + cfg.gram_loss_weight * gram_mse_t
+
             if not torch.isfinite(total_loss):
                 log.warning(f"NaN/Inf loss at step {step}, pruning trial")
                 exp.end()
@@ -250,34 +261,35 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         canvas = canvas.detach()
 
         # Update EMAs
-        scene_t = losses.scene.detach() if losses.scene is not None else torch.tensor(0.0, device=cfg.device)
-        cls_t = losses.cls.detach() if losses.cls is not None else torch.tensor(0.0, device=cfg.device)
-        total_t = total_loss.detach()
-        if step > 0:
-            ema_scene_t = alpha * scene_t + (1 - alpha) * ema_scene_t
-            ema_cls_t = alpha * cls_t + (1 - alpha) * ema_cls_t
-            ema_loss_t = alpha * total_t + (1 - alpha) * ema_loss_t
-        else:
-            ema_scene_t, ema_cls_t, ema_loss_t = scene_t, cls_t, total_t
+        scene_t = losses.scene if losses.scene is not None else torch.tensor(0.0, device=cfg.device)
+        cls_t = losses.cls if losses.cls is not None else torch.tensor(0.0, device=cfg.device)
+        ema_scene = ema_update(ema_scene, scene_t)
+        ema_cls = ema_update(ema_cls, cls_t)
+        ema_gram = ema_update(ema_gram, gram_mse_t)
+        ema_loss = ema_update(ema_loss, total_loss)
 
         if step % cfg.log_every == 0:
-            loss_ema = ema_loss_t.item()
+            assert ema_loss is not None and ema_gram is not None
             grad_norm = grad_norm_t.item()
             lr = scheduler.get_last_lr()[0]
             metrics = {
-                "train/loss": total_t.item(),
-                "train/loss_ema": loss_ema,
+                "train/loss": total_loss.item(),
+                "train/loss_ema": ema_loss.item(),
                 "train/grad_norm": grad_norm,
                 "train/lr": lr,
+                "train/gram_mse": gram_mse_t.item(),
+                "train/gram_mse_ema": ema_gram.item(),
             }
             if losses.scene is not None:
-                metrics["train/scene_loss"] = scene_t.item()
-                metrics["train/scene_loss_ema"] = ema_scene_t.item()
+                assert ema_scene is not None
+                metrics["train/scene_loss"] = losses.scene.item()
+                metrics["train/scene_loss_ema"] = ema_scene.item()
             if losses.cls is not None:
-                metrics["train/cls_loss"] = cls_t.item()
-                metrics["train/cls_loss_ema"] = ema_cls_t.item()
+                assert ema_cls is not None
+                metrics["train/cls_loss"] = losses.cls.item()
+                metrics["train/cls_loss_ema"] = ema_cls.item()
             exp.log_metrics(metrics, step=step)
-            pbar.set_postfix_str(f"loss={loss_ema:.2e} grad={grad_norm:.2e} lr={lr:.2e}")
+            pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
         if step % cfg.val_every == 0:
             for name, norm in grad_norms_by_module(model, depth=1).items():
@@ -293,7 +305,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 exp.log_metric("val/scene_l1", val_scene_l1, step=step)
 
             if step > 0:
-                trial.report(ema_loss_t.item(), step)
+                trial.report(ema_loss.item(), step)
                 if trial.should_prune():
                     exp.end()
                     raise optuna.TrialPruned()
@@ -322,20 +334,21 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         if step % cfg.ckpt_every == 0:
             save_checkpoint(
                 ckpt_path, model, cfg.student_model,
-                step=step, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),
+                step=step, train_loss=ema_loss.item(), comet_id=exp.get_key(),
                 scene_norm_state=scene_norm.state_dict(),
                 cls_norm_state=cls_norm.state_dict(),
             )
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
 
+    assert ema_loss is not None
     save_checkpoint(
         ckpt_path, model, cfg.student_model,
-        step=cfg.n_steps, train_loss=ema_loss_t.item(), comet_id=exp.get_key(),
+        step=cfg.n_steps, train_loss=ema_loss.item(), comet_id=exp.get_key(),
         scene_norm_state=scene_norm.state_dict(),
         cls_norm_state=cls_norm.state_dict(),
     )
 
-    log.info(f"Final: train_ema={ema_loss_t.item():.4f}")
+    log.info(f"Final: train_ema={ema_loss.item():.4f}")
     exp.end()
-    return ema_loss_t.item()
+    return ema_loss.item()
