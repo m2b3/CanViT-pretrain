@@ -24,7 +24,7 @@ class Config:
     grid_size: int = 16
     batch_size: int = 128
     p_reset: float = 0.5  # Probability of resetting canvas each step
-    ref_lr: float = 5e-7
+    peak_lr: float = 1e-4
     weight_decay: float = 0.05
     n_viewpoints_per_step: int = (
         2  # Inner loop viewpoints (>=2 for length generalization)

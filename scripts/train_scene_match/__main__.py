@@ -29,12 +29,12 @@ def main() -> None:
     log.info("=" * 60)
 
     def objective(trial: optuna.Trial) -> float:
-        ref_lr = trial.suggest_float("ref_lr", 1e-6, 1e-2, log=True)
-        train_cfg = replace(cfg, ref_lr=ref_lr)
+        peak_lr = trial.suggest_float("peak_lr", 1e-6, 1e-2, log=True)
+        train_cfg = replace(cfg, peak_lr=peak_lr)
         return train(train_cfg, trial)
 
     study = optuna.create_study(direction="minimize")
-    study.enqueue_trial({"ref_lr": cfg.ref_lr})
+    study.enqueue_trial({"peak_lr": cfg.peak_lr})
     study.optimize(objective, n_trials=cfg.n_trials)
 
     log.info("=" * 60)

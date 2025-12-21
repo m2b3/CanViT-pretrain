@@ -15,7 +15,6 @@ from tqdm import tqdm
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
-from ymc.lr import get_linear_scaled_lr  # noqa: E402
 from ytch.model import count_parameters  # noqa: E402
 
 from avp_vit import ActiveCanViTConfig  # noqa: E402
@@ -141,10 +140,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Model total: {n_total:,}, trainable: {n_trainable:,} ({100 * n_trainable / n_total:.1f}%)")
     exp.log_parameters({"trainable_params": n_trainable, "total_params": n_total})
 
-    peak_lr = get_linear_scaled_lr(cfg.ref_lr, cfg.batch_size)
-    optimizer = torch.optim.AdamW(trainable, lr=peak_lr, weight_decay=cfg.weight_decay)
+    optimizer = torch.optim.AdamW(trainable, lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
     scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, cfg.warmup_steps)
-    log.info(f"Optimizer: AdamW, peak_lr={peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
+    log.info(f"Optimizer: AdamW, peak_lr={cfg.peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
 
     viz_steps = log_spaced_steps(cfg.total_viz, cfg.n_steps)
     curve_steps = log_spaced_steps(cfg.total_curves, cfg.n_steps)
