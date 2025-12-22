@@ -12,6 +12,7 @@ User flow:
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import plotly.graph_objects as go
@@ -57,12 +58,12 @@ class StepResult:
 
 @dataclass
 class Resources:
-    model: object  # ActiveCanViT
+    model: Any  # ActiveCanViT - using Any to avoid complex type deps
     teacher: DINOv3Backbone | None
     scene_norm: PositionAwareNorm | None
     cls_norm: PositionAwareNorm | None
     probe: DINOv3LinearClassificationHead | None
-    ckpt: dict
+    ckpt: Any
     patch_size: int
     backbone: str
     ckpt_step: int
@@ -80,7 +81,8 @@ def load_resources(ckpt_path: str, device_name: str) -> Resources:
     teacher = None
     try:
         factory = _get_backbone_factory(ckpt["backbone"])
-        teacher = DINOv3Backbone(factory(pretrained=True).to(device).eval())
+        raw = factory(pretrained=True).to(device).eval()
+        teacher = DINOv3Backbone(raw)  # type: ignore[arg-type]
     except Exception:
         pass
 
@@ -109,7 +111,7 @@ def load_resources(ckpt_path: str, device_name: str) -> Resources:
         ckpt=ckpt,
         patch_size=model.backbone.patch_size_px,
         backbone=ckpt.get("backbone", "?"),
-        ckpt_step=ckpt.get("step", -1),
+        ckpt_step=int(ckpt.get("step") or -1),
     )
 
 
@@ -295,7 +297,9 @@ def main() -> None:
         imagenet_normalize(),
     ])
     pil = Image.open(uploaded).convert("RGB")
-    image = transform(pil).unsqueeze(0).to(device)
+    img_t = transform(pil)
+    assert isinstance(img_t, Tensor)
+    image = img_t.unsqueeze(0).to(device)
     img_np = imagenet_denormalize(image[0].cpu()).numpy()
     H, W = img_np.shape[:2]
     img_pil = Image.fromarray((img_np * 255).astype(np.uint8))
@@ -368,15 +372,41 @@ def main() -> None:
             with cols[i]:
                 st.metric(label, f"{100*prob:.1f}%")
 
-    # Metrics plot
+    # Metrics plots
     if n > 0:
+        st.markdown("---")
         scene_sims = [r.scene_cos for r in results if r.scene_cos is not None]
-        if scene_sims:
-            st.markdown("---")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=list(range(len(scene_sims))), y=scene_sims, mode="lines+markers", name="Scene cos"))
-            fig.update_layout(title="Similarity vs Timestep", xaxis_title="T", yaxis_title="Cosine", height=250, margin=dict(l=40, r=40, t=40, b=40))
-            st.plotly_chart(fig, use_container_width=True)
+        step_times = [r.step_ms for r in results]
+
+        col_sim, col_lat = st.columns(2)
+
+        with col_sim:
+            if scene_sims:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=list(range(len(scene_sims))), y=scene_sims, mode="lines+markers", name="Scene cos"))
+                fig.update_layout(title="Similarity vs Timestep", xaxis_title="T", yaxis_title="Cosine", height=250, margin=dict(l=20, r=20, t=40, b=40))
+                st.plotly_chart(fig, use_container_width=True)
+
+        with col_lat:
+            if step_times:
+                fig = go.Figure()
+                # Teacher baseline
+                teacher_ms = st.session_state.get("teacher_ms", 0)
+                if teacher_ms > 0:
+                    fig.add_trace(go.Box(
+                        y=[teacher_ms], name=f"Teacher {teacher_grid}²",
+                        marker_color="rgba(100,100,100,0.6)", boxpoints="all"
+                    ))
+                # Model steps
+                fig.add_trace(go.Box(
+                    y=step_times, name=f"Model {glimpse_grid}→{canvas_grid}",
+                    boxpoints="all", jitter=0.3, pointpos=0, marker_color="rgba(66,133,244,0.6)"
+                ))
+                fig.update_layout(
+                    title="Latency Distribution",
+                    yaxis_title="ms", height=250, margin=dict(l=20, r=20, t=40, b=40), showlegend=False
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
     # Timeline
     n_results = len(results)
