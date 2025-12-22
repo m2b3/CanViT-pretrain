@@ -518,15 +518,17 @@ def main() -> None:
         for i in range(n_show):
             t = start_t + i
             with cols[i]:
-                # Glimpse
-                st.image((np.clip(results[t].glimpse, 0, 1) * 255).astype(np.uint8), width=80)
-                # Hidden (own PCA)
+                # Glimpse (upscale for better expand view)
+                glimpse_pil = Image.fromarray((np.clip(results[t].glimpse, 0, 1) * 255).astype(np.uint8))
+                glimpse_big = glimpse_pil.resize((256, 256), Image.Resampling.LANCZOS)
+                st.image(glimpse_big, width=80)
+                # Hidden (own PCA) - upscale to 256 for expand, display at 80
                 h = results[t].hidden
                 pca_h = fit_pca(h)
-                st.image(upscale(pca_rgb(pca_h, h, canvas_grid, canvas_grid), 80), width=80)
+                st.image(upscale(pca_rgb(pca_h, h, canvas_grid, canvas_grid), 256), width=80)
                 # Projected (teacher PCA)
                 if pca_teacher is not None:
-                    st.image(upscale(pca_rgb(pca_teacher, results[t].projected, canvas_grid, canvas_grid, normalize=True), 80), width=80)
+                    st.image(upscale(pca_rgb(pca_teacher, results[t].projected, canvas_grid, canvas_grid, normalize=True), 256), width=80)
                 # Caption with scale and cos
                 vp_scale = viewpoints[t].scales[0].item() if t < len(viewpoints) else 0
                 cos = results[t].scene_cos
