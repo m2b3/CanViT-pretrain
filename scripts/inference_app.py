@@ -183,6 +183,7 @@ def run_step(
     # Shape assertions
     assert image.shape[0] == 1, f"batch size must be 1, got {image.shape[0]}"
     assert canvas.shape[0] == 1, f"canvas batch size must be 1, got {canvas.shape[0]}"
+    assert cls.shape[0] == 1, f"cls batch size must be 1, got {cls.shape[0]}"
 
     sync_device(image.device)
     t0 = time.perf_counter()
@@ -225,6 +226,7 @@ def run_step(
         top5 = [(IMAGENET_LABELS[i], prob) for i, prob in zip(c.tolist(), p.tolist())]
 
     glimpse_np = imagenet_denormalize(out.glimpse[0].cpu()).numpy()
+    assert glimpse_np.shape[0] == glimpse_px and glimpse_np.shape[1] == glimpse_px, f"glimpse shape {glimpse_np.shape[:2]} != {glimpse_px}²"
 
     return out.canvas, out.cls, StepResult(
         hidden=spatial.cpu().numpy(),
