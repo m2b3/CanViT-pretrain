@@ -216,7 +216,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 compute_gram=cfg.gram_loss_weight > 0,
             )
 
-            total_loss = (losses.scene or 0.0) + (losses.cls or 0.0)
+            total_loss = losses.scene + losses.cls
             if losses.gram is not None:
                 total_loss = total_loss + cfg.gram_loss_weight * losses.gram
 
@@ -233,10 +233,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         scheduler.step()
 
         # Update EMAs
-        if losses.scene is not None:
-            ema_scene = ema_update(ema_scene, losses.scene)
-        if losses.cls is not None:
-            ema_cls = ema_update(ema_cls, losses.cls)
+        ema_scene = ema_update(ema_scene, losses.scene)
+        ema_cls = ema_update(ema_cls, losses.cls)
         if losses.gram is not None:
             ema_gram = ema_update(ema_gram, losses.gram)
         ema_loss = ema_update(ema_loss, total_loss)
@@ -255,12 +253,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 assert ema_gram is not None
                 metrics["train/gram_mse"] = losses.gram.item()
                 metrics["train/gram_mse_ema"] = ema_gram.item()
-            if losses.scene is not None and ema_scene is not None:
-                metrics["train/scene_loss"] = losses.scene.item()
-                metrics["train/scene_loss_ema"] = ema_scene.item()
-            if losses.cls is not None and ema_cls is not None:
-                metrics["train/cls_loss"] = losses.cls.item()
-                metrics["train/cls_loss_ema"] = ema_cls.item()
+            assert ema_scene is not None and ema_cls is not None
+            metrics["train/scene_loss"] = losses.scene.item()
+            metrics["train/scene_loss_ema"] = ema_scene.item()
+            metrics["train/cls_loss"] = losses.cls.item()
+            metrics["train/cls_loss_ema"] = ema_cls.item()
             exp.log_metrics(metrics, step=step)
             pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 

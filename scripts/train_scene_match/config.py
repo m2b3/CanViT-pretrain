@@ -19,7 +19,8 @@ class Config:
     student_ckpt: Path | None = None  # None = random init
     freeze_student_backbone: bool = False
     # Model config (PretrainingConfig via alias)
-    model: ActiveCanViTConfig = field(default_factory=lambda: ActiveCanViTConfig())
+    # teacher_dim placeholder - overridden by create_model based on actual teacher
+    model: ActiveCanViTConfig = field(default_factory=lambda: ActiveCanViTConfig(teacher_dim=384))
     # Glimpse/canvas sizes (runtime, not in model config)
     gram_loss_weight: float = 1.0
     glimpse_grid_size: int = 4  # tokens per glimpse side

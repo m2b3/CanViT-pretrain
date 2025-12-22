@@ -6,6 +6,6 @@ from .config import Config
 def test_config_defaults() -> None:
     """Config has sensible defaults."""
     cfg = Config()
-    assert cfg.grid_size == 16
+    assert cfg.grid_size == 32
     assert cfg.batch_size == 128
-    assert 0.0 <= cfg.p_reset <= 1.0
+    assert cfg.n_viewpoints_per_step >= 1
