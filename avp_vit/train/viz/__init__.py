@@ -323,6 +323,10 @@ def plot_multistep_pca(
     teacher_rgb = pca_rgb(pca_teacher, teacher, S, S)
     initial_rgb = pca_rgb(pca_teacher, initial_scene, S, S, normalize=True)
 
+    # Scene with own PCA (initial)
+    pca_init_scene = fit_pca(initial_scene)
+    initial_scene_own_rgb = pca_rgb(pca_init_scene, initial_scene, S, S)
+
     # Hidden PCA for init (own basis)
     if show_hidden:
         assert initial_hidden_spatial is not None
@@ -353,9 +357,9 @@ def plot_multistep_pca(
             prev_hidden = h
 
     # Column indices
-    # Trajectory | Glimpse | Teacher | Scene | [Hidden] | [Local AVP] | [Local Teacher] | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
-    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE = 0, 1, 2, 3
-    c = 4
+    # Trajectory | Glimpse | Teacher | Scene | Scene (own) | [Hidden] | [Local AVP] | [Local Teacher] | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
+    C_TRAJ, C_GLIMPSE, C_TEACHER, C_SCENE, C_SCENE_OWN = 0, 1, 2, 3, 4
+    c = 5
     C_HIDDEN = c if show_hidden else None
     if show_hidden:
         c += 1
@@ -391,6 +395,10 @@ def plot_multistep_pca(
     axes[row, C_SCENE].set_title("Scene (init)")
     axes[row, C_SCENE].axis("off")
 
+    axes[row, C_SCENE_OWN].imshow(initial_scene_own_rgb)
+    axes[row, C_SCENE_OWN].set_title("Scene own (init)")
+    axes[row, C_SCENE_OWN].axis("off")
+
     if show_hidden:
         assert C_HIDDEN is not None and initial_hidden_rgb is not None
         axes[row, C_HIDDEN].imshow(initial_hidden_rgb)
@@ -424,6 +432,10 @@ def plot_multistep_pca(
     for t in range(n_views):
         row = t + 1
         scene_rgb = pca_rgb(pca_teacher, scenes[t], S, S, normalize=True)
+
+        # Scene with own PCA
+        pca_scene_t = fit_pca(scenes[t])
+        scene_own_rgb = pca_rgb(pca_scene_t, scenes[t], S, S)
 
         # Hidden: own PCA per timestep
         if show_hidden:
@@ -481,6 +493,11 @@ def plot_multistep_pca(
         axes[row, C_SCENE].imshow(scene_rgb)
         axes[row, C_SCENE].set_title(f"Scene t={t}")
         axes[row, C_SCENE].axis("off")
+
+        # Col: Scene (own PCA)
+        axes[row, C_SCENE_OWN].imshow(scene_own_rgb)
+        axes[row, C_SCENE_OWN].set_title("Scene own" if t == 0 else "")
+        axes[row, C_SCENE_OWN].axis("off")
 
         # Col: Hidden (own PCA per timestep)
         if show_hidden:
