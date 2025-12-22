@@ -214,6 +214,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 canvas_grid_size=G,
                 canvas=canvas,
                 compute_gram=cfg.gram_loss_weight > 0,
+                include_init=cfg.include_init,
             )
 
             total_loss = losses.scene + losses.cls
