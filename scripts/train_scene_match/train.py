@@ -1,6 +1,7 @@
 """Main training loop."""
 
 import logging
+from collections.abc import Callable
 from contextlib import nullcontext
 
 import comet_ml
@@ -66,7 +67,7 @@ def warmup_normalizer(
     scene_norm: PositionAwareNorm,
     cls_norm: PositionAwareNorm,
     train_loader: InfiniteLoader,
-    compute_raw_targets: callable,
+    compute_raw_targets: Callable[[Tensor, int], NormFeatures],
     warmup_images: int,
     scene_size: int,
     device: torch.device,
@@ -211,9 +212,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         viewpoints = [random_viewpoint(cfg.batch_size, cfg.device, min_scale=cfg.min_viewpoint_scale) for _ in range(cfg.n_viewpoints_per_step)]
 
         with amp_ctx:
-            losses, final_canvas = model.forward_loss(
+            result = model.forward_loss(
                 image=images,
-                viewpoints=viewpoints,
+                viewpoints=viewpoints,  # pyright: ignore[reportArgumentType] - Viewpoint subclass
                 spatial_target=targets,
                 cls_target=cls_targets,
                 glimpse_size_px=glimpse_size_px,
@@ -222,6 +223,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 compute_gram=cfg.gram_loss_weight > 0,
                 include_init=cfg.include_init,
             )
+            losses = result.losses
+            final_canvas = result.canvas
 
             total_loss = losses.scene + losses.cls
             if losses.gram is not None:
@@ -237,10 +240,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             cls_cos_sim: float | None = None
             if step % cfg.log_every == 0:
                 with torch.no_grad():
-                    scene_pred = model.compute_scene(final_canvas)
+                    scene_pred = model.predict_teacher_scene(final_canvas)
                     scene_cos_sim = F.cosine_similarity(scene_pred, targets, dim=-1).mean().item()
                     if model.cls_head is not None:
-                        cls_pred = model.compute_cls(final_canvas)
+                        cls_pred = model.predict_teacher_cls(result.cls)
                         cls_cos_sim = F.cosine_similarity(cls_pred, cls_targets, dim=-1).mean().item()
 
             optimizer.zero_grad()
