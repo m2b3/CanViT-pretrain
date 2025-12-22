@@ -16,7 +16,9 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
+from canvit import GlimpseOutput
 from canvit.backbone.dinov3 import DINOv3Backbone
+from canvit.viewpoint import Viewpoint as CanvitViewpoint
 
 from avp_vit import ActiveCanViT
 from avp_vit.checkpoint import _get_backbone_factory, load as load_ckpt, load_model
@@ -24,7 +26,6 @@ from avp_vit.train.data import val_transform
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import make_eval_viewpoints
-from canvit.viewpoint import Viewpoint as CoreViewpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -70,13 +71,24 @@ def run_trajectory(
     """Run coarse-to-fine trajectory and return CLS prediction at each timestep."""
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
-    traj = model.forward_trajectory(
+
+    def init_fn(_canvas: Tensor, _cls: Tensor) -> list[Tensor]:
+        return []
+
+    def step_fn(acc: list[Tensor], out: GlimpseOutput, _vp: CanvitViewpoint) -> list[Tensor]:
+        cls_pred = model.predict_teacher_cls(out.cls, out.canvas)
+        acc.append(cls_pred)
+        return acc
+
+    cls_preds, _, _ = model.forward_reduce(
         image=images,
-        viewpoints=[CoreViewpoint(v.centers, v.scales) for v in viewpoints],
+        viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
         canvas_grid_size=canvas_grid,
         glimpse_size_px=glimpse_size_px,
+        init_fn=init_fn,
+        step_fn=step_fn,
     )
-    return [model.predict_teacher_cls(out.cls) for out in traj.outputs]
+    return cls_preds
 
 
 @torch.inference_mode()

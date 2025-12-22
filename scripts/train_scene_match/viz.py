@@ -187,7 +187,7 @@ def viz_and_log(
     Uses forward_reduce to avoid O(B×T) memory - only sample 0 viz data is retained.
     """
     assert isinstance(model.backbone, DINOv3Backbone)
-    n_spatial = canvas.shape[1] - model.n_prefix
+    n_spatial = canvas.shape[1] - model.n_canvas_registers
     canvas_grid_size = int(n_spatial**0.5)
     assert canvas_grid_size**2 == n_spatial
     glimpse_grid_size = glimpse_size_px // model.backbone.patch_size_px
@@ -210,7 +210,7 @@ def viz_and_log(
             )
             if has_cls:
                 assert cls_target is not None
-                predicted_cls = model.predict_teacher_cls(out.cls)
+                predicted_cls = model.predict_teacher_cls(out.cls, out.canvas)
                 acc.cls_cos_sims.append(
                     F.cosine_similarity(predicted_cls, cls_target, dim=-1).mean().item()
                 )
@@ -378,7 +378,7 @@ def validate(
 
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
-    has_cls = model.cls_head is not None
+    has_cls = model.cls_proj is not None
     has_probe = probe is not None and labels is not None
 
     # Freeze normalizers during validation
@@ -423,7 +423,7 @@ def validate(
             def step_fn(acc: ValAccumulator, out: GlimpseOutput, _vp: CanvitViewpoint) -> ValAccumulator:
                 # Compute predictions from full batch (tensors discarded after this function)
                 predicted_scene = model.predict_teacher_scene(out.canvas)
-                predicted_cls = model.predict_teacher_cls(out.cls) if has_cls else None
+                predicted_cls = model.predict_teacher_cls(out.cls, out.canvas) if has_cls else None
 
                 # --- Batch-averaged metrics (full batch -> scalar -> discard) ---
                 scene_cos = F.cosine_similarity(predicted_scene, target, dim=-1).mean().item()

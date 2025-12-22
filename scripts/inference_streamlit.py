@@ -334,7 +334,7 @@ def run_inference_step(
         corr_gram_loss = correlation_gram_mse(pred_batch, target_batch).item()
 
     cls_cos_sim = None
-    cls_pred = model.predict_teacher_cls(out.cls)
+    cls_pred = model.predict_teacher_cls(out.cls, out.canvas)
     if cls_target is not None:
         cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
 

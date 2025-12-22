@@ -327,8 +327,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     with torch.no_grad():
                         scene_pred = model.predict_teacher_scene(final_canvas)
                         scene_cos_sim = F.cosine_similarity(scene_pred, batch.scene_target, dim=-1).mean().item()
-                        if model.cls_head is not None:
-                            cls_pred = model.predict_teacher_cls(result.cls)
+                        if model.cls_proj is not None:
+                            cls_pred = model.predict_teacher_cls(result.cls, result.canvas)
                             cls_cos_sim = F.cosine_similarity(cls_pred, batch.cls_target, dim=-1).mean().item()
 
                 optimizer.zero_grad()
@@ -370,9 +370,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 if cls_cos_sim is not None:
                     metrics["train/cls_cos_sim"] = cls_cos_sim
                 # Train IN1k accuracy (TTS = Teacher-to-Student probe)
-                if probe is not None and model.cls_head is not None:
+                if probe is not None and model.cls_proj is not None:
                     with torch.no_grad():
-                        cls_pred = model.predict_teacher_cls(result.cls)
+                        cls_pred = model.predict_teacher_cls(result.cls, result.canvas)
                         cls_raw = cls_norm.denormalize(cls_pred)
                         logits = probe(cls_raw)
                         train_in1k = compute_in1k_top1(logits, batch.labels)
