@@ -34,7 +34,9 @@ def sdpa_flops(n_q: int, n_kv: int, dim: int) -> int:
 # =============================================================================
 
 
-def canvas_read_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: int) -> int:
+def canvas_read_flops(
+    n_local: int, n_canvas: int, local_dim: int, canvas_dim: int
+) -> int:
     """CanvasReadAttention: local queries canvas.
 
     Q: Linear(local_dim → canvas_dim) on n_local tokens
@@ -49,7 +51,9 @@ def canvas_read_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: i
     return q_proj + o_proj + sdpa
 
 
-def canvas_write_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: int) -> int:
+def canvas_write_flops(
+    n_local: int, n_canvas: int, local_dim: int, canvas_dim: int
+) -> int:
     """CanvasWriteAttention: canvas queries local.
 
     Q: EWA (0 FLOPs)
@@ -64,12 +68,13 @@ def canvas_write_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: 
     return k_proj + v_proj + sdpa
 
 
-def canvas_adapter_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: int) -> int:
+def canvas_adapter_flops(
+    n_local: int, n_canvas: int, local_dim: int, canvas_dim: int
+) -> int:
     """One read + one write = one adapter."""
-    return (
-        canvas_read_flops(n_local, n_canvas, local_dim, canvas_dim)
-        + canvas_write_flops(n_local, n_canvas, local_dim, canvas_dim)
-    )
+    return canvas_read_flops(
+        n_local, n_canvas, local_dim, canvas_dim
+    ) + canvas_write_flops(n_local, n_canvas, local_dim, canvas_dim)
 
 
 # =============================================================================
@@ -77,7 +82,9 @@ def canvas_adapter_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim
 # =============================================================================
 
 
-def regular_read_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: int) -> int:
+def regular_read_flops(
+    n_local: int, n_canvas: int, local_dim: int, canvas_dim: int
+) -> int:
     """Regular cross-attention: local queries canvas.
 
     All projections are Linear.
@@ -95,7 +102,9 @@ def regular_read_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: 
     return q_proj + k_proj + v_proj + o_proj + sdpa
 
 
-def regular_write_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: int) -> int:
+def regular_write_flops(
+    n_local: int, n_canvas: int, local_dim: int, canvas_dim: int
+) -> int:
     """Regular cross-attention: canvas queries local.
 
     Q: Linear(canvas_dim → canvas_dim) on n_canvas tokens
@@ -112,12 +121,13 @@ def regular_write_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim:
     return q_proj + k_proj + v_proj + o_proj + sdpa
 
 
-def regular_adapter_flops(n_local: int, n_canvas: int, local_dim: int, canvas_dim: int) -> int:
+def regular_adapter_flops(
+    n_local: int, n_canvas: int, local_dim: int, canvas_dim: int
+) -> int:
     """One read + one write with regular cross-attention."""
-    return (
-        regular_read_flops(n_local, n_canvas, local_dim, canvas_dim)
-        + regular_write_flops(n_local, n_canvas, local_dim, canvas_dim)
-    )
+    return regular_read_flops(
+        n_local, n_canvas, local_dim, canvas_dim
+    ) + regular_write_flops(n_local, n_canvas, local_dim, canvas_dim)
 
 
 # =============================================================================
@@ -157,7 +167,9 @@ def backbone_block_flops(n_tokens: int, embed_dim: int, ffn_ratio: float) -> int
     return self_attn + ffn
 
 
-def patch_embed_flops(n_patches: int, patch_size: int, embed_dim: int, in_chans: int = 3) -> int:
+def patch_embed_flops(
+    n_patches: int, patch_size: int, embed_dim: int, in_chans: int = 3
+) -> int:
     """Patch embedding convolution FLOPs.
 
     Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
@@ -172,7 +184,9 @@ def patch_embed_flops(n_patches: int, patch_size: int, embed_dim: int, in_chans:
 # =============================================================================
 
 
-def canvas_attention_params(local_dim: int, canvas_dim: int, use_ewa: bool = True) -> int:
+def canvas_attention_params(
+    local_dim: int, canvas_dim: int, use_ewa: bool = True
+) -> int:
     """Canvas attention params per adapter (read + write).
 
     Read: Q Linear + O Linear + (K EWA + V EWA if use_ewa)
@@ -226,9 +240,9 @@ def main() -> None:
     console = Console()
 
     backbones = [
-        ("ViT-S", DINOv3Backbone(dinov3_vits16(pretrained=False))),
+        # ("ViT-S", DINOv3Backbone(dinov3_vits16(pretrained=False))),
         ("ViT-B", DINOv3Backbone(dinov3_vitb16(pretrained=False))),
-        ("ViT-L", DINOv3Backbone(dinov3_vitl16(pretrained=False))),
+        # ("ViT-L", DINOv3Backbone(dinov3_vitl16(pretrained=False))),
     ]
 
     for name, backbone in backbones:
@@ -237,7 +251,9 @@ def main() -> None:
         console.print()
 
 
-def _print_tables(console: Console, name: str, backbone: "DINOv3Backbone", model: "CanViT") -> None:
+def _print_tables(
+    console: Console, name: str, backbone: "DINOv3Backbone", model: "CanViT"
+) -> None:
     local_dim = model.local_dim
     canvas_dim = model.canvas_dim
     n_canvas_registers = model.cfg.n_canvas_registers
@@ -247,7 +263,7 @@ def _print_tables(console: Console, name: str, backbone: "DINOv3Backbone", model
     n_adapters = len(model.read_after_blocks)
     ffn_ratio = backbone.ffn_ratio
 
-    glimpse_grids = [2, 3, 4]
+    glimpse_grids = [3]
     canvas_grids = [16, 32, 64, 128, 256, 512]
 
     console.rule(f"[bold]{name}[/bold] (local={local_dim}, canvas={canvas_dim})")
@@ -308,12 +324,16 @@ def _print_tables(console: Console, name: str, backbone: "DINOv3Backbone", model
     console.print()
 
     # Table 2: Full Model FLOPs per Glimpse
-    table2 = Table(title=f"Full Model FLOPs per Glimpse ({n_blocks} blocks, {n_adapters} adapters)")
+    table2 = Table(
+        title=f"Full Model FLOPs per Glimpse ({n_blocks} blocks, {n_adapters} adapters)"
+    )
     table2.add_column("Glimpse", style="bold")
     table2.add_column("Canvas", style="bold")
     table2.add_column("Backbone", justify="right")
     table2.add_column("Adapters", justify="right")
     table2.add_column("Total", justify="right", style="bold")
+    table2.add_column("Backbone@Canvas", justify="right", style="dim")
+    table2.add_column("Savings", justify="right", style="green")
 
     for g in glimpse_grids:
         n_local = n_backbone_prefix + g * g
@@ -326,11 +346,24 @@ def _print_tables(console: Console, name: str, backbone: "DINOv3Backbone", model
 
         for c in canvas_grids:
             n_canvas = n_canvas_registers + c * c
+            n_canvas_patches = c * c
 
             # Canvas attention (all adapters)
-            adapters_total = n_adapters * canvas_adapter_flops(n_local, n_canvas, local_dim, canvas_dim)
+            adapters_total = n_adapters * canvas_adapter_flops(
+                n_local, n_canvas, local_dim, canvas_dim
+            )
 
             total = backbone_total + adapters_total
+
+            # Baseline: backbone at canvas resolution
+            canvas_patch_emb = patch_embed_flops(n_canvas_patches, patch_size, local_dim)
+            canvas_n_tokens = n_backbone_prefix + n_canvas_patches
+            canvas_blocks = n_blocks * backbone_block_flops(
+                canvas_n_tokens, local_dim, ffn_ratio
+            )
+            backbone_at_canvas = canvas_patch_emb + canvas_blocks
+
+            savings = backbone_at_canvas / total
 
             table2.add_row(
                 f"{g}×{g}",
@@ -338,6 +371,8 @@ def _print_tables(console: Console, name: str, backbone: "DINOv3Backbone", model
                 fmt(backbone_total),
                 fmt(adapters_total),
                 fmt(total),
+                fmt(backbone_at_canvas),
+                f"×{savings:.1f}",
             )
         table2.add_section()
 
