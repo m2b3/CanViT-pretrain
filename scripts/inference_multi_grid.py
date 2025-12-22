@@ -186,19 +186,27 @@ def main(args: Args) -> None:
                 teacher_upsampled[G] = teacher_upsampled_torch[G].cpu().numpy()
                 log.info(f"G={G}: teacher 16×16 → upsample to {G}×{G}")
 
-            canvas = model.init_canvas(1, G)
-            outputs, _ = model.forward_trajectory_full(image, viewpoints, canvas)
+            canvas = model.init_canvas(batch_size=1, canvas_grid_size=G)
+            glimpse_size_px = 8 * patch_size  # Default glimpse grid = 8 tokens
 
             hidden_list, projected_list, loss_list = [], [], []
-            scene_ln = model.scene_proj[0]
-            for out in outputs:
-                spatial = model.get_spatial(out.canvas)[0]
+            scene_ln = model.scene_head[0]
+            for vp in viewpoints:
+                out = model.forward_step(
+                    image=image,
+                    canvas=canvas,
+                    viewpoint=vp,
+                    glimpse_size_px=glimpse_size_px,
+                )
+                canvas = out.canvas
+                scene = model.compute_scene(canvas)
+                spatial = model.get_spatial(canvas)[0]
                 hidden = scene_ln(spatial).cpu().numpy() if args.hidden_ln else spatial.cpu().numpy()
-                projected = out.scene[0].cpu().numpy()
+                projected = scene[0].cpu().numpy()
                 hidden_list.append(hidden)
                 projected_list.append(projected)
                 if use_teacher:
-                    cos_sim = F.cosine_similarity(out.scene[0], teacher_upsampled_torch[G], dim=-1).mean().item()
+                    cos_sim = F.cosine_similarity(scene[0], teacher_upsampled_torch[G], dim=-1).mean().item()
                     loss_list.append(cos_sim)
             all_hidden[G] = hidden_list
             all_projected[G] = projected_list
