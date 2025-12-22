@@ -24,7 +24,8 @@ class TestPCA:
     def test_fit_pca(self) -> None:
         features = np.random.randn(256, 384).astype(np.float32)
         pca = fit_pca(features)
-        assert pca.n_components == 3
+        assert pca is not None
+        assert pca.n_components == 12  # default for offset viewing
 
     def test_pca_rgb_shape(self) -> None:
         features = np.random.randn(256, 384).astype(np.float32)
