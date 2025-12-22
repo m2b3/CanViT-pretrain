@@ -265,6 +265,10 @@ def draw_boxes(img: Image.Image, viewpoints: list[Viewpoint], H: int, W: int) ->
         box = vp.to_pixel_box(0, H, W)
         r, g, b = (int(c * 255) for c in colors[i][:3])
         draw.rectangle([box.left, box.top, box.left + box.width, box.top + box.height], outline=(r, g, b, 255), width=2)
+        # Draw timestep number at center
+        cx, cy = int(box.center_x), int(box.center_y)
+        draw.ellipse([cx - 8, cy - 8, cx + 8, cy + 8], fill=(r, g, b, 200))
+        draw.text((cx, cy), str(i), fill=(255, 255, 255, 255), anchor="mm")
     return out
 
 
