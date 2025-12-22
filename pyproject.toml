@@ -22,6 +22,7 @@ dependencies = [
     "streamlit>=1.52.2",
     "streamlit-image-coordinates>=0.4.0",
     "dinov3-probes",
+    "plotly>=6.5.0",
 ]
 
 [build-system]
