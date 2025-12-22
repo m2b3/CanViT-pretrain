@@ -500,11 +500,16 @@ def main() -> None:
     n_results = len(results)
     if n_results > 0:
         st.markdown("---")
-        st.markdown("**Timeline** (glimpse → hidden → projected)")
         n_show = min(n_results, 8)
+        start_t = n_results - n_show  # Show last N
+        if n_results > 8:
+            st.markdown(f"**Timeline** (showing T{start_t}-T{n_results - 1} of {n_results})")
+        else:
+            st.markdown("**Timeline** (glimpse → hidden → projected)")
         cols = st.columns(n_show)
-        for t in range(n_show):
-            with cols[t]:
+        for i in range(n_show):
+            t = start_t + i
+            with cols[i]:
                 # Glimpse
                 st.image((np.clip(results[t].glimpse, 0, 1) * 255).astype(np.uint8), width=80)
                 # Hidden (own PCA)
