@@ -309,12 +309,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         if step in viz_steps:
             with amp_ctx:
-                train_viz = viz_and_log(
+                viz_and_log(
                     exp, step, "train", model, teacher, scene_norm,
                     images, viewpoints, targets, canvas, glimpse_size_px,
                     log_spatial_stats=cfg.log_spatial_stats, log_curves=False,
                 )
-            exp.log_metric("train/viz_cos_sim", train_viz.cos_sims[-1], step=step)
 
             val_images = val_loader.next_batch().to(cfg.device)
             with amp_ctx:
