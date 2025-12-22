@@ -159,8 +159,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     scheduler = warmup_cosine_scheduler(optimizer, cfg.n_steps, cfg.warmup_steps)
     log.info(f"Optimizer: AdamW, peak_lr={cfg.peak_lr:.2e}, weight_decay={cfg.weight_decay:.2e}")
 
-    viz_steps = log_spaced_steps(cfg.total_viz, cfg.n_steps)
-    curve_steps = log_spaced_steps(cfg.total_curves, cfg.n_steps)
+    # Generate viz/curve steps as multiples of val_every (so they actually trigger!)
+    n_val_steps = cfg.n_steps // cfg.val_every
+    viz_indices = log_spaced_steps(cfg.total_viz, n_val_steps)
+    curve_indices = log_spaced_steps(cfg.total_curves, n_val_steps)
+    viz_steps = frozenset(i * cfg.val_every for i in viz_indices)
+    curve_steps = frozenset(i * cfg.val_every for i in curve_indices)
     log.info(f"Viz steps: {len(viz_steps)} points, curves: {len(curve_steps)} points")
 
     amp_ctx = (
