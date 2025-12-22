@@ -76,23 +76,29 @@ def _pca_proj_to_rgb(proj: NDArray[np.floating], H: int, W: int) -> NDArray[np.f
     return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
 
 
-def fit_pca(features: NDArray[np.floating]) -> PCA:
+def fit_pca(features: NDArray[np.floating]) -> PCA | None:
     """Fit PCA on features for RGB visualization.
 
     Args:
         features: [N, D] numpy array of features (already on CPU)
+
+    Returns:
+        Fitted PCA, or None if features have zero variance (e.g., constant init).
     """
+    if features.var() < 1e-10:
+        return None
     pca = PCA(n_components=3, whiten=True)
     pca.fit(features)
     return pca
 
 
 def pca_rgb(
-    pca: PCA, features: NDArray[np.floating], H: int, W: int, normalize: bool = False
+    pca: PCA | None, features: NDArray[np.floating], H: int, W: int, normalize: bool = False
 ) -> NDArray[np.floating]:
     """Project features to RGB via PCA, reshape to [H, W, 3].
 
     Args:
+        pca: Fitted PCA, or None (returns gray image).
         features: [H*W, D] numpy array (already on CPU)
         normalize: If True, normalize projection to std=1 before sigmoid.
             Use for data with different variance than PCA was fit on.
@@ -100,6 +106,8 @@ def pca_rgb(
     Returns:
         [H, W, 3] numpy array with sigmoid-scaled values in [0, 1]
     """
+    if pca is None:
+        return np.full((H, W, 3), 0.5, dtype=np.float32)
     proj = pca.transform(features)
     if normalize:
         proj = proj / (proj.std() + 1e-8)
