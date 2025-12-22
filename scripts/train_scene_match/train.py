@@ -1,7 +1,6 @@
-"""Main training loop with stochastic reset."""
+"""Main training loop."""
 
 import logging
-import random
 from contextlib import nullcontext
 
 import comet_ml
@@ -24,7 +23,6 @@ from avp_vit.checkpoint import load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
 from avp_vit.train import InfiniteLoader, warmup_cosine_scheduler  # noqa: E402
 from avp_vit.train.norm import PositionAwareNorm  # noqa: E402
-from avp_vit.train.viewpoint import Viewpoint  # noqa: E402
 from avp_vit.train.viewpoint import random_viewpoint  # noqa: E402
 
 from .config import Config  # noqa: E402
@@ -181,16 +179,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
     warmup_normalizer(scene_norm, cls_norm, train_loader, compute_raw_targets, cfg.norm_warmup_images, scene_size, cfg.device)
 
-    # State: None means needs reset
-    images: Tensor | None = None
-    targets: Tensor | None = None
-    cls_targets: Tensor | None = None
-    canvas: Tensor | None = None
-    # Reset sequence: when organic reset triggers, we do TWO consecutive resets:
-    # 1. Full-scene viewpoint (0,0,1) - gives model a "clean slate" view
-    # 2. Random viewpoints - then normal persist/reset behavior resumes
-    force_random_reset = False
-
     # EMA tracking
     alpha = 2 / (cfg.log_every + 1)
     ema_scene: Tensor | None = None
@@ -202,32 +190,22 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         v = val.detach()
         return v if ema is None else alpha * v + (1 - alpha) * ema
 
-    log.info(f"Starting training loop (p_reset={cfg.p_reset})...")
+    log.info("Starting training loop...")
     pbar = tqdm(range(cfg.n_steps), desc="Training", unit="step")
 
     for step in pbar:
-        organic_reset = canvas is None or random.random() < cfg.p_reset
-        do_reset = organic_reset or force_random_reset
+        # Fresh batch and canvas each step
+        images = train_loader.next_batch().to(cfg.device)
+        with torch.no_grad():
+            feats = compute_raw_targets(images, scene_size)
+            targets = scene_norm(feats.patches)
+            cls_targets = cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
+        canvas = model.init_canvas(batch_size=cfg.batch_size, canvas_grid_size=G)
 
-        if do_reset:
-            images = train_loader.next_batch().to(cfg.device)
-            with torch.no_grad():
-                feats = compute_raw_targets(images, scene_size)
-                targets = scene_norm(feats.patches)
-                cls_targets = cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
-            canvas = model.init_canvas(batch_size=cfg.batch_size, canvas_grid_size=G)
-
-        assert images is not None and targets is not None and cls_targets is not None and canvas is not None
-
-        if organic_reset and not force_random_reset:
-            viewpoints = [Viewpoint.full_scene(batch_size=cfg.batch_size, device=cfg.device) for _ in range(cfg.n_viewpoints_per_step)]
-            force_random_reset = True
-        else:
-            viewpoints = [random_viewpoint(cfg.batch_size, cfg.device, min_scale=cfg.min_viewpoint_scale) for _ in range(cfg.n_viewpoints_per_step)]
-            force_random_reset = False
+        viewpoints = [random_viewpoint(cfg.batch_size, cfg.device, min_scale=cfg.min_viewpoint_scale) for _ in range(cfg.n_viewpoints_per_step)]
 
         with amp_ctx:
-            losses, canvas = model.forward_loss(
+            losses, _ = model.forward_loss(
                 image=images,
                 viewpoints=viewpoints,
                 target=targets,
@@ -235,11 +213,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
                 canvas=canvas,
-                compute_gram=True,
+                compute_gram=cfg.gram_loss_weight > 0,
             )
 
             total_loss = (losses.scene or 0.0) + (losses.cls or 0.0)
-            if cfg.gram_loss_weight > 0 and losses.gram is not None:
+            if losses.gram is not None:
                 total_loss = total_loss + cfg.gram_loss_weight * losses.gram
 
             if not torch.isfinite(total_loss):
@@ -253,9 +231,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
         optimizer.step()
         scheduler.step()
-
-        # Detach canvas for next step
-        canvas = canvas.detach()
 
         # Update EMAs
         if losses.scene is not None:

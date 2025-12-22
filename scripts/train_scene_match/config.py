@@ -26,7 +26,6 @@ class Config:
     grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 128
-    p_reset: float = 0  # Probability of resetting canvas each step
     peak_lr: float = 1e-3
     weight_decay: float = 0.05  # standard in ViTs
     n_viewpoints_per_step: int = 2  # Inner loop viewpoints
