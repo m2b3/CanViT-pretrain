@@ -26,7 +26,7 @@ class Config:
     # Glimpse/canvas sizes (runtime, not in model config)
     gram_loss_weight: float = 1.0
     include_init: bool = False  # include initial canvas in scene/cls loss
-    glimpse_grid_size: int = 4  # tokens per glimpse side
+    glimpse_grid_size: int = 8  # tokens per glimpse side
     grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 128
