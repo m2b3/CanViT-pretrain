@@ -1,0 +1,3 @@
+from dinov3.models.vision_transformer import DinoVisionTransformer
+
+def dinov3_vits16(weights: str = ..., pretrained: bool = ...) -> DinoVisionTransformer: ...

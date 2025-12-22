@@ -12,6 +12,16 @@ dependencies = [
     "torch>=2.9.1",
     "torchvision>=0.24.1",
     "omegaconf>=2.4.0.dev4",
+    "comet-ml>=3.55.0",
+    "tyro>=1.0.1",
+    "rich>=14.2.0",
+    "pyarrow>=22.0.0",
+    "dacite>=1.9.2",
+    "optuna>=4.6.0",
+    "canvit",
+    "streamlit>=1.52.2",
+    "streamlit-image-coordinates>=0.4.0",
+    "dinov3-probes",
 ]
 
 [build-system]
@@ -20,14 +30,19 @@ build-backend = "hatchling.build"
 
 [tool.uv.sources]
 dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
-ybml = { git = "https://github.com/yberreby/ybml.git" }
+ybml = { git = "https://github.com/yberreby/ybml.git", rev = "e7ed31a" }
 ijepa = { git = "https://github.com/yberreby/ijepa.git" }
+canvit = { git = "ssh://git@github.com/m2b3/CanViT.git" }
+dinov3-probes = { git = "https://github.com/yberreby/dinov3-probes.git" }
 
 [dependency-groups]
 dev = [
     "basedpyright>=1.36.1",
     "ipython>=9.8.0",
+    "pypatree>=0.3.0",
+    "pyright>=1.1.407",
     "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
     "ruff>=0.14.9",
 ]
 
@@ -35,6 +50,10 @@ dev = [
 python_files = ["test.py", "test_*.py"]
 testpaths = ["avp_vit", "tests"]
 
+[tool.ruff]
+exclude = ["throwaway"]
+
 [tool.basedpyright]
 typeCheckingMode = "standard"
 stubPath = "stubs"
+# exclude = ["throwaway"]

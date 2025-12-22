@@ -1,0 +1,16 @@
+- Do what I ask. No more, no less.
+- Keep complexity low.
+- Verify, don't assume.
+- Measure twice, cut once.
+- You can use `uv run pypatree` to get an overview of the codebase.
+- NEVER use `git add -A` or `git add -u`
+- DO use `avp_vit/mymodule/{__init__.py,test.py,my_nested_module/{__init__.py,test.py}}` structure
+  - Directories over flat files for modules; nest freely.
+- assert > comment
+  - assert isinstance
+  - ybml.correctness.assert_shape
+  - assert xxx is not None
+- `uv run ipython -c` is your friend
+- `COMET_API_KEY=$(cat ~/comet_api_key.txt) uv run ...`
+- Do not answer without having the relevant facts.
+- Before you investigate something, and as you go about it, explicitly state to the user what your hypotheses, reasoning, and intermediate observations are.
