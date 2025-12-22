@@ -256,7 +256,7 @@ def viz_and_log(
     return VizResult(scene_cos_sims=scene_cos_sims, cls_cos_sims=cls_cos_sims, outputs=outputs)
 
 
-def val_metrics_only(
+def validate(
     exp: comet_ml.Experiment,
     step: int,
     model: ActiveCanViT,
@@ -270,81 +270,22 @@ def val_metrics_only(
     prefix: str = "val",
     probe: DINOv3LinearClassificationHead | None = None,
     labels: Tensor | None = None,
+    log_curves: bool = False,
+    log_pca: bool = False,
+    teacher: DINOv3Backbone | None = None,
+    log_spatial_stats: bool = False,
 ) -> float:
-    """Fast validation without PCA. Returns final scene cosine similarity.
+    """Run validation and log metrics. Returns final scene cosine similarity.
 
     Args:
         probe: Optional IN1k classification probe for accuracy metrics.
         labels: Optional IN1k labels (required if probe is provided).
+        log_curves: Whether to log per-timestep curves (e.g., in1k_tts_top1_vs_timestep).
+        log_pca: Whether to log expensive PCA visualization (requires teacher).
+        teacher: Required if log_pca=True.
+        log_spatial_stats: Whether to log spatial stats (only if log_pca=True).
     """
-    B = images.shape[0]
-    viewpoints = make_eval_viewpoints(B, images.device)
-
-    with torch.inference_mode():
-        raw_feats = compute_raw_targets(images, scene_size_px)
-        target = scene_normalizer(raw_feats.patches)
-        traj = model.forward_trajectory(
-            image=images,
-            viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
-            canvas_grid_size=canvas_grid_size,
-            glimpse_size_px=glimpse_size_px,
-        )
-        outputs = traj.outputs
-        final_scene = outputs[-1].predicted_scene
-
-        cos_sim = F.cosine_similarity(final_scene, target, dim=-1).mean().item()
-        scene_mse = F.mse_loss(final_scene, target).item()
-        exp.log_metric(f"{prefix}/scene_cos_sim", cos_sim, step=step)
-        exp.log_metric(f"{prefix}/scene_mse", scene_mse, step=step)
-
-        if model.cls_head is not None:
-            cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1)
-            cls_pred = model.predict_teacher_cls(outputs[-1].cls)
-            cls_cos_sim = (
-                F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
-            )
-            cls_mse = F.mse_loss(cls_pred, cls_target).item()
-            exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
-            exp.log_metric(f"{prefix}/cls_mse", cls_mse, step=step)
-
-            # IN1k probe metrics (optional)
-            if probe is not None and labels is not None:
-                in1k_accs: list[float] = []
-                for t, out in enumerate(outputs):
-                    cls_pred_t = model.predict_teacher_cls(out.cls)
-                    cls_raw = cls_normalizer.denormalize(cls_pred_t)
-                    logits = probe(cls_raw)
-                    acc = compute_in1k_top1(logits, labels)
-                    in1k_accs.append(acc)
-                    exp.log_metric(f"{prefix}/in1k_t{t}", acc, step=step)
-                exp.log_curve(
-                    f"{prefix}/in1k_vs_timestep",
-                    x=list(range(len(in1k_accs))),
-                    y=in1k_accs,
-                    step=step,
-                )
-
-    return cos_sim
-
-
-def eval_and_log(
-    exp: comet_ml.Experiment,
-    step: int,
-    model: ActiveCanViT,
-    teacher: DINOv3Backbone,
-    compute_raw_targets: Callable[[Tensor, int], "NormFeatures"],
-    scene_normalizer: PositionAwareNorm,
-    cls_normalizer: PositionAwareNorm,
-    images: Tensor,
-    canvas_grid_size: int,
-    scene_size_px: int,
-    glimpse_size_px: int,
-    prefix: str = "val",
-    log_spatial_stats: bool = True,
-    log_curves: bool = True,
-    show_locals: bool = False,
-) -> float:
-    """Full evaluation with PCA visualization (expensive). Returns final scene cosine similarity."""
+    assert not log_pca or teacher is not None, "teacher required for PCA viz"
     B = images.shape[0]
     viewpoints = make_eval_viewpoints(B, images.device)
 
@@ -354,48 +295,88 @@ def eval_and_log(
         cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1) if model.cls_head is not None else None
         canvas = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
 
-    viz = viz_and_log(
-        exp,
-        step,
-        prefix,
-        model,
-        teacher,
-        scene_normalizer,
-        images,
-        viewpoints,
-        target,
-        canvas,
-        glimpse_size_px,
-        cls_target=cls_target,
-        log_spatial_stats=log_spatial_stats,
-        log_curves=log_curves,
-        show_locals=show_locals,
-    )
+        traj = model.forward_trajectory(
+            image=images,
+            viewpoints=viewpoints,  # pyright: ignore[reportArgumentType]
+            canvas_grid_size=canvas_grid_size,
+            glimpse_size_px=glimpse_size_px,
+            canvas=canvas,
+        )
+        outputs = traj.outputs
+        final_scene = outputs[-1].predicted_scene
 
-    # Log per-timestep and final cosine similarity
-    for t, cos_sim in enumerate(viz.scene_cos_sims):
-        exp.log_metric(f"{prefix}/scene_cos_sim_t{t}", cos_sim, step=step)
-    exp.log_metric(f"{prefix}/scene_cos_sim", viz.scene_cos_sims[-1], step=step)
+        # Scene metrics
+        cos_sim = F.cosine_similarity(final_scene, target, dim=-1).mean().item()
+        scene_mse = F.mse_loss(final_scene, target).item()
+        exp.log_metric(f"{prefix}/scene_cos_sim", cos_sim, step=step)
+        exp.log_metric(f"{prefix}/scene_mse", scene_mse, step=step)
 
-    # Scene MSE (for comparison with train/scene_loss)
-    final_scene = viz.outputs[-1].predicted_scene
-    scene_mse = F.mse_loss(final_scene, target).item()
-    exp.log_metric(f"{prefix}/scene_mse", scene_mse, step=step)
-
-    # CLS metrics (if enabled)
-    if model.cls_head is not None:
-        assert cls_target is not None
-        assert viz.cls_cos_sims is not None
-        with torch.inference_mode():
-            cls_pred = model.predict_teacher_cls(viz.outputs[-1].cls)
-            cls_cos_sim = (
-                F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+        # Per-timestep scene cos_sim
+        scene_cos_sims = [
+            F.cosine_similarity(out.predicted_scene, target, dim=-1).mean().item()
+            for out in outputs
+        ]
+        for t, sc in enumerate(scene_cos_sims):
+            exp.log_metric(f"{prefix}/scene_cos_sim_t{t}", sc, step=step)
+        if log_curves:
+            exp.log_curve(
+                f"{prefix}/scene_cos_sim_vs_timestep",
+                x=list(range(len(scene_cos_sims))),
+                y=scene_cos_sims,
+                step=step,
             )
+
+        # CLS metrics
+        if model.cls_head is not None:
+            assert cls_target is not None
+            cls_pred = model.predict_teacher_cls(outputs[-1].cls)
+            cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
             cls_mse = F.mse_loss(cls_pred, cls_target).item()
             exp.log_metric(f"{prefix}/cls_cos_sim", cls_cos_sim, step=step)
             exp.log_metric(f"{prefix}/cls_mse", cls_mse, step=step)
 
-    return viz.scene_cos_sims[-1]
+            cls_cos_sims = [
+                F.cosine_similarity(model.predict_teacher_cls(out.cls), cls_target, dim=-1).mean().item()
+                for out in outputs
+            ]
+            if log_curves:
+                exp.log_curve(
+                    f"{prefix}/cls_cos_sim_vs_timestep",
+                    x=list(range(len(cls_cos_sims))),
+                    y=cls_cos_sims,
+                    step=step,
+                )
+
+            # IN1k probe metrics (TTS = Teacher-to-Student: probe pretrained on teacher features)
+            if probe is not None and labels is not None:
+                in1k_accs: list[float] = []
+                for t, out in enumerate(outputs):
+                    cls_pred_t = model.predict_teacher_cls(out.cls)
+                    cls_raw = cls_normalizer.denormalize(cls_pred_t)
+                    logits = probe(cls_raw)
+                    acc = compute_in1k_top1(logits, labels)
+                    in1k_accs.append(acc)
+                    exp.log_metric(f"{prefix}/in1k_tts_top1_t{t}", acc, step=step)
+                if log_curves:
+                    exp.log_curve(
+                        f"{prefix}/in1k_tts_top1_vs_timestep",
+                        x=list(range(len(in1k_accs))),
+                        y=in1k_accs,
+                        step=step,
+                    )
+
+        # PCA visualization (expensive)
+        if log_pca:
+            assert teacher is not None
+            viz_and_log(
+                exp, step, prefix, model, teacher, scene_normalizer,
+                images, viewpoints, target, canvas, glimpse_size_px,
+                cls_target=cls_target,
+                log_spatial_stats=log_spatial_stats,
+                log_curves=log_curves,
+            )
+
+    return cos_sim
 
 
 def log_norm_stats(
