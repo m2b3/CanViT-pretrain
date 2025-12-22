@@ -33,7 +33,7 @@ class Config:
     peak_lr: float = 5e-4
     weight_decay: float = 0.05  # standard in ViTs
     n_viewpoints_per_step: int = 2  # Inner loop viewpoints
-    min_viewpoint_scale: float = 0.125  # Minimum scale for random viewpoints
+    min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
     # ~ 1 epoch
     warmup_steps: int = 10_000
     # ~ 10 epochs
