@@ -9,6 +9,7 @@ User flow:
 5. Reset viewpoints → clears viewpoints but keeps image
 """
 
+import io
 import logging
 import time
 from dataclasses import dataclass, field
@@ -298,19 +299,16 @@ def main() -> None:
                 st.session_state.pop("canvas", None)
                 st.session_state.pop("cls", None)
                 st.session_state.pop("last_click", None)
+                st.session_state.pop("_config", None)  # Force reinit
                 log.info("Cleared all viewpoints")
-                st.rerun()
         with col_undo:
             if st.button("Undo last", help="Removes last viewpoint from display (canvas state preserved)"):
                 vps = st.session_state.get("viewpoints", [])
                 if vps:
                     removed = vps.pop()
                     st.session_state.results.pop()
-                    st.session_state.last_click = None  # Clear to prevent re-detection
+                    st.session_state.last_click = None
                     log.info(f"Undid viewpoint {removed.name}, {len(vps)} remaining")
-                    st.rerun()
-                else:
-                    log.info("Undo: no viewpoints to undo")
 
         col_teacher, col_latency = st.columns(2)
         with col_teacher:
@@ -318,15 +316,21 @@ def main() -> None:
         with col_latency:
             if st.button("Clear latency", help="Clear all latency measurements"):
                 st.session_state.pop("latency_data", None)
-                st.rerun()
+                log.info("Cleared latency data")
 
     uploaded = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
+
+    # Store uploaded file in session state to survive reruns
+    if uploaded is not None:
+        st.session_state.uploaded_file = uploaded.read()
+        st.session_state.uploaded_name = uploaded.name
+        uploaded.seek(0)  # Reset for later use
 
     if not Path(ckpt_path).exists():
         st.error(f"Checkpoint not found: {ckpt_path}")
         return
 
-    if uploaded is None:
+    if "uploaded_file" not in st.session_state:
         st.info("Upload an image to begin.")
         return
 
@@ -340,14 +344,11 @@ def main() -> None:
     if "latency_data" not in st.session_state:
         st.session_state.latency_data = {}  # dict[str, list[float]]
 
-    # Store file_id in session state to prevent instability across reruns
-    current_file_id = uploaded.file_id
-    if "file_id" not in st.session_state or st.session_state.file_id != current_file_id:
-        log.info(f"New file uploaded: {current_file_id}")
-        st.session_state.file_id = current_file_id
+    # Use stored filename for config key (stable across reruns)
+    file_key = st.session_state.get("uploaded_name", "none")
 
     # Config change detection (excludes scale, l2_norm)
-    config_key = f"{ckpt_path}:{device_name}:{canvas_grid}:{glimpse_grid}:{st.session_state.file_id}"
+    config_key = f"{ckpt_path}:{device_name}:{canvas_grid}:{glimpse_grid}:{file_key}"
     old_config = st.session_state.get("_config")
     n_vps = len(st.session_state.get("viewpoints", []))
     if old_config != config_key:
@@ -361,14 +362,14 @@ def main() -> None:
     else:
         log.info(f"Render: vps={n_vps}")
 
-    # Load image
+    # Load image from session state (stable across reruns)
     transform = transforms.Compose([
         transforms.Resize(img_size, transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(img_size),
         transforms.ToTensor(),
         imagenet_normalize(),
     ])
-    pil = Image.open(uploaded).convert("RGB")
+    pil = Image.open(io.BytesIO(st.session_state.uploaded_file)).convert("RGB")
     orig_size = pil.size
     img_t = transform(pil)
     assert isinstance(img_t, Tensor)
