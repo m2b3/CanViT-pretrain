@@ -8,6 +8,7 @@ import dacite
 import numpy as np
 import optuna
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from tqdm import tqdm
 
@@ -205,7 +206,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         viewpoints = [random_viewpoint(cfg.batch_size, cfg.device, min_scale=cfg.min_viewpoint_scale) for _ in range(cfg.n_viewpoints_per_step)]
 
         with amp_ctx:
-            losses, _ = model.forward_loss(
+            losses, final_canvas = model.forward_loss(
                 image=images,
                 viewpoints=viewpoints,
                 spatial_target=targets,
@@ -225,6 +226,17 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 log.warning(f"NaN/Inf loss at step {step}, pruning trial")
                 exp.end()
                 raise optuna.TrialPruned()
+
+            # Compute cos_sim only when logging (cheap: projection heads + dot product)
+            scene_cos_sim: float | None = None
+            cls_cos_sim: float | None = None
+            if step % cfg.log_every == 0:
+                with torch.no_grad():
+                    scene_pred = model.compute_scene(final_canvas)
+                    scene_cos_sim = F.cosine_similarity(scene_pred, targets, dim=-1).mean().item()
+                    if model.cls_head is not None:
+                        cls_pred = model.compute_cls(final_canvas)
+                        cls_cos_sim = F.cosine_similarity(cls_pred, cls_targets, dim=-1).mean().item()
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -259,6 +271,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             metrics["train/scene_loss_ema"] = ema_scene.item()
             metrics["train/cls_loss"] = losses.cls.item()
             metrics["train/cls_loss_ema"] = ema_cls.item()
+            assert scene_cos_sim is not None
+            metrics["train/scene_cos_sim"] = scene_cos_sim
+            if cls_cos_sim is not None:
+                metrics["train/cls_cos_sim"] = cls_cos_sim
             exp.log_metrics(metrics, step=step)
             pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
