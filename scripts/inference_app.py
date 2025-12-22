@@ -88,8 +88,9 @@ def load_resources(ckpt_path: str, device_name: str) -> Resources:
         factory = _get_backbone_factory(ckpt["backbone"])
         raw = factory(pretrained=True).to(device).eval()
         teacher = DINOv3Backbone(raw)  # type: ignore[arg-type]
-    except Exception:
-        pass
+        log.info(f"Teacher loaded: {ckpt['backbone']}")
+    except Exception as e:
+        log.warning(f"Failed to load teacher: {e}")
 
     scene_norm = None
     if (s := ckpt.get("scene_norm_state")) is not None:
@@ -451,14 +452,18 @@ def main() -> None:
     if n > 0:
         st.markdown("---")
         scene_sims = [r.scene_cos for r in results if r.scene_cos is not None]
+        cls_sims = [r.cls_cos for r in results if r.cls_cos is not None]
 
         col_sim, col_lat = st.columns(2)
 
         with col_sim:
-            if scene_sims:
+            if scene_sims or cls_sims:
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=list(range(len(scene_sims))), y=scene_sims, mode="lines+markers", name="Scene cos"))
-                fig.update_layout(title="Similarity vs Timestep", xaxis_title="T", yaxis_title="Cosine", height=250, margin=dict(l=20, r=20, t=40, b=40))
+                if scene_sims:
+                    fig.add_trace(go.Scatter(x=list(range(len(scene_sims))), y=scene_sims, mode="lines+markers", name="Scene"))
+                if cls_sims:
+                    fig.add_trace(go.Scatter(x=list(range(len(cls_sims))), y=cls_sims, mode="lines+markers", name="CLS"))
+                fig.update_layout(title="Cosine Similarity", xaxis_title="T", yaxis_title="cos", height=250, margin=dict(l=20, r=20, t=40, b=40))
                 st.plotly_chart(fig, width="stretch")
 
         with col_lat:
@@ -495,7 +500,13 @@ def main() -> None:
                 # Projected (teacher PCA)
                 if pca_teacher is not None:
                     st.image(upscale(pca_rgb(pca_teacher, results[t].projected, canvas_grid, canvas_grid, normalize=True), 80), width=80)
-                st.caption(f"T{t}: {results[t].scene_cos:.3f}" if results[t].scene_cos else f"T{t}")
+                # Caption with scale and cos
+                vp_scale = viewpoints[t].scales[0].item() if t < len(viewpoints) else 0
+                cos = results[t].scene_cos
+                caption = f"T{t} s={vp_scale:.2f}"
+                if cos is not None:
+                    caption += f" cos={cos:.2f}"
+                st.caption(caption)
 
     # Debug
     st.markdown("---")
@@ -512,11 +523,14 @@ latency: {latency_summary or 'none'}""")
             vp_lines = []
             for i, vp in enumerate(viewpoints):
                 box = vp.to_pixel_box(0, H, W)
-                cy, cx = vp.centers[0].tolist()
+                cy_n, cx_n = vp.centers[0].tolist()  # normalized (y,x) in [-1,1]
                 s = vp.scales[0].item()
-                cos = results[i].scene_cos if i < len(results) and results[i].scene_cos else None
-                cos_str = f"{cos:.4f}" if cos else "?"
-                vp_lines.append(f"T{i}: center=({cx:.3f},{cy:.3f}) scale={s:.2f} → pixel=({box.center_x:.0f},{box.center_y:.0f}) cos={cos_str}")
+                scene_cos = results[i].scene_cos if i < len(results) else None
+                cls_cos = results[i].cls_cos if i < len(results) else None
+                cos_str = f"scene={scene_cos:.3f}" if scene_cos else "scene=?"
+                if cls_cos:
+                    cos_str += f" cls={cls_cos:.3f}"
+                vp_lines.append(f"T{i}: norm=({cy_n:+.2f},{cx_n:+.2f}) scale={s:.2f} → px=({box.center_x:.0f},{box.center_y:.0f}) {cos_str}")
             st.code("\n".join(vp_lines))
 
 
