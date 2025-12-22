@@ -21,6 +21,7 @@ dependencies = [
     "canvit",
     "streamlit>=1.52.2",
     "streamlit-image-coordinates>=0.4.0",
+    "dinov3-probes",
 ]
 
 [build-system]
@@ -32,6 +33,7 @@ dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
 ybml = { git = "https://github.com/yberreby/ybml.git", rev = "e7ed31a" }
 ijepa = { git = "https://github.com/yberreby/ijepa.git" }
 canvit = { git = "ssh://git@github.com/m2b3/CanViT.git" }
+dinov3-probes = { git = "https://github.com/yberreby/dinov3-probes.git" }
 
 [dependency-groups]
 dev = [

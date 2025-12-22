@@ -16,8 +16,10 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 from torch import Tensor
 from torchvision import transforms
 
+from dinov3_probes import DINOv3LinearClassificationHead
+from torchvision.models.resnet import ResNet50_Weights
+
 from avp_vit import ActiveCanViT, gram_mse
-from ytch.device import sync_device
 from avp_vit.checkpoint import _get_backbone_factory
 from avp_vit.checkpoint import load as load_ckpt
 from avp_vit.checkpoint import load_model
@@ -25,6 +27,14 @@ from avp_vit.train.data import imagenet_normalize
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.viewpoint import Viewpoint
 from avp_vit.train.viz import fit_pca, imagenet_denormalize, pca_rgb, timestep_colors
+from ytch.device import sync_device
+
+PROBE_REPOS = {
+    "dinov3_vits16": "yberreby/dinov3-vits16-lvd1689m-in1k-512x512-linear-clf-probe",
+    "dinov3_vitb16": "yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe",
+    "dinov3_vitl16": "yberreby/dinov3-vitl16-lvd1689m-in1k-512x512-linear-clf-probe",
+}
+IMAGENET_LABELS = ResNet50_Weights.DEFAULT.meta["categories"]
 
 DISPLAY_PX = 512
 
@@ -43,6 +53,8 @@ class StepResult:
     corr_gram_loss: float | None  # Z-scored correlation gram
     glimpse: np.ndarray | None  # [H, W, 3] normalized to [0, 1]
     model_step_ms: float  # Model forward step latency
+    top5_classes: list[int] | None  # Top-5 predicted class indices
+    top5_probs: list[float] | None  # Top-5 probabilities
 
 
 def correlation_gram(x: Tensor, eps: float = 1e-6) -> Tensor:
@@ -136,6 +148,19 @@ def cached_load_normalizers(
         cls_norm = cls_norm.to(device)
 
     return scene_norm, cls_norm
+
+
+@st.cache_resource
+def cached_load_probe(
+    checkpoint_path: str, device: str
+) -> DINOv3LinearClassificationHead | None:
+    """Load classification probe from HF Hub if backbone is supported."""
+    ckpt = load_ckpt(Path(checkpoint_path), "cpu")
+    backbone = ckpt["backbone"]
+    if backbone not in PROBE_REPOS:
+        return None
+    probe = DINOv3LinearClassificationHead.from_pretrained(PROBE_REPOS[backbone])
+    return probe.to(device).eval()
 
 
 def load_and_preprocess(
@@ -260,6 +285,8 @@ def run_inference_step(
     scene_target: Tensor | None,
     cls_target: Tensor | None,
     apply_hidden_ln: bool,
+    probe: DINOv3LinearClassificationHead | None,
+    cls_norm: PositionAwareNorm | None,
 ) -> tuple[Tensor, StepResult]:
     """Run one inference step and compute metrics.
 
@@ -313,9 +340,20 @@ def run_inference_step(
         corr_gram_loss = correlation_gram_mse(pred_batch, target_batch).item()
 
     cls_cos_sim = None
+    cls_pred = model.compute_cls(out.canvas)
     if cls_target is not None:
-        cls_pred = model.compute_cls(out.canvas)
         cls_cos_sim = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+
+    top5_classes: list[int] | None = None
+    top5_probs: list[float] | None = None
+    if probe is not None and cls_norm is not None:
+        std = (cls_norm.var + cls_norm.eps).sqrt()
+        cls_raw = cls_pred * std + cls_norm.mean
+        logits = probe(cls_raw)
+        probs = F.softmax(logits, dim=-1)
+        top5_p, top5_c = probs[0].topk(5)
+        top5_classes = top5_c.tolist()
+        top5_probs = top5_p.tolist()
 
     glimpse_np = imagenet_denormalize(out.glimpse[0].cpu()).numpy()
 
@@ -328,6 +366,8 @@ def run_inference_step(
         corr_gram_loss=corr_gram_loss,
         glimpse=glimpse_np,
         model_step_ms=model_step_ms,
+        top5_classes=top5_classes,
+        top5_probs=top5_probs,
     )
 
 
@@ -380,11 +420,15 @@ img_size = canvas_grid * patch_size
 teacher: DINOv3Backbone | None = None
 scene_norm: PositionAwareNorm | None = None
 cls_norm: PositionAwareNorm | None = None
+probe: DINOv3LinearClassificationHead | None = None
 try:
     teacher = cached_load_teacher(checkpoint_path, device_name)
     scene_norm, cls_norm = cached_load_normalizers(checkpoint_path, device_name)
+    probe = cached_load_probe(checkpoint_path, device_name)
     if scene_norm:
         st.sidebar.caption(f"Normalizer: {scene_norm.grid_size}² grid")
+    if probe:
+        st.sidebar.caption("Probe: IN1k classification")
 except Exception as e:
     st.warning(f"Teacher: {e}")
 
@@ -480,6 +524,8 @@ with c1:
                     scene_target=scene_target,
                     cls_target=cls_target,
                     apply_hidden_ln=hidden_ln,
+                    probe=probe,
+                    cls_norm=cls_norm,
                 )
                 st.session_state.canvas = new_canvas
                 st.session_state.results.append(result)
@@ -549,6 +595,17 @@ with c6:
             if cls_cos is not None:
                 caption += f" cls={cls_cos:.4f}"
             st.caption(caption)
+
+# Top-5 predictions
+if n > 0 and results[-1].top5_classes is not None:
+    st.markdown("---")
+    st.markdown("**Top-5 IN1k Predictions**")
+    top5_c = results[-1].top5_classes
+    top5_p = results[-1].top5_probs
+    assert top5_c is not None and top5_p is not None
+    for rank, (cls_idx, prob) in enumerate(zip(top5_c, top5_p, strict=True), 1):
+        label = IMAGENET_LABELS[cls_idx]
+        st.markdown(f"{rank}. **{label}** ({100*prob:.1f}%)")
 
 # Metrics plot
 if n > 0:
