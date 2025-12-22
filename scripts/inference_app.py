@@ -418,7 +418,8 @@ def main() -> None:
                     if model_key not in latency_data:
                         latency_data[model_key] = []
                     latency_data[model_key].append(result.step_ms)
-                    log.info(f"T{n}: pos=({cx:.1f},{cy:.1f}) scale={scale:.2f} cos={result.scene_cos:.4f if result.scene_cos else '?'} time={result.step_ms:.1f}ms")
+                    cos_str = f"{result.scene_cos:.4f}" if result.scene_cos else "?"
+                    log.info(f"T{n}: pos=({cx:.1f},{cy:.1f}) scale={scale:.2f} cos={cos_str} time={result.step_ms:.1f}ms")
                 st.rerun()
 
     with c2:
