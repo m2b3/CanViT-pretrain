@@ -262,8 +262,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     val_images, G, scene_size, glimpse_size_px, "val",
                     probe=probe, labels=val_labels,
                     log_curves=do_curves,
-                    log_pca=do_pca, teacher=teacher if do_pca else None,
+                    log_pca=do_pca,
+                    teacher=teacher,  # Always pass for teacher baseline (when probe available)
                     log_spatial_stats=cfg.log_spatial_stats,
+                    backbone=cfg.teacher_model,  # For probe resolution lookup
                 )
 
         # === CHECKPOINT PHASE ===

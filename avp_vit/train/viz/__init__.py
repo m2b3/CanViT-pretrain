@@ -19,6 +19,7 @@ from sklearn.decomposition import PCA
 from torch import Tensor
 
 from avp_vit.train.data import IMAGENET_MEAN, IMAGENET_STD
+from avp_vit.train.probe import TopKPrediction
 
 
 class PixelBox(NamedTuple):
@@ -274,6 +275,13 @@ def plot_pca_grid(
     return fig
 
 
+class TimestepPredictions(NamedTuple):
+    """Top-k predictions at a single timestep for a single sample."""
+    predictions: list[TopKPrediction]  # Top-k predictions (e.g., k=5)
+    gt_idx: int  # Ground truth class index
+    gt_name: str  # Ground truth class name
+
+
 def plot_multistep_pca(
     full_img: NDArray[np.floating],
     teacher: NDArray[np.floating],
@@ -290,19 +298,14 @@ def plot_multistep_pca(
     initial_hidden_spatial: NDArray[np.floating] | None = None,
     locals_teacher_cropped: list[NDArray[np.floating]] | None = None,
     show_locals: bool = False,
+    timestep_predictions: list[TimestepPredictions] | None = None,
 ) -> Figure:
     """Full multi-row visualization with all diagnostic columns.
 
     Row 0 = "init": learned spatial_hidden_init projected through scene_proj, BEFORE any glimpses
     Row 1+ = "t=0, t=1, ...": scene state AFTER processing each glimpse
 
-    Columns: Trajectory | Glimpse | Teacher | Scene | [Hidden] | Local AVP | Local Teacher | [Cropped Teacher] | [Δ Hidden] | Δ Scene | Error
-
-    PCA basis selection principle: use same basis to COMPARE, use own basis to see INTERNAL STRUCTURE.
-    - Teacher, Scene: teacher's PCA (comparable colors)
-    - Hidden: own PCA per timestep (different embedding space)
-    - Local AVP, Local Teacher: each uses own PCA (shows internal structure)
-    - Cropped Teacher: own PCA (shows what teacher sees at that location)
+    Columns: [Preds] | Trajectory | Glimpse | Teacher | Scene | [Hidden] | ... | Δ Scene | Error
 
     Args:
         full_img: [H, W, 3] full image in [0, 1]
@@ -319,6 +322,7 @@ def plot_multistep_pca(
         hidden_spatials: Optional list of [S*S, D] raw hidden spatial per timestep (before scene_proj)
         initial_hidden_spatial: Optional [S*S, D] raw initial hidden spatial
         locals_teacher_cropped: Optional list of [G*G, D] teacher features cropped from full image (full context)
+        timestep_predictions: Optional predictions per timestep (for barplot column). Length = n_views.
 
     Returns:
         matplotlib Figure

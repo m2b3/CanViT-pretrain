@@ -19,7 +19,7 @@ from dinov3_probes import DINOv3LinearClassificationHead
 from avp_vit import ActiveCanViT, StepOutput
 from avp_vit.train import imagenet_denormalize, plot_multistep_pca, plot_norm_stats
 from avp_vit.train.norm import PositionAwareNorm
-from avp_vit.train.probe import compute_in1k_top1
+from avp_vit.train.probe import compute_in1k_top1, get_probe_resolution
 from avp_vit.train.viewpoint import Viewpoint, make_eval_viewpoints, sample_at_viewpoint
 
 log = logging.getLogger(__name__)
@@ -274,6 +274,7 @@ def validate(
     log_pca: bool = False,
     teacher: DINOv3Backbone | None = None,
     log_spatial_stats: bool = False,
+    backbone: str | None = None,
 ) -> float:
     """Run validation and log metrics. Returns final scene cosine similarity.
 
@@ -282,8 +283,9 @@ def validate(
         labels: Optional IN1k labels (required if probe is provided).
         log_curves: Whether to log per-timestep curves (e.g., in1k_tts_top1_vs_timestep).
         log_pca: Whether to log expensive PCA visualization (requires teacher).
-        teacher: Required if log_pca=True.
+        teacher: Required for teacher baseline and PCA viz.
         log_spatial_stats: Whether to log spatial stats (only if log_pca=True).
+        backbone: Backbone name for probe resolution lookup (required if probe is provided).
     """
     assert not log_pca or teacher is not None, "teacher required for PCA viz"
     B = images.shape[0]
@@ -349,6 +351,18 @@ def validate(
 
             # IN1k probe metrics (TTS = Teacher-to-Student: probe pretrained on teacher features)
             if probe is not None and labels is not None:
+                assert backbone is not None, "backbone required for probe resolution lookup"
+                probe_res = get_probe_resolution(backbone)
+
+                # Teacher baseline at probe resolution for sanity check
+                if teacher is not None:
+                    images_at_probe_res = F.interpolate(images, size=(probe_res, probe_res), mode="bilinear", align_corners=False)
+                    teacher_cls = teacher.forward_norm_features(images_at_probe_res).cls
+                    teacher_logits = probe(teacher_cls)
+                    teacher_acc = compute_in1k_top1(teacher_logits, labels)
+                    exp.log_metric(f"{prefix}/in1k_teacher_top1", teacher_acc, step=step)
+
+                # Per-timestep model accuracy
                 in1k_accs: list[float] = []
                 for t, out in enumerate(outputs):
                     cls_pred_t = model.predict_teacher_cls(out.cls)
