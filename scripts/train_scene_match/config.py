@@ -20,7 +20,9 @@ class Config:
     freeze_student_backbone: bool = False
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
-    model: ActiveCanViTConfig = field(default_factory=lambda: ActiveCanViTConfig(teacher_dim=384))
+    model: ActiveCanViTConfig = field(
+        default_factory=lambda: ActiveCanViTConfig(teacher_dim=384)
+    )
     # Glimpse/canvas sizes (runtime, not in model config)
     gram_loss_weight: float = 1.0
     include_init: bool = False  # include initial canvas in scene/cls loss
@@ -28,7 +30,7 @@ class Config:
     grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 128
-    peak_lr: float = 1e-3
+    peak_lr: float = 5e-4
     weight_decay: float = 0.05  # standard in ViTs
     n_viewpoints_per_step: int = 2  # Inner loop viewpoints
     min_viewpoint_scale: float = 0.125  # Minimum scale for random viewpoints
