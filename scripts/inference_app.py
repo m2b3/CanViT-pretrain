@@ -98,6 +98,7 @@ def load_resources(ckpt_path: str, device_name: str) -> Resources:
         scene_norm = PositionAwareNorm(n, d, int(n**0.5))
         scene_norm.load_state_dict(s)
         scene_norm.eval().to(device)
+        log.info(f"Scene norm loaded: {scene_norm.grid_size}² positions, dim={d}")
 
     cls_norm = None
     if (s := ckpt.get("cls_norm_state")) is not None:
@@ -105,8 +106,10 @@ def load_resources(ckpt_path: str, device_name: str) -> Resources:
         cls_norm = PositionAwareNorm(n, d, 1)
         cls_norm.load_state_dict(s)
         cls_norm.eval().to(device)
+        log.info(f"CLS norm loaded: dim={d}")
 
     probe = load_probe(ckpt["backbone"], device)
+    log.info(f"Probe: {'loaded' if probe else 'not available'}")
 
     return Resources(
         model=model,
@@ -331,6 +334,7 @@ def main() -> None:
     # Config change detection (excludes scale, l2_norm)
     config_key = f"{ckpt_path}:{device_name}:{canvas_grid}:{glimpse_grid}:{uploaded.file_id}"
     if st.session_state.get("_config") != config_key:
+        log.info(f"Config changed: canvas={canvas_grid}, glimpse={glimpse_grid}, resetting state")
         st.session_state._config = config_key
         st.session_state.viewpoints = []
         st.session_state.results = []
@@ -346,12 +350,14 @@ def main() -> None:
         imagenet_normalize(),
     ])
     pil = Image.open(uploaded).convert("RGB")
+    orig_size = pil.size
     img_t = transform(pil)
     assert isinstance(img_t, Tensor)
     image = img_t.unsqueeze(0).to(device)
     img_np = imagenet_denormalize(image[0].cpu()).numpy()
     H, W = img_np.shape[:2]
     img_pil = Image.fromarray((img_np * 255).astype(np.uint8))
+    log.debug(f"Image: {orig_size} → {H}x{W} ({img_size}px)")
 
     # Teacher target
     latency_data: dict[str, list[float]] = st.session_state.latency_data
