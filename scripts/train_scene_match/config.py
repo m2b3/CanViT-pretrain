@@ -24,9 +24,9 @@ class Config:
         default_factory=lambda: ActiveCanViTConfig(teacher_dim=768)
     )
     # Glimpse/canvas sizes (runtime, not in model config)
-    gram_loss_weight: float = 1.0
+    gram_loss_weight: float = 0
     include_init: bool = False  # include initial canvas in scene/cls loss
-    glimpse_grid_size: int = 8  # tokens per glimpse side
+    glimpse_grid_size: int = 3  # tokens per glimpse side
     grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 128
