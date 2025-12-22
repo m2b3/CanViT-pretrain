@@ -76,11 +76,12 @@ def _pca_proj_to_rgb(proj: NDArray[np.floating], H: int, W: int) -> NDArray[np.f
     return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
 
 
-def fit_pca(features: NDArray[np.floating]) -> PCA | None:
+def fit_pca(features: NDArray[np.floating], n_components: int = 12) -> PCA | None:
     """Fit PCA on features for RGB visualization.
 
     Args:
         features: [N, D] numpy array of features (already on CPU)
+        n_components: Number of components to fit (default 12 to support offset viewing)
 
     Returns:
         Fitted PCA, or None if features have zero variance (e.g., constant init).
@@ -89,13 +90,20 @@ def fit_pca(features: NDArray[np.floating]) -> PCA | None:
     # Early training has ~1e-8 variance which still breaks PCA
     if features.var(axis=0).max() < 1e-5:
         return None
-    pca = PCA(n_components=3, whiten=True)
+    # Clamp to available dimensions
+    n_components = min(n_components, features.shape[0], features.shape[1])
+    pca = PCA(n_components=n_components, whiten=True)
     pca.fit(features)
     return pca
 
 
 def pca_rgb(
-    pca: PCA | None, features: NDArray[np.floating], H: int, W: int, normalize: bool = False
+    pca: PCA | None,
+    features: NDArray[np.floating],
+    H: int,
+    W: int,
+    normalize: bool = False,
+    pc_offset: int = 0,
 ) -> NDArray[np.floating]:
     """Project features to RGB via PCA, reshape to [H, W, 3].
 
@@ -104,6 +112,7 @@ def pca_rgb(
         features: [H*W, D] numpy array (already on CPU)
         normalize: If True, normalize projection to std=1 before sigmoid.
             Use for data with different variance than PCA was fit on.
+        pc_offset: Which PC to start from (0=PC1-3, 1=PC2-4, etc.)
 
     Returns:
         [H, W, 3] numpy array with sigmoid-scaled values in [0, 1]
@@ -111,6 +120,14 @@ def pca_rgb(
     if pca is None:
         return np.full((H, W, 3), 0.5, dtype=np.float32)
     proj = pca.transform(features)
+    # Select 3 components starting at offset
+    end = min(pc_offset + 3, proj.shape[1])
+    start = max(0, end - 3)  # Ensure we always get 3 if possible
+    proj = proj[:, start:end]
+    # Pad if fewer than 3 components available
+    if proj.shape[1] < 3:
+        pad = np.zeros((proj.shape[0], 3 - proj.shape[1]), dtype=proj.dtype)
+        proj = np.concatenate([proj, pad], axis=1)
     if normalize:
         proj = proj / (proj.std() + 1e-8)
     return _pca_proj_to_rgb(proj, H, W)

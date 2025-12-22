@@ -185,7 +185,10 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Tr
     raw_backbone = factory(pretrained=False)
     backbone = DINOv3Backbone(raw_backbone)  # type: ignore[arg-type]
 
-    cfg = dacite.from_dict(ActiveCanViTConfig, ckpt["model_config"])
+    model_config = ckpt["model_config"]
+    if "teacher_dim" not in model_config:
+        model_config = {**model_config, "teacher_dim": ckpt["teacher_dim"]}
+    cfg = dacite.from_dict(ActiveCanViTConfig, model_config)
     model = ActiveCanViT(backbone=backbone, cfg=cfg)
 
     result = model.load_state_dict(ckpt["state_dict"], strict=strict)

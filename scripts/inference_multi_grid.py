@@ -304,7 +304,6 @@ def main(args: Args) -> None:
             for t, unique in enumerate(all_unique[G]):
                 ax = axes[row_unique, t + 1]
                 pca_u = fit_pca(unique) if args.pca_per_timestep else pca_unique
-                assert pca_u is not None
                 ax.imshow(pca_rgb(pca_u, unique, G, G))
                 draw_trajectory(ax, viewpoints, colors, g_H, g_W, up_to=t, alpha=0.5)
                 ax.set_xticks([])
