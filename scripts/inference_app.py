@@ -302,11 +302,15 @@ def main() -> None:
                 st.rerun()
         with col_undo:
             if st.button("Undo last", help="Removes last viewpoint from display (canvas state preserved)"):
-                if st.session_state.get("viewpoints"):
-                    st.session_state.viewpoints.pop()
+                vps = st.session_state.get("viewpoints", [])
+                if vps:
+                    removed = vps.pop()
                     st.session_state.results.pop()
-                    log.info("Undid last viewpoint (canvas state preserved)")
+                    st.session_state.last_click = None  # Clear to prevent re-detection
+                    log.info(f"Undid viewpoint {removed.name}, {len(vps)} remaining")
                     st.rerun()
+                else:
+                    log.info("Undo: no viewpoints to undo")
 
         col_teacher, col_latency = st.columns(2)
         with col_teacher:
@@ -338,8 +342,11 @@ def main() -> None:
 
     # Config change detection (excludes scale, l2_norm)
     config_key = f"{ckpt_path}:{device_name}:{canvas_grid}:{glimpse_grid}:{uploaded.file_id}"
-    if st.session_state.get("_config") != config_key:
-        log.info(f"Config changed: canvas={canvas_grid}, glimpse={glimpse_grid}, resetting state")
+    old_config = st.session_state.get("_config")
+    n_vps = len(st.session_state.get("viewpoints", []))
+    log.info(f"Render: vps={n_vps}, config_match={old_config == config_key}")
+    if old_config != config_key:
+        log.info(f"Config changed: {old_config} -> {config_key}, resetting state")
         st.session_state._config = config_key
         st.session_state.viewpoints = []
         st.session_state.results = []
