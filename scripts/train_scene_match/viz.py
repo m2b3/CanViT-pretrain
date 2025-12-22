@@ -27,6 +27,22 @@ from avp_vit.train.viewpoint import Viewpoint, make_eval_viewpoints
 
 log = logging.getLogger(__name__)
 
+# Comet curve budget - enforced at logging point, not upfront
+_curve_count = 0
+_CURVE_BUDGET = 900
+
+
+def _log_curve(exp: comet_ml.Experiment, name: str, **kwargs) -> None:
+    """Log curve with budget enforcement. Skips silently once exhausted."""
+    global _curve_count
+    if _curve_count >= _CURVE_BUDGET:
+        if _curve_count == _CURVE_BUDGET:
+            log.warning(f"Curve budget exhausted ({_CURVE_BUDGET}), skipping further curves")
+            _curve_count += 1  # only warn once
+        return
+    exp.log_curve(name, **kwargs)
+    _curve_count += 1
+
 
 @dataclass
 class VizSampleData:
@@ -216,9 +232,9 @@ def viz_and_log(
 
         # Log curves
         if log_curves:
-            exp.log_curve(f"{prefix}/scene_cos_sim_vs_timestep", x=list(range(len(acc.scene_cos_sims))), y=acc.scene_cos_sims, step=step)
+            _log_curve(exp, f"{prefix}/scene_cos_sim_vs_timestep", x=list(range(len(acc.scene_cos_sims))), y=acc.scene_cos_sims, step=step)
             if acc.cls_cos_sims:
-                exp.log_curve(f"{prefix}/cls_cos_sim_vs_timestep", x=list(range(len(acc.cls_cos_sims))), y=acc.cls_cos_sims, step=step)
+                _log_curve(exp, f"{prefix}/cls_cos_sim_vs_timestep", x=list(range(len(acc.cls_cos_sims))), y=acc.cls_cos_sims, step=step)
 
         # Spatial stats
         if log_spatial_stats and acc.final_predicted_scene is not None:
@@ -308,14 +324,16 @@ def _log_pca_from_accumulator(
         )
 
     if log_curves:
-        exp.log_curve(
+        _log_curve(
+            exp,
             f"{prefix}/scene_cos_sim_vs_timestep",
             x=list(range(len(acc.scene_cos_sims))),
             y=acc.scene_cos_sims,
             step=step,
         )
         if acc.cls_cos_sims:
-            exp.log_curve(
+            _log_curve(
+                exp,
                 f"{prefix}/cls_cos_sim_vs_timestep",
                 x=list(range(len(acc.cls_cos_sims))),
                 y=acc.cls_cos_sims,
@@ -459,7 +477,8 @@ def validate(
                 for t, ia in enumerate(acc.in1k_accs):
                     exp.log_metric(f"{prefix}/in1k_tts_top1_t{t}", ia, step=step)
                 if log_curves:
-                    exp.log_curve(
+                    _log_curve(
+                        exp,
                         f"{prefix}/in1k_tts_top1_vs_timestep",
                         x=list(range(len(acc.in1k_accs))),
                         y=acc.in1k_accs,

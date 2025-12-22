@@ -1,6 +1,7 @@
 """Main training loop."""
 
 import logging
+import traceback
 from collections.abc import Callable
 from contextlib import nullcontext
 from typing import NamedTuple
@@ -249,28 +250,34 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             # Train PCA viz (only at viz_steps, uses train batch)
             if do_pca:
                 batch = load_train_batch()
-                with amp_ctx:
-                    viz_and_log(
-                        exp, step, "train", model, teacher, scene_norm,
-                        batch.images, batch.viewpoints, batch.scene_target, batch.canvas, glimpse_size_px,
-                        log_spatial_stats=cfg.log_spatial_stats, log_curves=False,
-                    )
+                try:
+                    with amp_ctx:
+                        viz_and_log(
+                            exp, step, "train", model, teacher, scene_norm,
+                            batch.images, batch.viewpoints, batch.scene_target, batch.canvas, glimpse_size_px,
+                            log_spatial_stats=cfg.log_spatial_stats, log_curves=False,
+                        )
+                except Exception:
+                    log.error(f"!!! VIZ FAILED at step {step} !!!\n{traceback.format_exc()}")
 
             # Validation on val batch (always at val_every)
             val_images, val_labels = val_loader.next_batch_with_labels()
             val_images = val_images.to(cfg.device)
             val_labels = val_labels.to(cfg.device) if probe is not None else None
-            with amp_ctx:
-                validate(
-                    exp, step, model, compute_raw_targets, scene_norm, cls_norm,
-                    val_images, G, scene_size, glimpse_size_px, "val",
-                    probe=probe, labels=val_labels,
-                    log_curves=do_curves,
-                    log_pca=do_pca,
-                    teacher=teacher,  # Always pass for teacher baseline (when probe available)
-                    log_spatial_stats=cfg.log_spatial_stats,
-                    backbone=cfg.teacher_model,  # For probe resolution lookup
-                )
+            try:
+                with amp_ctx:
+                    validate(
+                        exp, step, model, compute_raw_targets, scene_norm, cls_norm,
+                        val_images, G, scene_size, glimpse_size_px, "val",
+                        probe=probe, labels=val_labels,
+                        log_curves=do_curves,
+                        log_pca=do_pca,
+                        teacher=teacher,  # Always pass for teacher baseline (when probe available)
+                        log_spatial_stats=cfg.log_spatial_stats,
+                        backbone=cfg.teacher_model,  # For probe resolution lookup
+                    )
+            except Exception:
+                log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
 
         # === CHECKPOINT PHASE ===
         if step % cfg.ckpt_every == 0:
