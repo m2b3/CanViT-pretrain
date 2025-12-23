@@ -32,17 +32,17 @@ torch.backends.cuda.enable_math_sdp(False)
 from ytch.model import count_parameters  # noqa: E402
 
 from avp_vit import ActiveCanViTConfig  # noqa: E402
-from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 from avp_vit.checkpoint import load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
-from avp_vit.train import InfiniteLoader, warmup_cosine_scheduler  # noqa: E402
-from avp_vit.train.norm import PositionAwareNorm  # noqa: E402
-from avp_vit.train.probe import compute_in1k_top1, load_probe  # noqa: E402
-from avp_vit.train.viewpoint import random_viewpoint  # noqa: E402
+from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 
 from .config import Config  # noqa: E402
-from .data import create_loaders, scene_size_px  # noqa: E402
+from .data import InfiniteLoader, create_loaders, scene_size_px  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
+from .norm import PositionAwareNorm  # noqa: E402
+from .probe import compute_in1k_top1, labels_are_in1k, load_probe  # noqa: E402
+from .scheduler import warmup_cosine_scheduler  # noqa: E402
+from .viewpoint import random_viewpoint  # noqa: E402
 from .viz import validate, viz_and_log  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -370,7 +370,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 if cls_cos_sim is not None:
                     metrics["train/cls_cos_sim"] = cls_cos_sim
                 # Train IN1k accuracy (TTS = Teacher-to-Student probe)
-                if probe is not None and model.cls_proj is not None:
+                # Skip for IN21k training (labels >= 1000)
+                if probe is not None and model.cls_proj is not None and labels_are_in1k(batch.labels):
                     with torch.no_grad():
                         cls_pred = model.predict_teacher_cls(result.cls, result.canvas)
                         cls_raw = cls_norm.denormalize(cls_pred)

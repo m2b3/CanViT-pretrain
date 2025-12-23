@@ -8,7 +8,7 @@ import torch
 import tyro
 
 from .config import Config
-from .train import train
+from .loop import train
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger(__name__)

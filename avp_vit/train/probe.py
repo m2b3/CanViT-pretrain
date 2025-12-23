@@ -9,6 +9,8 @@ from dinov3_probes import DINOv3LinearClassificationHead
 from torch import Tensor
 from torchvision.models import ResNet50_Weights
 
+IN1K_NUM_CLASSES = 1000
+
 
 class ProbeInfo(NamedTuple):
     """Probe metadata tied to its training configuration."""
@@ -55,8 +57,17 @@ def get_probe_resolution(backbone: str) -> int:
     return PROBE_REGISTRY[backbone].resolution
 
 
+def labels_are_in1k(labels: Tensor) -> bool:
+    """Check if labels are from IN1k (< 1000) vs IN21k (>= 1000)."""
+    return int(labels.max().item()) < IN1K_NUM_CLASSES
+
+
 def compute_in1k_top1(logits: Tensor, labels: Tensor) -> float:
-    """Compute top-1 accuracy as percentage."""
+    """Compute top-1 accuracy as percentage.
+
+    Caller must ensure labels are IN1k (use labels_are_in1k() to check).
+    """
+    assert labels_are_in1k(labels), f"Labels {labels.max().item()} exceed IN1k range"
     preds = logits.argmax(dim=-1)
     correct = (preds == labels).sum().item()
     return 100.0 * correct / labels.shape[0]

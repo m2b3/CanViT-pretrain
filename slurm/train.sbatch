@@ -44,7 +44,7 @@ uv sync
 
 echo ""
 echo "=== Starting training ==="
-uv run python -m scripts.train_scene_match \
+uv run python -m avp_vit.train \
     --train-dir /datashare/imagenet/winter21_whole \
     --val-dir /datashare/imagenet/ILSVRC2012/val \
     --index-dir "$SCRATCH/avp_indices" \

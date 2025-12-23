@@ -8,19 +8,52 @@ Extends canvit.viewpoint with training-specific utilities:
 
 import random
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 from canvit.viewpoint import Viewpoint as CoreViewpoint
 from canvit.viewpoint import sample_at_viewpoint
-
-from avp_vit.train.viz import PixelBox, viewpoint_to_pixel_box
+from torch import Tensor
 
 __all__ = [
+    "PixelBox",
     "Viewpoint",
     "sample_at_viewpoint",
     "random_viewpoint",
     "make_eval_viewpoints",
+    "viewpoint_to_pixel_box",
 ]
+
+
+class PixelBox(NamedTuple):
+    """Axis-aligned bounding box in pixel coordinates."""
+
+    left: float
+    top: float
+    width: float
+    height: float
+    center_x: float
+    center_y: float
+
+
+def viewpoint_to_pixel_box(
+    centers: Tensor, scales: Tensor, batch_idx: int, H: int, W: int
+) -> PixelBox:
+    """Convert viewpoint geometry to pixel coordinates for visualization."""
+    cy, cx = centers[batch_idx].tolist()
+    scale = scales[batch_idx].item()
+    center_x = (cx + 1) / 2 * W
+    center_y = (cy + 1) / 2 * H
+    width = scale * W
+    height = scale * H
+    return PixelBox(
+        left=center_x - width / 2,
+        top=center_y - height / 2,
+        width=width,
+        height=height,
+        center_x=center_x,
+        center_y=center_y,
+    )
 
 
 @dataclass
@@ -29,7 +62,7 @@ class Viewpoint(CoreViewpoint):
 
     name: str = ""
 
-    def to_pixel_box(self, batch_idx: int, H: int, W: int) -> PixelBox:
+    def to_pixel_box(self, batch_idx: int, H: int, W: int) -> "PixelBox":
         """Convert to pixel coordinates for visualization."""
         return viewpoint_to_pixel_box(self.centers, self.scales, batch_idx, H, W)
 
