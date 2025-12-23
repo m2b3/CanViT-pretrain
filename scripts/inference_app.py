@@ -251,6 +251,26 @@ def upscale(arr: np.ndarray, size: int) -> Image.Image:
     return img.resize((size, size), Image.Resampling.NEAREST)
 
 
+def upsample_latents(latents: np.ndarray, src_grid: int, dst_grid: int) -> np.ndarray:
+    """Bilinearly upsample latents from src_grid² to dst_grid².
+
+    Args:
+        latents: (src_grid², D) array
+        src_grid: source grid size
+        dst_grid: destination grid size
+
+    Returns:
+        (dst_grid², D) array
+    """
+    D = latents.shape[-1]
+    # (src_grid², D) -> (1, D, src_grid, src_grid)
+    t = torch.from_numpy(latents).float().view(src_grid, src_grid, D).permute(2, 0, 1).unsqueeze(0)
+    # bilinear upsample
+    t_up = F.interpolate(t, size=(dst_grid, dst_grid), mode="bilinear", align_corners=False)
+    # (1, D, dst_grid, dst_grid) -> (dst_grid², D)
+    return t_up[0].permute(1, 2, 0).reshape(-1, D).numpy()
+
+
 def to_viewpoint(cx: float, cy: float, scale: float, H: int, W: int, device: torch.device, name: str) -> Viewpoint:
     cx_n = float(np.clip((cx / W) * 2 - 1, -(1 - scale), 1 - scale))
     cy_n = float(np.clip((cy / H) * 2 - 1, -(1 - scale), 1 - scale))
@@ -293,6 +313,12 @@ def main() -> None:
         glimpse_grid = st.slider("Glimpse grid", 2, 16, train_cfg.glimpse_grid_size, 1)
         canvas_grid = st.slider("Canvas grid", 8, 256, train_cfg.grid_size, 8)
         l2_norm = st.checkbox("L2 normalize hidden", value=False)
+
+        st.markdown("---")
+        st.markdown("**PCA**")
+        pc_offset = st.slider("PC offset", 0, 9, 0, 1)
+        projected_pca = st.radio("Projected basis", ["teacher", "own"], index=0, horizontal=True)
+        teacher_up_pca = st.radio("Teacher↑ basis", ["teacher", "own"], index=0, horizontal=True)
 
         st.markdown("---")
         col_clear, col_undo = st.columns(2)
@@ -409,8 +435,8 @@ def main() -> None:
     n = len(viewpoints)
 
     # Main layout
-    c1, c2, c3, c4 = st.columns(4)
-    col_w = 384
+    c1, c2, c3, c4, c5 = st.columns(5)
+    col_w = 300
 
     with c1:
         st.markdown("**Input** (click to add)")
@@ -447,22 +473,36 @@ def main() -> None:
     with c2:
         st.markdown(f"**Teacher {teacher_grid}²**")
         if scene_target_np is not None and pca_teacher is not None:
-            st.image(upscale(pca_rgb(pca_teacher, scene_target_np, teacher_grid, teacher_grid), col_w), width=col_w)
+            st.image(upscale(pca_rgb(pca=pca_teacher, features=scene_target_np, H=teacher_grid, W=teacher_grid, normalize=False, pc_offset=pc_offset), col_w), width=col_w)
 
     with c3:
         lbl = f"**Hidden {canvas_grid}²**" + (" (L2)" if l2_norm else "") + (f" T{n-1}" if n else "")
         st.markdown(lbl)
         if n > 0:
             h = results[-1].hidden
-            st.image(upscale(pca_rgb(fit_pca(h), h, canvas_grid, canvas_grid), col_w), width=col_w)
+            st.image(upscale(pca_rgb(pca=fit_pca(h), features=h, H=canvas_grid, W=canvas_grid, normalize=False, pc_offset=pc_offset), col_w), width=col_w)
 
     with c4:
-        st.markdown(f"**Projected {canvas_grid}²**" + (f" T{n-1}" if n else ""))
-        if n > 0 and pca_teacher is not None:
+        pca_suffix = " (own)" if projected_pca == "own" else ""
+        st.markdown(f"**Projected {canvas_grid}²**{pca_suffix}" + (f" T{n-1}" if n else ""))
+        if n > 0:
             p = results[-1].projected
-            st.image(upscale(pca_rgb(pca_teacher, p, canvas_grid, canvas_grid, normalize=True), col_w), width=col_w)
-            if results[-1].scene_cos is not None:
-                st.caption(f"cos = {results[-1].scene_cos:.4f}")
+            pca_proj = fit_pca(p) if projected_pca == "own" else pca_teacher
+            if pca_proj is not None:
+                normalize = projected_pca == "teacher"
+                st.image(upscale(pca_rgb(pca=pca_proj, features=p, H=canvas_grid, W=canvas_grid, normalize=normalize, pc_offset=pc_offset), col_w), width=col_w)
+                if results[-1].scene_cos is not None:
+                    st.caption(f"cos = {results[-1].scene_cos:.4f}")
+
+    with c5:
+        pca_suffix = " (own)" if teacher_up_pca == "own" else ""
+        st.markdown(f"**Teacher↑ {canvas_grid}²**{pca_suffix}")
+        if scene_target_np is not None:
+            teacher_up = upsample_latents(scene_target_np, teacher_grid, canvas_grid)
+            pca_up = fit_pca(teacher_up) if teacher_up_pca == "own" else pca_teacher
+            if pca_up is not None:
+                normalize = teacher_up_pca == "teacher"
+                st.image(upscale(pca_rgb(pca=pca_up, features=teacher_up, H=canvas_grid, W=canvas_grid, normalize=normalize, pc_offset=pc_offset), col_w), width=col_w)
 
     # Top-5 predictions (Model vs Teacher)
     has_model_preds = n > 0 and results[-1].top5
@@ -540,10 +580,10 @@ def main() -> None:
                 # Hidden (own PCA) - upscale to 256 for expand, display at 80
                 h = results[t].hidden
                 pca_h = fit_pca(h)
-                st.image(upscale(pca_rgb(pca_h, h, canvas_grid, canvas_grid), 256), width=80)
+                st.image(upscale(pca_rgb(pca=pca_h, features=h, H=canvas_grid, W=canvas_grid, normalize=False, pc_offset=pc_offset), 256), width=80)
                 # Projected (teacher PCA)
                 if pca_teacher is not None:
-                    st.image(upscale(pca_rgb(pca_teacher, results[t].projected, canvas_grid, canvas_grid, normalize=True), 256), width=80)
+                    st.image(upscale(pca_rgb(pca=pca_teacher, features=results[t].projected, H=canvas_grid, W=canvas_grid, normalize=True, pc_offset=pc_offset), 256), width=80)
                 # Caption with scale and cos
                 vp_scale = viewpoints[t].scales[0].item() if t < len(viewpoints) else 0
                 cos = results[t].scene_cos
