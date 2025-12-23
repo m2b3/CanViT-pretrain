@@ -19,6 +19,7 @@ from tqdm import tqdm
 from canvit import GlimpseOutput
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
+from dinov3.models.vision_transformer import DinoVisionTransformer
 
 from avp_vit import ActiveCanViT
 from avp_vit.checkpoint import _get_backbone_factory, load as load_ckpt, load_model
@@ -47,7 +48,8 @@ def load_teacher(ckpt_path: Path, device: torch.device) -> DINOv3Backbone:
     ckpt = load_ckpt(ckpt_path, "cpu")
     factory = _get_backbone_factory(ckpt["backbone"])
     raw_teacher = factory(pretrained=True)
-    return DINOv3Backbone(raw_teacher.to(device).eval())  # type: ignore[arg-type]
+    assert isinstance(raw_teacher, DinoVisionTransformer)
+    return DINOv3Backbone(raw_teacher.to(device).eval())
 
 
 def load_cls_normalizer(ckpt_path: Path, device: torch.device) -> PositionAwareNorm:

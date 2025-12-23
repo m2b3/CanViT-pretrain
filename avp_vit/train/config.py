@@ -31,13 +31,15 @@ class Config:
     # Training
     batch_size: int = 128
     peak_lr: float = 5e-4
-    weight_decay: float = 0.05  # standard in ViTs
+    # weight_decay: float = 0.05  # standard in ViTs
+    # we can use a much lower weight decay due to the richness of our training signal
+    # and we *should*, due to the use of small batches
+    # 1e-3 has proven to be safe and work well in our early experiments in this project
+    # 1e-4 was used by the AdaGlimpse authors
+    weight_decay: float = 1e-4
     n_viewpoints_per_step: int = 2  # Inner loop viewpoints
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
-    # ~ 1 epoch
     warmup_steps: int = 100_000
-    # ~ 10 epochs
-    # warmup_steps: int = 100_000
     grad_clip: float = 1.0
     n_steps: int = 500_000
     # Target normalization
@@ -58,7 +60,7 @@ class Config:
     val_every: int = 250
     total_viz: int = 1000
     total_curves: int = 300  # ~3 curves/event, budget 900
-    ckpt_every: int = 20_000
+    ckpt_every: int = 10_000
     log_spatial_stats: bool = True
     # Compilation and precision
     compile: bool = True

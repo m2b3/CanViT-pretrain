@@ -22,6 +22,7 @@ import streamlit as st
 import torch
 import torch.nn.functional as F
 from canvit.backbone.dinov3 import DINOv3Backbone
+from dinov3.models.vision_transformer import DinoVisionTransformer
 from PIL import Image, ImageDraw
 from streamlit_image_coordinates import streamlit_image_coordinates
 from torch import Tensor
@@ -88,7 +89,8 @@ def load_resources(ckpt_path: str, device_name: str) -> Resources:
     try:
         factory = _get_backbone_factory(ckpt["backbone"])
         raw = factory(pretrained=True).to(device).eval()
-        teacher = DINOv3Backbone(raw)  # type: ignore[arg-type]
+        assert isinstance(raw, DinoVisionTransformer)
+        teacher = DINOv3Backbone(raw)
         log.info(f"Teacher loaded: {ckpt['backbone']}")
     except Exception as e:
         log.warning(f"Failed to load teacher: {e}")

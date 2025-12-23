@@ -11,7 +11,7 @@ from typing import TypedDict
 import torch
 from torch import Tensor
 
-from avp_vit import ActiveCanViT
+from avp_vit import ActiveCanViT, ActiveCanViTConfig
 import dacite
 
 log = logging.getLogger(__name__)
@@ -72,13 +72,14 @@ def save(
     cls_norm_state: dict[str, Tensor] | None = None,
 ) -> None:
     """Save checkpoint with all info needed to reconstruct model."""
+    assert isinstance(model.cfg, ActiveCanViTConfig)
     path.parent.mkdir(parents=True, exist_ok=True)
     git_commit, git_dirty = _git_info()
 
     data: CheckpointData = {
         "state_dict": model.state_dict(),
         "model_config": asdict(model.cfg),
-        "teacher_dim": model.cfg.teacher_dim,  # type: ignore[attr-defined]
+        "teacher_dim": model.cfg.teacher_dim,
         "backbone": backbone,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_commit": git_commit,
@@ -94,7 +95,7 @@ def save(
     size_mb = path.stat().st_size / (1024 * 1024)
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
-    log.info(f"  backbone={backbone}, teacher_dim={model.cfg.teacher_dim}")  # type: ignore[attr-defined]
+    log.info(f"  backbone={backbone}, teacher_dim={model.cfg.teacher_dim}")
     if step is not None:
         log.info(f"  step={step}, train_loss={train_loss:.4e}" if train_loss else f"  step={step}")
     if git_commit:
@@ -171,8 +172,8 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Tr
         ValueError: Unknown backbone or checkpoint format issues.
         RuntimeError: State dict mismatch (if strict=True).
     """
-    from avp_vit import ActiveCanViTConfig
     from canvit.backbone.dinov3 import DINOv3Backbone
+    from dinov3.models.vision_transformer import DinoVisionTransformer
 
     ckpt = load(path, device)
 
@@ -183,7 +184,8 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Tr
 
     factory = _get_backbone_factory(ckpt["backbone"])
     raw_backbone = factory(pretrained=False)
-    backbone = DINOv3Backbone(raw_backbone)  # type: ignore[arg-type]
+    assert isinstance(raw_backbone, DinoVisionTransformer)
+    backbone = DINOv3Backbone(raw_backbone)
 
     model_config = ckpt["model_config"]
     if "teacher_dim" not in model_config:

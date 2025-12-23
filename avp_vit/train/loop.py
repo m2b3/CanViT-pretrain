@@ -32,17 +32,17 @@ torch.backends.cuda.enable_math_sdp(False)
 from ytch.model import count_parameters  # noqa: E402
 
 from avp_vit import ActiveCanViTConfig  # noqa: E402
-from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 from avp_vit.checkpoint import load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
-from avp_vit.train import InfiniteLoader, warmup_cosine_scheduler  # noqa: E402
-from avp_vit.train.norm import PositionAwareNorm  # noqa: E402
-from avp_vit.train.probe import compute_in1k_top1, load_probe  # noqa: E402
-from avp_vit.train.viewpoint import random_viewpoint  # noqa: E402
+from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 
 from .config import Config  # noqa: E402
-from .data import create_loaders, scene_size_px  # noqa: E402
+from .data import InfiniteLoader, create_loaders, scene_size_px  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
+from .norm import PositionAwareNorm  # noqa: E402
+from .probe import compute_in1k_top1, labels_are_in1k, load_probe  # noqa: E402
+from .scheduler import warmup_cosine_scheduler  # noqa: E402
+from .viewpoint import random_viewpoint  # noqa: E402
 from .viz import validate, viz_and_log  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -253,9 +253,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 try:
                     with amp_ctx:
                         viz_and_log(
-                            exp, step, "train", model, teacher, scene_norm,
-                            batch.images, batch.viewpoints, batch.scene_target, batch.canvas, glimpse_size_px,
-                            log_spatial_stats=cfg.log_spatial_stats, log_curves=False,
+                            exp=exp,
+                            step=step,
+                            prefix="train",
+                            model=model,
+                            teacher=teacher,
+                            normalizer=scene_norm,
+                            images=batch.images,
+                            viewpoints=batch.viewpoints,
+                            target=batch.scene_target,
+                            canvas=batch.canvas,
+                            glimpse_size_px=glimpse_size_px,
+                            log_spatial_stats=cfg.log_spatial_stats,
+                            log_curves=False,
                         )
                 except Exception:
                     log.error(f"!!! VIZ FAILED at step {step} !!!\n{traceback.format_exc()}")
@@ -267,14 +277,24 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             try:
                 with amp_ctx:
                     validate(
-                        exp, step, model, compute_raw_targets, scene_norm, cls_norm,
-                        val_images, G, scene_size, glimpse_size_px, "val",
-                        probe=probe, labels=val_labels,
+                        exp=exp,
+                        step=step,
+                        model=model,
+                        compute_raw_targets=compute_raw_targets,
+                        scene_normalizer=scene_norm,
+                        cls_normalizer=cls_norm,
+                        images=val_images,
+                        canvas_grid_size=G,
+                        scene_size_px=scene_size,
+                        glimpse_size_px=glimpse_size_px,
+                        prefix="val",
+                        probe=probe,
+                        labels=val_labels,
                         log_curves=do_curves,
                         log_pca=do_pca,
-                        teacher=teacher,  # Always pass for teacher baseline (when probe available)
+                        teacher=teacher,
                         log_spatial_stats=cfg.log_spatial_stats,
-                        backbone=cfg.teacher_model,  # For probe resolution lookup
+                        backbone=cfg.teacher_model,
                     )
             except Exception:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
@@ -370,7 +390,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 if cls_cos_sim is not None:
                     metrics["train/cls_cos_sim"] = cls_cos_sim
                 # Train IN1k accuracy (TTS = Teacher-to-Student probe)
-                if probe is not None and model.cls_proj is not None:
+                # Skip for IN21k training (labels >= 1000)
+                if probe is not None and model.cls_proj is not None and labels_are_in1k(batch.labels):
                     with torch.no_grad():
                         cls_pred = model.predict_teacher_cls(result.cls, result.canvas)
                         cls_raw = cls_norm.denormalize(cls_pred)

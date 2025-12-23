@@ -7,7 +7,7 @@
 - DO use `avp_vit/mymodule/{__init__.py,test.py,my_nested_module/{__init__.py,test.py}}` structure
   - Directories over flat files for modules; nest freely.
 - assert > comment
-  - assert isinstance
+  - assert isinstance (ALWAYS prefer over cast or type: ignore)
   - ybml.correctness.assert_shape
   - assert xxx is not None
 - `uv run ipython -c` is your friend

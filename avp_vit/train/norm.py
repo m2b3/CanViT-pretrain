@@ -35,7 +35,9 @@ class PositionAwareNorm(nn.Module):
     @property
     def initialized(self) -> bool:
         """Whether running stats have been initialized from data."""
-        return self._initialized.item()  # type: ignore[return-value]
+        val = self._initialized.item()
+        assert isinstance(val, bool)
+        return val
 
     def forward(self, x: Tensor) -> Tensor:
         """Normalize x: [B, N, D] -> [B, N, D]. Updates stats only in train mode.
