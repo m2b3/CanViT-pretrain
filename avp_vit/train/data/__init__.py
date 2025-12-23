@@ -4,13 +4,11 @@ Single source of truth for ImageNet normalization constants.
 """
 
 from collections.abc import Iterator
-from pathlib import Path
 from typing import TypeAlias
 
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
