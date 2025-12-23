@@ -60,7 +60,7 @@ class Config:
     val_every: int = 250
     total_viz: int = 1000
     total_curves: int = 300  # ~3 curves/event, budget 900
-    ckpt_every: int = 20_000
+    ckpt_every: int = 10_000
     log_spatial_stats: bool = True
     # Compilation and precision
     compile: bool = True
