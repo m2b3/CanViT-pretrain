@@ -20,7 +20,7 @@ from torch import Tensor
 from dinov3_probes import DINOv3LinearClassificationHead
 
 from avp_vit import ActiveCanViT
-from avp_vit.train import TimestepPredictions, imagenet_denormalize, plot_multistep_pca, plot_norm_stats
+from avp_vit.train import TimestepPredictions, imagenet_denormalize, plot_multistep_pca
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import compute_in1k_top1, get_imagenet_class_names, get_probe_resolution, get_top_k_predictions
 from avp_vit.train.viewpoint import Viewpoint, make_eval_viewpoints
@@ -517,26 +517,3 @@ def validate(
             cls_normalizer.train()
 
 
-def log_norm_stats(
-    exp: comet_ml.Experiment,
-    scene_normalizers: dict[int, PositionAwareNorm],
-    cls_normalizers: dict[int, PositionAwareNorm],
-    step: int,
-) -> None:
-    """Log normalizer running stats to Comet: metrics and spatial heatmaps."""
-    for G, scene_norm in scene_normalizers.items():
-        cls_norm = cls_normalizers[G]
-        exp.log_metrics(
-            {
-                f"norm/G{G}/scene_mean_norm": scene_norm.mean.norm().item(),
-                f"norm/G{G}/scene_var_mean": scene_norm.var.mean().item(),
-                f"norm/G{G}/cls_mean_norm": cls_norm.mean.norm().item(),
-                f"norm/G{G}/cls_var_mean": cls_norm.var.mean().item(),
-            },
-            step=step,
-        )
-        # Spatial heatmap for scene normalizer only (CLS has no spatial structure)
-        mean_np = scene_norm.mean.cpu().float().numpy()
-        std_np = scene_norm.var.sqrt().cpu().float().numpy()
-        fig = plot_norm_stats(mean_np, std_np, G)
-        log_figure(exp, fig, f"norm/G{G}/spatial", step)

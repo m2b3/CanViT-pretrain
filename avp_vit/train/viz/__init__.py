@@ -148,44 +148,6 @@ def imagenet_denormalize(t: Tensor) -> Tensor:
     return ((t * std + mean).clamp(0, 1)).permute(1, 2, 0)
 
 
-def plot_norm_stats(
-    mean: NDArray[np.floating],
-    std: NDArray[np.floating],
-    grid_size: int,
-) -> Figure:
-    """Plot normalizer running stats (mean and std amplitude heatmaps).
-
-    Args:
-        mean: [G*G, D] running mean per position
-        std: [G*G, D] running std per position
-        grid_size: G (spatial grid size)
-
-    Returns:
-        matplotlib Figure with two heatmaps (mean L2 norm, std L2 norm)
-    """
-    G = grid_size
-    mean_2d = mean.reshape(G, G, -1)
-    std_2d = std.reshape(G, G, -1)
-
-    mean_amp = np.linalg.norm(mean_2d, axis=-1)
-    std_amp = np.linalg.norm(std_2d, axis=-1)
-
-    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-
-    im0 = axes[0].imshow(mean_amp, cmap="viridis")
-    axes[0].set_title(f"Mean L2\n[{mean_amp.min():.2f}, {mean_amp.max():.2f}]")
-    axes[0].axis("off")
-    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-
-    im1 = axes[1].imshow(std_amp, cmap="viridis")
-    axes[1].set_title(f"Std L2\n[{std_amp.min():.2f}, {std_amp.max():.2f}]")
-    axes[1].axis("off")
-    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-
-    plt.tight_layout()
-    return fig
-
-
 def plot_trajectory(
     img: NDArray[np.floating],
     boxes: list[PixelBox],
