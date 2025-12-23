@@ -9,7 +9,6 @@ from avp_vit.train.data import (
     val_transform,
 )
 from avp_vit.train.scheduler import warmup_cosine_scheduler
-from avp_vit.train.state import SurvivalBatch
 from avp_vit.train.viewpoint import (
     make_eval_viewpoints,
     random_viewpoint,
@@ -30,7 +29,6 @@ __all__ = [
     "IMAGENET_MEAN",
     "IMAGENET_STD",
     "InfiniteLoader",
-    "SurvivalBatch",
     "TimestepPredictions",
     "fit_pca",
     "imagenet_denormalize",
