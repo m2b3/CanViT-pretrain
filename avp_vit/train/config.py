@@ -12,10 +12,10 @@ from avp_vit import ActiveCanViTConfig
 @dataclass
 class Config:
     # Teacher
-    teacher_model: str = "dinov3_vits16"
+    teacher_model: str = "dinov3_vitb16"
     teacher_ckpt: Path = Path("dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth")
     # Student
-    student_model: str = "dinov3_vitb16"
+    student_model: str = "dinov3_vits16"
     student_ckpt: Path | None = None  # None = random init
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
