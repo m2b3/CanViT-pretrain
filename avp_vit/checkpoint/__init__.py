@@ -2,17 +2,16 @@
 
 import logging
 import subprocess
-from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
+import dacite
 import torch
 from torch import Tensor
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
-import dacite
 
 log = logging.getLogger(__name__)
 
@@ -134,58 +133,17 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     return data
 
 
-BACKBONE_REGISTRY: dict[str, str] = {
-    "dinov3_vits16": "dinov3.hub.backbones.dinov3_vits16",
-    "dinov3_vits16plus": "dinov3.hub.backbones.dinov3_vits16plus",
-    "dinov3_vitb16": "dinov3.hub.backbones.dinov3_vitb16",
-    "dinov3_vitl16": "dinov3.hub.backbones.dinov3_vitl16",
-    "dinov3_vitl16plus": "dinov3.hub.backbones.dinov3_vitl16plus",
-}
-
-
-def _get_backbone_factory(name: str) -> Callable[..., torch.nn.Module]:
-    """Get backbone factory by name. Raises ValueError if unknown."""
-    if name not in BACKBONE_REGISTRY:
-        available = ", ".join(sorted(BACKBONE_REGISTRY.keys()))
-        raise ValueError(f"Unknown backbone: {name!r}. Available: {available}")
-
-    module_path = BACKBONE_REGISTRY[name]
-    module_name, func_name = module_path.rsplit(".", 1)
-
-    import importlib
-    module = importlib.import_module(module_name)
-    return getattr(module, func_name)
-
-
 def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = True) -> ActiveCanViT:
-    """Load ActiveCanViT from checkpoint.
-
-    Args:
-        path: Checkpoint file path.
-        device: Target device.
-        strict: If True (default), state_dict must match exactly. If False, ignores missing/extra keys.
-
-    Returns:
-        Model in eval mode on target device.
-
-    Raises:
-        ValueError: Unknown backbone or checkpoint format issues.
-        RuntimeError: State dict mismatch (if strict=True).
-    """
-    from canvit.backbone.dinov3 import DINOv3Backbone
-    from dinov3.models.vision_transformer import DinoVisionTransformer
+    """Load ActiveCanViT from checkpoint."""
+    from canvit.hub import create_backbone
 
     ckpt = load(path, device)
 
-    # Validate required fields
     for key in ("backbone", "model_config", "teacher_dim", "state_dict"):
         if key not in ckpt:
             raise ValueError(f"Checkpoint missing required field: {key!r}")
 
-    factory = _get_backbone_factory(ckpt["backbone"])
-    raw_backbone = factory(pretrained=False)
-    assert isinstance(raw_backbone, DinoVisionTransformer)
-    backbone = DINOv3Backbone(raw_backbone)
+    backbone = create_backbone(ckpt["backbone"], pretrained=False)
 
     model_config = ckpt["model_config"]
     if "teacher_dim" not in model_config:

@@ -32,7 +32,7 @@ torch.backends.cuda.enable_math_sdp(False)
 from ytch.model import count_parameters  # noqa: E402
 
 from avp_vit import ActiveCanViTConfig  # noqa: E402
-from avp_vit.checkpoint import load as load_checkpoint  # noqa: E402
+from avp_vit.checkpoint import CheckpointData, load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 
@@ -174,6 +174,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     )
     log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
 
+    ckpt_data: CheckpointData | None = None
     if cfg.resume_ckpt is not None:
         ckpt_data = load_checkpoint(cfg.resume_ckpt, cfg.device)
         ckpt_cfg = dacite.from_dict(ActiveCanViTConfig, ckpt_data["model_config"])
@@ -199,8 +200,16 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
     ).to(cfg.device)
 
-    log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
-    warmup_normalizer(scene_norm, cls_norm, train_loader, compute_raw_targets, cfg.norm_warmup_images, scene_size, cfg.device)
+    if ckpt_data is not None and ckpt_data.get("scene_norm_state") is not None:
+        scene_norm_state = ckpt_data["scene_norm_state"]
+        cls_norm_state = ckpt_data["cls_norm_state"]
+        assert scene_norm_state is not None and cls_norm_state is not None
+        scene_norm.load_state_dict(scene_norm_state)
+        cls_norm.load_state_dict(cls_norm_state)
+        log.info("Loaded normalizer states from checkpoint")
+    else:
+        log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
+        warmup_normalizer(scene_norm, cls_norm, train_loader, compute_raw_targets, cfg.norm_warmup_images, scene_size, cfg.device)
 
     # EMA tracking
     alpha = 2 / (cfg.log_every + 1)
