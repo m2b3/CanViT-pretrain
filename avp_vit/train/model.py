@@ -6,6 +6,7 @@ from typing import NamedTuple
 from avp_vit import ActiveCanViT
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit.hub import create_backbone
+from canvit.policy import PolicyConfig, PolicyHead
 
 from .config import Config
 
@@ -47,7 +48,13 @@ def create_model(
     for p in student_backbone.parameters():
         p.requires_grad = not cfg.freeze_student_backbone
 
-    model = ActiveCanViT(backbone=student_backbone, cfg=cfg.model).to(cfg.device)
+    policy = None
+    if cfg.enable_policy:
+        policy_cfg = PolicyConfig(min_scale=cfg.min_viewpoint_scale)
+        policy = PolicyHead(embed_dim=student_backbone.embed_dim, cfg=policy_cfg)
+        log.info(f"Policy head created: embed_dim={student_backbone.embed_dim}, min_scale={cfg.min_viewpoint_scale}")
+
+    model = ActiveCanViT(backbone=student_backbone, cfg=cfg.model, policy=policy).to(cfg.device)
     glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
 
     log.info(
