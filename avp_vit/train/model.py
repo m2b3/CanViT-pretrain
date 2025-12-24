@@ -3,11 +3,9 @@
 import logging
 from typing import NamedTuple
 
-import torch
-
 from avp_vit import ActiveCanViT
-from avp_vit.checkpoint import _get_backbone_factory
 from canvit.backbone.dinov3 import DINOv3Backbone
+from canvit.hub import create_backbone
 
 from .config import Config
 
@@ -20,56 +18,22 @@ class ModelBundle(NamedTuple):
     glimpse_size_px: int
 
 
-def _load_dinov3(
-    model_slug: str,
-    checkpoint: str | None,
-    device: torch.device,
-) -> torch.nn.Module:
-    """Load a DINOv3 model by slug, optionally with pretrained weights."""
-    factory = _get_backbone_factory(model_slug)
-
-    if checkpoint is None:
-        log.info(f"Creating {model_slug} with random initialization")
-        model = factory(pretrained=False)
-    else:
-        log.info(f"Loading {model_slug} from {checkpoint}")
-        model = factory(pretrained=True, weights=checkpoint)
-
-    # XXX: rescale_coords must be disabled for correct RoPE behavior at arbitrary resolutions
-    setattr(model.rope_embed, 'rescale_coords', None)
-    assert getattr(model.rope_embed, 'rescale_coords') is None, "Failed to disable rescale_coords"
-    log.info(f"Disabled rescale_coords for {model_slug}")
-    return model.to(device)
-
-
 def load_teacher(cfg: Config) -> DINOv3Backbone:
     """Load frozen DINOv3 teacher backbone."""
-    from dinov3.models.vision_transformer import DinoVisionTransformer
-    model = _load_dinov3(cfg.teacher_model, str(cfg.teacher_ckpt), cfg.device)
-    assert isinstance(model, DinoVisionTransformer)
-    backbone = DINOv3Backbone(model.eval())
+    backbone = create_backbone(cfg.teacher_model, weights=str(cfg.teacher_ckpt))
+    backbone.vit.eval()
     for p in backbone.parameters():
         p.requires_grad = False
-    log.info(
-        f"Teacher ready: {cfg.teacher_model}, "
-        f"{backbone.n_blocks} blocks, embed_dim={backbone.embed_dim}"
-    )
-    return backbone
+    log.info(f"Teacher ready: {cfg.teacher_model}, {backbone.n_blocks} blocks")
+    return backbone.to(cfg.device)
 
 
 def load_student_backbone(cfg: Config) -> DINOv3Backbone:
     """Load student DINOv3 backbone (pretrained or random init)."""
-    from dinov3.models.vision_transformer import DinoVisionTransformer
-    ckpt = str(cfg.student_ckpt) if cfg.student_ckpt is not None else None
-    model = _load_dinov3(cfg.student_model, ckpt, cfg.device)
-    assert isinstance(model, DinoVisionTransformer)
-    backbone = DINOv3Backbone(model)
-    log.info(
-        f"Student backbone ready: {cfg.student_model}, "
-        f"{backbone.n_blocks} blocks, embed_dim={backbone.embed_dim}, "
-        f"pretrained={cfg.student_ckpt is not None}"
-    )
-    return backbone
+    weights = str(cfg.student_ckpt) if cfg.student_ckpt else None
+    backbone = create_backbone(cfg.student_model, pretrained=weights is not None, weights=weights)
+    log.info(f"Student backbone ready: {cfg.student_model}, pretrained={weights is not None}")
+    return backbone.to(cfg.device)
 
 
 def create_model(
