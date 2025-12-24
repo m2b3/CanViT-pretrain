@@ -40,7 +40,7 @@ class Config:
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
     enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
     ema_alpha: float = 0.1  # EMA smoothing for metrics
-    warmup_steps: int = 10_000
+    warmup_steps: int = 100_000
     grad_clip: float = 1.0
     n_steps: int = 500_000
     # Target normalization
