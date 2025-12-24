@@ -22,28 +22,18 @@ def plot_policy_predictions(
     """
     fig, (ax_pos, ax_scale) = plt.subplots(1, 2, figsize=(10, 5))
 
-    # Left: position scatter with arrows
+    # Left: position scatter with lines from start to end
     for start, pred, color, label in [
         (starts_full, preds_full.position, "tab:blue", "full→policy"),
         (starts_random, preds_random.position, "tab:orange", "random→policy"),
     ]:
         start_np = start.cpu().float().numpy()
         pred_np = pred.cpu().float().numpy()
-        dx = pred_np[:, 0] - start_np[:, 0]
-        dy = pred_np[:, 1] - start_np[:, 1]
-        ax_pos.quiver(
-            start_np[:, 0],
-            start_np[:, 1],
-            dx,
-            dy,
-            angles="xy",
-            scale_units="xy",
-            scale=1,
-            color=color,
-            alpha=0.4,
-            width=0.008,
-        )
-        ax_pos.scatter(pred_np[:, 0], pred_np[:, 1], c=color, s=15, alpha=0.7, label=label)
+        for i in range(len(start_np)):
+            ax_pos.plot([start_np[i, 0], pred_np[i, 0]], [start_np[i, 1], pred_np[i, 1]],
+                       color=color, alpha=0.3, lw=1)
+        ax_pos.scatter(start_np[:, 0], start_np[:, 1], c="white", edgecolors=color, s=20, alpha=0.8, zorder=5)
+        ax_pos.scatter(pred_np[:, 0], pred_np[:, 1], c=color, s=20, alpha=0.8, label=label, zorder=6)
 
     ax_pos.set_xlim(-1.1, 1.1)
     ax_pos.set_ylim(-1.1, 1.1)
