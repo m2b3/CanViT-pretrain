@@ -1,5 +1,7 @@
 """Exponential moving average tracker for training metrics."""
 
+from collections.abc import ItemsView
+
 from torch import Tensor
 
 
@@ -24,6 +26,6 @@ class EMATracker:
         """Get current EMA value for key, or None if not tracked."""
         return self._values.get(key)
 
-    def items(self) -> dict[str, Tensor]:
-        """Get all current EMA values."""
-        return dict(self._values)
+    def items(self) -> ItemsView[str, Tensor]:
+        """Get all current EMA key-value pairs."""
+        return self._values.items()

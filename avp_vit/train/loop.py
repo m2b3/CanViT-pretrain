@@ -35,13 +35,14 @@ from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 
 from .config import Config  # noqa: E402
 from .data import InfiniteLoader, create_loaders, scene_size_px  # noqa: E402
+from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .norm import PositionAwareNorm  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_cosine_scheduler  # noqa: E402
 from .step import training_step  # noqa: E402
-from .viewpoint import Viewpoint, random_viewpoint  # noqa: E402
-from .viz import validate, viz_and_log  # noqa: E402
+from .viewpoint import ViewpointType  # noqa: E402
+from .viz import validate  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -214,13 +215,15 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
         warmup_normalizer(scene_norm, cls_norm, train_loader, compute_raw_targets, cfg.norm_warmup_images, scene_size, cfg.device)
 
-    # EMA tracking for total loss
-    alpha = 2 / (cfg.log_every + 1)
-    ema_loss: Tensor | None = None
+    # Build viewpoint type lists for branching
+    t0_types = [ViewpointType.RANDOM, ViewpointType.FULL]
+    t1_types = [ViewpointType.RANDOM, ViewpointType.FULL]
+    if cfg.enable_policy:
+        t1_types.append(ViewpointType.POLICY)
+    log.info(f"Training branches: t0={[t.name for t in t0_types]} × t1={[t.name for t in t1_types]}")
 
-    def ema_update(ema: Tensor | None, val: Tensor) -> Tensor:
-        v = val.detach()
-        return v if ema is None else alpha * v + (1 - alpha) * ema
+    # EMA tracking for all metrics
+    ema = EMATracker(alpha=cfg.ema_alpha)
 
     def load_train_batch() -> TrainBatch:
         """Load training batch and compute normalized teacher targets."""
@@ -238,11 +241,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             cls_target=cls_target,
         )
 
-    def make_viz_trajectory() -> list[Viewpoint]:
-        """Random viewpoints trajectory for visualization."""
-        return [random_viewpoint(cfg.batch_size, cfg.device, min_scale=cfg.min_viewpoint_scale)
-                for _ in range(cfg.trajectory_length)]
-
     # Step semantics: step S = model state after S gradient updates
     # step=0: before any gradient (initial model)
     # step=n_steps: after all n_steps gradient updates (final model)
@@ -256,31 +254,6 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         if step % cfg.val_every == 0:
             do_curves = step in curve_steps
             do_pca = step in viz_steps
-
-            # Train PCA viz (only at viz_steps, uses train batch)
-            if do_pca:
-                batch = load_train_batch()
-                viz_viewpoints = make_viz_trajectory()
-                viz_canvas = model.init_canvas(batch_size=cfg.batch_size, canvas_grid_size=G)
-                try:
-                    with amp_ctx:
-                        viz_and_log(
-                            exp=exp,
-                            step=step,
-                            prefix="train",
-                            model=model,
-                            teacher=teacher,
-                            normalizer=scene_norm,
-                            images=batch.images,
-                            viewpoints=viz_viewpoints,
-                            target=batch.scene_target,
-                            canvas=viz_canvas,
-                            glimpse_size_px=glimpse_size_px,
-                            log_spatial_stats=cfg.log_spatial_stats,
-                            log_curves=False,
-                        )
-                except Exception:
-                    log.error(f"!!! VIZ FAILED at step {step} !!!\n{traceback.format_exc()}")
 
             # Validation on val batch (always at val_every)
             val_images, val_labels = val_loader.next_batch_with_labels()
@@ -313,6 +286,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # === CHECKPOINT PHASE ===
         if step % cfg.ckpt_every == 0:
+            ema_loss = ema.get("total_loss")
             save_checkpoint(
                 ckpt_path, model, cfg.student_model,
                 step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
@@ -337,8 +311,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 cls_target=batch.cls_target,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
-                trajectory_length=cfg.trajectory_length,
-                n_random_trajectories=cfg.n_random_trajectories,
+                t0_types=t0_types,
+                t1_types=t1_types,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 compute_gram=cfg.gram_loss_weight > 0,
                 gram_loss_weight=cfg.gram_loss_weight,
@@ -349,29 +323,30 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             optimizer.step()
             scheduler.step()
 
-            ema_loss = ema_update(ema_loss, step_metrics.total_loss)
+            # Update EMA for all metrics
+            ema.update("total_loss", step_metrics.total_loss)
+            for (t0, t1), m in step_metrics.branches.items():
+                prefix = f"{t0.name.lower()}_{t1.name.lower()}"
+                ema.update(f"{prefix}/loss", m.loss)
+                ema.update(f"{prefix}/scene_loss", m.scene_loss)
+                ema.update(f"{prefix}/cls_loss", m.cls_loss)
+                if m.gram_loss is not None:
+                    ema.update(f"{prefix}/gram_loss", m.gram_loss)
+                ema.update(f"{prefix}/scene_cos", m.scene_cos)
+                ema.update(f"{prefix}/cls_cos", m.cls_cos)
 
             if step % cfg.log_every == 0:
-                assert ema_loss is not None
                 grad_norm = grad_norm_t.item()
                 lr = scheduler.get_last_lr()[0]
 
-                metrics = {
-                    "train/loss": step_metrics.total_loss.item(),
-                    "train/loss_ema": ema_loss.item(),
-                    "train/grad_norm": grad_norm,
-                    "train/lr": lr,
-                    "train/full_full/loss": step_metrics.full_full.loss.item(),
-                    "train/full_full/scene_cos": step_metrics.full_full.scene_cos.item(),
-                    "train/full_full/cls_cos": step_metrics.full_full.cls_cos.item(),
-                    "train/full_rand/loss": step_metrics.full_rand.loss.item(),
-                    "train/full_rand/scene_cos": step_metrics.full_rand.scene_cos.item(),
-                    "train/full_rand/cls_cos": step_metrics.full_rand.cls_cos.item(),
-                    "train/random/loss": step_metrics.random.loss.item(),
-                    "train/random/scene_cos": step_metrics.random.scene_cos.item(),
-                    "train/random/cls_cos": step_metrics.random.cls_cos.item(),
-                }
+                # Log all EMA metrics
+                metrics = {f"train/{k}": v.item() for k, v in ema.items()}
+                metrics["train/lr"] = lr
+                metrics["train/grad_norm"] = grad_norm
                 exp.log_metrics(metrics, step=step)
+
+                ema_loss = ema.get("total_loss")
+                assert ema_loss is not None
                 pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e}")
 
             # Per-module grad norms (at val intervals, after training)
@@ -381,6 +356,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             # Optuna pruning (skip step 0 - EMA not meaningful yet)
             if step > 0 and step % cfg.val_every == 0:
+                ema_loss = ema.get("total_loss")
                 assert ema_loss is not None
                 trial.report(ema_loss.item(), step)
                 if trial.should_prune():
@@ -389,15 +365,17 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Final checkpoint (if not already saved at step=n_steps)
     if cfg.n_steps % cfg.ckpt_every != 0:
-        assert ema_loss is not None
+        ema_loss = ema.get("total_loss")
         save_checkpoint(
             ckpt_path, model, cfg.student_model,
-            step=cfg.n_steps, train_loss=ema_loss.item(), comet_id=exp.get_key(),
+            step=cfg.n_steps, train_loss=ema_loss.item() if ema_loss is not None else None,
+            comet_id=exp.get_key(),
             scene_norm_state=scene_norm.state_dict(),
             cls_norm_state=cls_norm.state_dict(),
         )
 
-    assert ema_loss is not None
-    log.info(f"Final: train_ema={ema_loss.item():.4f}")
+    ema_loss = ema.get("total_loss")
+    final_loss = ema_loss.item() if ema_loss is not None else float("inf")
+    log.info(f"Final: train_ema={final_loss:.4f}")
     exp.end()
-    return ema_loss.item()
+    return final_loss
