@@ -272,6 +272,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                         canvas_grid_size=G,
                         scene_size_px=scene_size,
                         glimpse_size_px=glimpse_size_px,
+                        n_eval_viewpoints=cfg.n_eval_viewpoints,
                         prefix="val",
                         probe=probe,
                         labels=val_labels,

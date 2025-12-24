@@ -136,11 +136,49 @@ def random_viewpoint(
     )
 
 
-def make_eval_viewpoints(B: int, device: torch.device) -> list[Viewpoint]:
-    """Full scene followed by 4 quadrants in shuffled order."""
-    vps = [Viewpoint.full_scene(batch_size=B, device=device)]
-    quadrants = [(0, 0), (0, 1), (1, 0), (1, 1)]
-    random.shuffle(quadrants)
-    for qx, qy in quadrants:
-        vps.append(Viewpoint.quadrant(B, device, qx, qy))
-    return vps
+def make_eval_viewpoints(
+    B: int, device: torch.device, n_viewpoints: int = 10
+) -> list[Viewpoint]:
+    """Generate recursive quadrant viewpoints, truncated to n_viewpoints.
+
+    Quadtree structure:
+    - Level 0: Full scene (1 viewpoint, scale=1)
+    - Level 1: 4 quadrants (scale=0.5)
+    - Level 2: 16 sub-quadrants (scale=0.25)
+    - Level L: 4^L viewpoints (scale=0.5^L)
+
+    Shuffles within each level, then flattens and truncates.
+    """
+    assert n_viewpoints >= 1
+
+    # Level 0: full scene (center, scale)
+    levels: list[list[tuple[float, float, float]]] = [[(0.0, 0.0, 1.0)]]
+
+    # Build levels until we have enough viewpoints
+    while sum(len(lvl) for lvl in levels) < n_viewpoints:
+        parent_level = levels[-1]
+        child_level: list[tuple[float, float, float]] = []
+
+        for parent_cy, parent_cx, parent_scale in parent_level:
+            child_scale = parent_scale / 2
+            for qy, qx in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+                child_cy = parent_cy + (qy - 0.5) * parent_scale
+                child_cx = parent_cx + (qx - 0.5) * parent_scale
+                child_level.append((child_cy, child_cx, child_scale))
+
+        random.shuffle(child_level)
+        levels.append(child_level)
+
+    # Convert to Viewpoint objects and flatten
+    result: list[Viewpoint] = []
+    for level_idx, level in enumerate(levels):
+        for i, (cy, cx, scale) in enumerate(level):
+            if level_idx == 0:
+                name = "full"
+            else:
+                name = f"L{level_idx}_{i}"
+            centers = torch.tensor([[cy, cx]], device=device).expand(B, -1)
+            scales = torch.full((B,), scale, device=device)
+            result.append(Viewpoint(name=name, centers=centers, scales=scales))
+
+    return result[:n_viewpoints]

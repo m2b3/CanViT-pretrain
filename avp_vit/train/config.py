@@ -60,6 +60,7 @@ class Config:
     # Logging
     log_every: int = 20
     val_every: int = 250
+    n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
     total_viz: int = 1000
     total_curves: int = 300  # ~3 curves/event, budget 900
     ckpt_every: int = 10_000

@@ -131,6 +131,7 @@ def validate(
     canvas_grid_size: int,
     scene_size_px: int,
     glimpse_size_px: int,
+    n_eval_viewpoints: int = 10,
     prefix: str = "val",
     probe: DINOv3LinearClassificationHead | None = None,
     labels: Tensor | None = None,
@@ -152,7 +153,7 @@ def validate(
             )
 
     B = images.shape[0]
-    viewpoints = make_eval_viewpoints(B, images.device)
+    viewpoints = make_eval_viewpoints(B, images.device, n_viewpoints=n_eval_viewpoints)
     has_cls = model.cls_proj is not None
     has_probe = probe is not None and labels is not None and labels_are_in1k(labels)
 

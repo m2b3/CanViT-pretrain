@@ -153,8 +153,13 @@ class TestRandomViewpoint:
 
 
 class TestMakeEvalViewpoints:
-    def test_returns_5_viewpoints(self) -> None:
+    def test_default_returns_10_viewpoints(self) -> None:
         vps = make_eval_viewpoints(2, torch.device("cpu"))
+        assert len(vps) == 10
+        assert vps[0].name == "full"
+
+    def test_explicit_n_viewpoints(self) -> None:
+        vps = make_eval_viewpoints(2, torch.device("cpu"), n_viewpoints=5)
         assert len(vps) == 5
         assert vps[0].name == "full"
 
