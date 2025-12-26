@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Clean Streamlit app for AVP-ViT inference with click-based viewpoints.
-
-User flow:
-1. Upload image → state initialized
-2. Click image → add viewpoint, run inference
-3. Change scale → affects next viewpoint only
-4. Change canvas/glimpse/checkpoint → resets state
-5. Reset viewpoints → clears viewpoints but keeps image
-"""
+"""Streamlit app for AVP-ViT inference. Click image to add viewpoints."""
 
 import io
 import logging
@@ -24,28 +16,28 @@ import torch.nn.functional as F
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit.policy import PolicyHead
 from PIL import Image, ImageDraw
+from sklearn.decomposition import PCA
 from streamlit_image_coordinates import streamlit_image_coordinates
 from torch import Tensor
 from torchvision import transforms
 from torchvision.models.resnet import ResNet50_Weights
 
-from avp_vit.checkpoint import load as load_ckpt
-from avp_vit.checkpoint import load_model
-from canvit.hub import create_backbone
+from avp_vit.checkpoint import CheckpointData, load as load_ckpt, load_model
 from avp_vit.train.config import Config as TrainConfig
 from avp_vit.train.data import imagenet_normalize
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import Viewpoint
 from avp_vit.train.viz import fit_pca, imagenet_denormalize, pca_rgb, timestep_colors
+from canvit.hub import create_backbone
 from dinov3_probes import DINOv3LinearClassificationHead
 from ytch.device import sync_device
 
-IMAGENET_LABELS = ResNet50_Weights.DEFAULT.meta["categories"]
+LABELS: list[str] = ResNet50_Weights.DEFAULT.meta["categories"]
+COL_W = 300
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 st.set_page_config(page_title="AVP-ViT", layout="wide")
 
 
@@ -53,98 +45,128 @@ st.set_page_config(page_title="AVP-ViT", layout="wide")
 
 
 @dataclass
-class StepResult:
-    hidden: np.ndarray
-    projected: np.ndarray
-    glimpse: np.ndarray
-    scene_cos: float | None = None
-    cls_cos: float | None = None
-    step_ms: float = 0.0
-    top5: list[tuple[str, float]] = field(default_factory=list)
-    policy_pred: Viewpoint | None = None  # Next viewpoint predicted by policy
-
-
-@dataclass
 class Resources:
-    model: Any  # ActiveCanViT - using Any to avoid complex type deps
+    """Cached model and teacher resources."""
+    model: Any  # ActiveCanViT - type not exported
     teacher: DINOv3Backbone | None
     scene_norm: PositionAwareNorm | None
     cls_norm: PositionAwareNorm | None
     probe: DINOv3LinearClassificationHead | None
-    ckpt: Any
     patch_size: int
     backbone: str
-    ckpt_step: int
+    step: int
+
+
+@dataclass
+class Config:
+    """Sidebar configuration."""
+    ckpt_path: str
+    device: str
+    scale: float
+    glimpse_grid: int
+    canvas_grid: int
+    l2_norm: bool
+    show_full: bool
+    show_glimpse: bool
+    show_up: bool
+    normalize: bool
+    pc_offset: int
+    projected_basis: str  # "teacher" | "own"
+    up_basis: str  # "teacher" | "own"
+    rerun_teacher: bool
+
+
+@dataclass
+class TeacherOut:
+    """Teacher features at one resolution."""
+    scene: Tensor | None  # [N, D]
+    cls: Tensor | None  # [D]
+    top5: list[tuple[str, float]]
+    ms: float
+
+
+@dataclass
+class StepResult:
+    """One model inference step."""
+    hidden: np.ndarray  # [N, D]
+    projected: np.ndarray  # [N, D]
+    glimpse: np.ndarray  # [H, W, 3]
+    scene_cos: float | None = None
+    cls_cos: float | None = None
+    ms: float = 0.0
+    top5: list[tuple[str, float]] = field(default_factory=list)
+    policy: Viewpoint | None = None
+
+
+@dataclass
+class ImageCtx:
+    """Per-image context: everything derived from the uploaded image."""
+    image: Tensor  # [1, 3, H, W] normalized
+    pil: Image.Image  # display size
+    H: int
+    W: int
+    teacher_full: TeacherOut
+    teacher_glimpse: TeacherOut | None
+    pca_full: PCA | None
+    pca_glimpse: PCA | None
+    teacher_grid: int
+
+
+@dataclass
+class SeqState:
+    """Sequence state from session."""
+    viewpoints: list[Viewpoint]
+    results: list[StepResult]
+    latency: dict[str, list[float]]
 
 
 # --- Loading ---
 
 
 @st.cache_resource
-def load_resources(ckpt_path: str, device_name: str) -> Resources:
-    log.info(f"Loading resources: ckpt={ckpt_path}, device={device_name}")
-    device = torch.device(device_name)
+def load_resources(ckpt_path: str, device_str: str) -> Resources:
+    log.info(f"Loading: {ckpt_path} on {device_str}")
+    device = torch.device(device_str)
     model = load_model(Path(ckpt_path), device)
     ckpt = load_ckpt(Path(ckpt_path), "cpu")
 
-    teacher = None
+    teacher: DINOv3Backbone | None = None
     try:
         teacher = create_backbone(ckpt["backbone"], pretrained=True).to(device).eval()
         assert isinstance(teacher, DINOv3Backbone)
-        log.info(f"Teacher loaded: {ckpt['backbone']}")
     except Exception as e:
-        log.warning(f"Failed to load teacher: {e}")
-
-    scene_norm = None
-    if (s := ckpt.get("scene_norm_state")) is not None:
-        n, d = s["mean"].shape
-        scene_norm = PositionAwareNorm(n, d, int(n**0.5))
-        scene_norm.load_state_dict(s)
-        scene_norm.eval().to(device)
-        log.info(f"Scene norm loaded: {scene_norm.grid_size}² positions, dim={d}")
-
-    cls_norm = None
-    if (s := ckpt.get("cls_norm_state")) is not None:
-        n, d = s["mean"].shape
-        cls_norm = PositionAwareNorm(n, d, 1)
-        cls_norm.load_state_dict(s)
-        cls_norm.eval().to(device)
-        log.info(f"CLS norm loaded: dim={d}")
-
-    probe = load_probe(ckpt["backbone"], device)
-    log.info(f"Probe: {'loaded' if probe else 'not available'}")
-
-    log.info(f"Policy: {'enabled' if model.policy is not None else 'disabled'}")
+        log.warning(f"Teacher failed: {e}")
 
     return Resources(
         model=model,
         teacher=teacher,
-        scene_norm=scene_norm,
-        cls_norm=cls_norm,
-        probe=probe,
-        ckpt=ckpt,
+        scene_norm=_load_norm(ckpt, "scene_norm_state", device),
+        cls_norm=_load_norm(ckpt, "cls_norm_state", device, grid=1),
+        probe=load_probe(ckpt["backbone"], device),
         patch_size=model.backbone.patch_size_px,
         backbone=ckpt.get("backbone", "?"),
-        ckpt_step=int(ckpt.get("step") or -1),
+        step=int(ckpt.get("step") or -1),
     )
 
 
-# --- Core ---
+def _load_norm(ckpt: CheckpointData, key: str, device: torch.device, grid: int | None = None) -> PositionAwareNorm | None:
+    if (s := ckpt.get(key)) is None:
+        return None
+    n, d = s["mean"].shape
+    norm = PositionAwareNorm(n, d, grid if grid else int(n**0.5))
+    norm.load_state_dict(s)
+    return norm.eval().to(device)
 
 
-@dataclass
-class TeacherResult:
-    scene: Tensor | None
-    cls: Tensor | None
-    top5: list[tuple[str, float]]
-    ms: float
+# --- Inference ---
 
 
-def get_teacher_target(res: Resources, image: Tensor, teacher_grid: int) -> TeacherResult:
+def get_teacher(res: Resources, image: Tensor, grid: int, *, normalize: bool, interp: bool = False) -> TeacherOut:
+    """Get teacher features. If grid != norm grid and interp=True, interpolate norm stats."""
     if res.teacher is None:
-        return TeacherResult(None, None, [], 0.0)
+        return TeacherOut(None, None, [], 0.0)
 
-    px = teacher_grid * res.patch_size
+    px = grid * res.patch_size
     img = F.interpolate(image, (px, px), mode="bilinear", align_corners=False)
 
     sync_device(image.device)
@@ -153,105 +175,76 @@ def get_teacher_target(res: Resources, image: Tensor, teacher_grid: int) -> Teac
     sync_device(image.device)
     ms = (time.perf_counter() - t0) * 1000
 
-    scene = feats.patches
-    if res.scene_norm is not None:
-        scene = res.scene_norm(scene)
+    scene = feats.patches  # [1, N, D]
+    if normalize and res.scene_norm is not None:
+        if grid == res.scene_norm.grid_size:
+            scene = res.scene_norm(scene)
+        elif interp:
+            scene = _interp_norm(scene[0], res.scene_norm, grid).unsqueeze(0)
 
-    cls_target = None
-    if res.cls_norm is not None:
-        cls_target = res.cls_norm(feats.cls.unsqueeze(1)).squeeze(1)
+    cls = res.cls_norm(feats.cls.unsqueeze(1)).squeeze(1) if normalize and res.cls_norm else None
+    top5 = _top5(feats.cls, res.probe)
+    return TeacherOut(scene[0], cls, top5, ms)
 
-    # Teacher top-5 predictions
-    top5: list[tuple[str, float]] = []
-    if res.probe is not None:
-        logits = res.probe(feats.cls)
-        probs = F.softmax(logits, dim=-1)
-        p, c = probs[0].topk(5)
-        top5 = [(IMAGENET_LABELS[i], prob) for i, prob in zip(c.tolist(), p.tolist())]
 
-    return TeacherResult(scene[0] if scene is not None else None, cls_target, top5, ms)
+def _interp_norm(x: Tensor, norm: PositionAwareNorm, tgt: int) -> Tensor:
+    """Apply norm with bilinearly interpolated stats (interpolate variance, not std)."""
+    src, D = norm.grid_size, norm.mean.shape[-1]
+    dev = x.device
+    # [N,D] -> [1,D,H,W] -> interp -> [N,D]
+    def reshape_interp(t: Tensor) -> Tensor:
+        t2d = t.view(src, src, D).permute(2, 0, 1).unsqueeze(0).to(dev)
+        t_up = F.interpolate(t2d, (tgt, tgt), mode="bilinear", align_corners=False)
+        return t_up[0].permute(1, 2, 0).reshape(-1, D)
+    mean, var = reshape_interp(norm.mean), reshape_interp(norm.var)
+    return (x - mean) / (var + norm.eps).sqrt()
+
+
+def _top5(cls: Tensor, probe: DINOv3LinearClassificationHead | None) -> list[tuple[str, float]]:
+    if probe is None:
+        return []
+    p, c = F.softmax(probe(cls), dim=-1)[0].topk(5)
+    return [(LABELS[i], prob) for i, prob in zip(c.tolist(), p.tolist())]
 
 
 def run_step(
-    res: Resources,
-    image: Tensor,
-    canvas: Tensor,
-    cls: Tensor,
-    vp: Viewpoint,
-    glimpse_px: int,
-    canvas_grid: int,
-    teacher_target: Tensor | None,
-    cls_target: Tensor | None,
-    teacher_grid: int,
-    l2_norm: bool,
+    res: Resources, image: Tensor, canvas: Tensor, cls: Tensor, vp: Viewpoint,
+    *, glimpse_px: int, canvas_grid: int, teacher: TeacherOut, teacher_grid: int, l2: bool,
 ) -> tuple[Tensor, Tensor, StepResult]:
-    # Shape assertions
-    assert image.shape[0] == 1, f"batch size must be 1, got {image.shape[0]}"
-    assert canvas.shape[0] == 1, f"canvas batch size must be 1, got {canvas.shape[0]}"
-    assert cls.shape[0] == 1, f"cls batch size must be 1, got {cls.shape[0]}"
-
+    """Run one model step, compute metrics."""
     sync_device(image.device)
     t0 = time.perf_counter()
-    out = res.model.forward_step(
-        image=image, canvas=canvas, cls=cls, viewpoint=vp, glimpse_size_px=glimpse_px
-    )
+    out = res.model.forward_step(image=image, canvas=canvas, cls=cls, viewpoint=vp, glimpse_size_px=glimpse_px)
     sync_device(image.device)
-    step_ms = (time.perf_counter() - t0) * 1000
+    ms = (time.perf_counter() - t0) * 1000
 
     spatial = res.model.get_spatial(out.canvas)[0]
-    assert spatial.shape[0] == canvas_grid * canvas_grid, f"spatial tokens {spatial.shape[0]} != {canvas_grid}²"
-
-    if l2_norm:
+    if l2:
         spatial = F.normalize(spatial, p=2, dim=-1)
-
     scene = res.model.predict_teacher_scene(out.canvas)
-    assert scene.shape[1] == canvas_grid * canvas_grid, f"scene tokens {scene.shape[1]} != {canvas_grid}²"
 
-    # Scene cosine similarity
-    scene_cos = None
-    if teacher_target is not None:
+    # Cosine sims (downsample model to teacher grid)
+    scene_cos = cls_cos = None
+    if teacher.scene is not None:
         D = scene.shape[-1]
-        scene_2d = scene.view(1, canvas_grid, canvas_grid, D).permute(0, 3, 1, 2)
-        scene_down = F.interpolate(scene_2d, (teacher_grid, teacher_grid), mode="bilinear")
-        scene_flat = scene_down[0].permute(1, 2, 0).reshape(-1, D)
-        scene_cos = F.cosine_similarity(scene_flat, teacher_target, dim=-1).mean().item()
-
-    # CLS cosine similarity
-    cls_cos = None
+        s2d = scene.view(1, canvas_grid, canvas_grid, D).permute(0, 3, 1, 2)
+        s_down = F.interpolate(s2d, (teacher_grid, teacher_grid), mode="bilinear", align_corners=False)
+        scene_cos = F.cosine_similarity(s_down[0].permute(1, 2, 0).reshape(-1, D), teacher.scene, dim=-1).mean().item()
     cls_pred = res.model.predict_teacher_cls(out.cls, out.canvas)
-    if cls_target is not None:
-        cls_cos = F.cosine_similarity(cls_pred, cls_target, dim=-1).mean().item()
+    if teacher.cls is not None:
+        cls_cos = F.cosine_similarity(cls_pred, teacher.cls, dim=-1).mean().item()
 
-    # Top-5 classification
-    top5 = []
-    if res.probe is not None and res.cls_norm is not None:
-        logits = res.probe(res.cls_norm.denormalize(cls_pred))
-        probs = F.softmax(logits, dim=-1)
-        p, c = probs[0].topk(5)
-        top5 = [(IMAGENET_LABELS[i], prob) for i, prob in zip(c.tolist(), p.tolist())]
+    top5 = _top5(res.cls_norm.denormalize(cls_pred), res.probe) if res.probe and res.cls_norm else []
 
-    glimpse_np = imagenet_denormalize(out.glimpse[0].cpu()).numpy()
-    assert glimpse_np.shape[0] == glimpse_px and glimpse_np.shape[1] == glimpse_px, f"glimpse shape {glimpse_np.shape[:2]} != {glimpse_px}²"
-
-    # Policy prediction for next viewpoint
-    policy_pred = None
+    policy = None
     if isinstance(res.model.policy, PolicyHead) and out.vpe is not None:
         pol = res.model.policy(out.vpe)
-        policy_pred = Viewpoint(
-            name="policy",
-            centers=pol.position,  # [1, 2] in (y, x) order
-            scales=pol.scale,      # [1]
-        )
+        policy = Viewpoint(name="policy", centers=pol.position, scales=pol.scale)
 
     return out.canvas, out.cls, StepResult(
-        hidden=spatial.cpu().numpy(),
-        projected=scene[0].cpu().numpy(),
-        glimpse=glimpse_np,
-        scene_cos=scene_cos,
-        cls_cos=cls_cos,
-        step_ms=step_ms,
-        top5=top5,
-        policy_pred=policy_pred,
+        hidden=spatial.cpu().numpy(), projected=scene[0].cpu().numpy(),
+        glimpse=imagenet_denormalize(out.glimpse[0].cpu()).numpy(),
+        scene_cos=scene_cos, cls_cos=cls_cos, ms=ms, top5=top5, policy=policy,
     )
 
 
@@ -259,425 +252,362 @@ def run_step(
 
 
 def upscale(arr: np.ndarray, size: int) -> Image.Image:
-    img = Image.fromarray((np.clip(arr, 0, 1) * 255).astype(np.uint8))
-    return img.resize((size, size), Image.Resampling.NEAREST)
+    return Image.fromarray((np.clip(arr, 0, 1) * 255).astype(np.uint8)).resize((size, size), Image.Resampling.NEAREST)
 
 
-def upsample_latents(latents: np.ndarray, src_grid: int, dst_grid: int) -> np.ndarray:
-    """Bilinearly upsample latents from src_grid² to dst_grid².
-
-    Args:
-        latents: (src_grid², D) array
-        src_grid: source grid size
-        dst_grid: destination grid size
-
-    Returns:
-        (dst_grid², D) array
-    """
+def upsample(latents: np.ndarray, src: int, dst: int) -> np.ndarray:
     D = latents.shape[-1]
-    # (src_grid², D) -> (1, D, src_grid, src_grid)
-    t = torch.from_numpy(latents).float().view(src_grid, src_grid, D).permute(2, 0, 1).unsqueeze(0)
-    # bilinear upsample
-    t_up = F.interpolate(t, size=(dst_grid, dst_grid), mode="bilinear", align_corners=False)
-    # (1, D, dst_grid, dst_grid) -> (dst_grid², D)
-    return t_up[0].permute(1, 2, 0).reshape(-1, D).numpy()
+    t = torch.from_numpy(latents).float().view(src, src, D).permute(2, 0, 1).unsqueeze(0)
+    return F.interpolate(t, (dst, dst), mode="bilinear", align_corners=False)[0].permute(1, 2, 0).reshape(-1, D).numpy()
 
 
-def to_viewpoint(cx: float, cy: float, scale: float, H: int, W: int, device: torch.device, name: str) -> Viewpoint:
+def pca_img(features: np.ndarray, grid: int, pca: PCA, pc_off: int, *, norm: bool) -> Image.Image:
+    return upscale(pca_rgb(pca=pca, features=features, H=grid, W=grid, normalize=norm, pc_offset=pc_off), COL_W)
+
+
+def click_to_vp(cx: float, cy: float, scale: float, H: int, W: int, dev: torch.device, name: str) -> Viewpoint:
     cx_n = float(np.clip((cx / W) * 2 - 1, -(1 - scale), 1 - scale))
     cy_n = float(np.clip((cy / H) * 2 - 1, -(1 - scale), 1 - scale))
-    return Viewpoint(
-        name=name,
-        centers=torch.tensor([[cy_n, cx_n]], device=device, dtype=torch.float32),
-        scales=torch.tensor([scale], device=device, dtype=torch.float32),
-    )
+    return Viewpoint(name=name, centers=torch.tensor([[cy_n, cx_n]], device=dev), scales=torch.tensor([scale], device=dev))
 
 
-def draw_boxes(
-    img: Image.Image,
-    viewpoints: list[Viewpoint],
-    H: int,
-    W: int,
-    policy_pred: Viewpoint | None = None,
-) -> Image.Image:
+def draw_boxes(img: Image.Image, vps: list[Viewpoint], H: int, W: int, policy: Viewpoint | None) -> Image.Image:
     out = img.copy()
     draw = ImageDraw.Draw(out, "RGBA")
-    colors = timestep_colors(len(viewpoints)) if viewpoints else []
-    for i, vp in enumerate(viewpoints):
+    colors = timestep_colors(len(vps)) if vps else []
+    for i, vp in enumerate(vps):
         box = vp.to_pixel_box(0, H, W)
         r, g, b = (int(c * 255) for c in colors[i][:3])
         draw.rectangle([box.left, box.top, box.left + box.width, box.top + box.height], outline=(r, g, b, 255), width=2)
-        # Draw timestep number at center
         cx, cy = int(box.center_x), int(box.center_y)
         draw.ellipse([cx - 8, cy - 8, cx + 8, cy + 8], fill=(r, g, b, 200))
-        draw.text((cx, cy), str(i), fill=(255, 255, 255, 255), anchor="mm")
-
-    # Policy prediction ghost box (yellow, dashed effect via thinner line)
-    if policy_pred is not None:
-        box = policy_pred.to_pixel_box(0, H, W)
-        draw.rectangle(
-            [box.left, box.top, box.left + box.width, box.top + box.height],
-            outline=(255, 200, 0, 200),
-            width=2,
-        )
-        cx, cy = int(box.center_x), int(box.center_y)
-        draw.text((cx, cy), "→", fill=(255, 200, 0, 255), anchor="mm")
-
+        draw.text((cx, cy), str(i), fill=(255, 255, 255), anchor="mm")
+    if policy:
+        box = policy.to_pixel_box(0, H, W)
+        draw.rectangle([box.left, box.top, box.left + box.width, box.top + box.height], outline=(255, 200, 0, 200), width=2)
+        draw.text((int(box.center_x), int(box.center_y)), "→", fill=(255, 200, 0), anchor="mm")
     return out
 
 
 # --- UI ---
 
 
-def main() -> None:
-    # Sidebar
+def sidebar() -> Config:
     with st.sidebar:
         st.title("AVP-ViT")
-        ckpt_path = st.text_input("Checkpoint", value="reference.pt")
-        device_name = st.selectbox("Device", ["mps", "cuda", "cpu"], index=0)
-        assert isinstance(device_name, str)
+        ckpt = st.text_input("Checkpoint", value="reference.pt")
+        dev = st.selectbox("Device", ["mps", "cuda", "cpu"], index=0)
+        assert isinstance(dev, str)
 
         st.markdown("---")
-        train_cfg = TrainConfig()
-        scale = st.slider("Viewpoint scale", 0.05, 1.0, 0.25, 0.05)
-        glimpse_grid = st.slider("Glimpse grid", 2, 16, train_cfg.glimpse_grid_size, 1)
-        canvas_grid = st.slider("Canvas grid", 8, 256, train_cfg.grid_size, 8)
-        l2_norm = st.checkbox("L2 normalize hidden", value=False)
+        defaults = TrainConfig()
+        scale = st.slider("Scale", 0.05, 1.0, 0.25, 0.05)
+        glimpse = st.slider("Glimpse grid", 2, 16, defaults.glimpse_grid_size, 1)
+        canvas = st.slider("Canvas grid", 8, 256, defaults.grid_size, 8)
+        l2 = st.checkbox("L2 norm hidden", value=False)
+
+        st.markdown("---")
+        st.markdown("**Teacher**")
+        show_full = st.checkbox("Full res", value=True)
+        show_glimpse = st.checkbox("Glimpse res", value=True)
+        show_up = st.checkbox("Upsampled", value=True)
+        normalize = st.checkbox("Normalize", value=True, help="Full: exact stats. Glimpse: interpolated.")
 
         st.markdown("---")
         st.markdown("**PCA**")
-        pc_offset = st.slider("PC offset", 0, 9, 0, 1)
-        projected_pca = st.radio("Projected basis", ["teacher", "own"], index=0, horizontal=True)
-        teacher_up_pca = st.radio("Teacher↑ basis", ["teacher", "own"], index=0, horizontal=True)
+        pc_off = st.slider("PC offset", 0, 9, 0, 1)
+        proj_basis = st.radio("Projected", ["teacher", "own"], horizontal=True)
+        up_basis = st.radio("Upsampled", ["teacher", "own"], horizontal=True)
 
         st.markdown("---")
-        col_clear, col_undo = st.columns(2)
-        with col_clear:
-            if st.button("Clear viewpoints", help="Resets canvas and all viewpoints"):
-                st.session_state.pop("viewpoints", None)
-                st.session_state.pop("results", None)
-                st.session_state.pop("canvas", None)
-                st.session_state.pop("cls", None)
-                st.session_state.pop("last_click", None)
-                st.session_state.pop("_config", None)  # Force reinit
-                log.info("Cleared all viewpoints")
-                st.rerun()
-        with col_undo:
-            if st.button("Undo last", help="Removes last viewpoint from display (canvas state preserved)"):
-                vps = st.session_state.get("viewpoints", [])
-                if vps:
-                    removed = vps.pop()
-                    st.session_state.results.pop()
-                    st.session_state.last_click = None
-                    log.info(f"Undid viewpoint {removed.name}, {len(vps)} remaining")
-                    st.rerun()
-
-        col_teacher, col_latency = st.columns(2)
-        with col_teacher:
-            rerun_teacher = st.button("Rerun teacher", help="Sample teacher latency again")
-        with col_latency:
-            if st.button("Clear latency", help="Clear all latency measurements"):
-                st.session_state.pop("latency_data", None)
-                log.info("Cleared latency data")
+        c1, c2 = st.columns(2)
+        if c1.button("Clear"):
+            for k in ["viewpoints", "results", "canvas", "cls", "last_click", "_cfg"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+        if c2.button("Undo"):
+            vps, res = st.session_state.get("viewpoints", []), st.session_state.get("results", [])
+            if vps and res:
+                vps.pop()
+                res.pop()
+                st.session_state.last_click = None
                 st.rerun()
 
-    uploaded = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
+        c3, c4 = st.columns(2)
+        rerun = c3.button("Re-teacher")
+        if c4.button("Clear lat"):
+            st.session_state.pop("latency", None)
+            st.rerun()
 
-    # Store uploaded file in session state to survive reruns
-    if uploaded is not None:
-        st.session_state.uploaded_file = uploaded.read()
-        st.session_state.uploaded_name = uploaded.name
-        uploaded.seek(0)  # Reset for later use
+    return Config(
+        ckpt_path=ckpt, device=dev, scale=scale, glimpse_grid=glimpse, canvas_grid=canvas,
+        l2_norm=l2, show_full=show_full, show_glimpse=show_glimpse, show_up=show_up,
+        normalize=normalize, pc_offset=pc_off, projected_basis=proj_basis, up_basis=up_basis,
+        rerun_teacher=rerun,
+    )
 
-    if not Path(ckpt_path).exists():
-        st.error(f"Checkpoint not found: {ckpt_path}")
-        return
 
-    if "uploaded_file" not in st.session_state:
-        st.info("Upload an image to begin.")
-        return
+def init_seq(res: Resources, cfg: Config, file_key: str) -> SeqState:
+    """Get or init sequence state from session."""
+    if "latency" not in st.session_state:
+        st.session_state.latency = {}
 
-    res = load_resources(ckpt_path, device_name)
-    device = torch.device(device_name)
-    glimpse_px = glimpse_grid * res.patch_size
-    img_size = canvas_grid * res.patch_size
-    teacher_grid = res.scene_norm.grid_size if res.scene_norm else 16
-
-    # Persistent latency data (survives config changes)
-    if "latency_data" not in st.session_state:
-        st.session_state.latency_data = {}  # dict[str, list[float]]
-
-    # Use stored filename for config key (stable across reruns)
-    file_key = st.session_state.get("uploaded_name", "none")
-
-    # Config change detection (excludes scale, l2_norm)
-    config_key = f"{ckpt_path}:{device_name}:{canvas_grid}:{glimpse_grid}:{file_key}"
-    old_config = st.session_state.get("_config")
-    n_vps = len(st.session_state.get("viewpoints", []))
-    if old_config != config_key:
-        log.warning(f"CONFIG RESET! old='{old_config}' new='{config_key}'")
-        st.session_state._config = config_key
+    cfg_key = f"{cfg.ckpt_path}:{cfg.device}:{cfg.canvas_grid}:{cfg.glimpse_grid}:{file_key}"
+    if st.session_state.get("_cfg") != cfg_key:
+        log.info("Config changed, reset")
+        st.session_state._cfg = cfg_key
         st.session_state.viewpoints = []
         st.session_state.results = []
-        st.session_state.canvas = res.model.init_canvas(batch_size=1, canvas_grid_size=canvas_grid)
+        st.session_state.canvas = res.model.init_canvas(batch_size=1, canvas_grid_size=cfg.canvas_grid)
         st.session_state.cls = res.model.init_cls(batch_size=1)
         st.session_state.last_click = None
-    else:
-        log.info(f"Render: vps={n_vps}")
 
-    # Load image from session state (stable across reruns)
+    return SeqState(st.session_state.viewpoints, st.session_state.results, st.session_state.latency)
+
+
+def make_image_ctx(res: Resources, cfg: Config, raw: bytes) -> ImageCtx:
+    """Build per-image context: transform, get teacher features, fit PCA."""
+    assert res.scene_norm is not None, "Checkpoint must have scene_norm_state"
+    device = torch.device(cfg.device)
+    img_size = cfg.canvas_grid * res.patch_size
+    teacher_grid = res.scene_norm.grid_size
+
     transform = transforms.Compose([
         transforms.Resize(img_size, transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(img_size),
         transforms.ToTensor(),
         imagenet_normalize(),
     ])
-    pil = Image.open(io.BytesIO(st.session_state.uploaded_file)).convert("RGB")
-    orig_size = pil.size
-    img_t = transform(pil)
+    pil_orig = Image.open(io.BytesIO(raw)).convert("RGB")
+    img_t = transform(pil_orig)
     assert isinstance(img_t, Tensor)
     image = img_t.unsqueeze(0).to(device)
+
     img_np = imagenet_denormalize(image[0].cpu()).numpy()
     H, W = img_np.shape[:2]
-    img_pil = Image.fromarray((img_np * 255).astype(np.uint8))
-    log.debug(f"Image: {orig_size} → {H}x{W} ({img_size}px)")
-
-    # Teacher target
-    latency_data: dict[str, list[float]] = st.session_state.latency_data
-    teacher_key = f"Teacher {teacher_grid}²"
-    model_key = f"Model {glimpse_grid}→{canvas_grid}"
+    pil = Image.fromarray((img_np * 255).astype(np.uint8))
 
     with torch.no_grad():
-        teacher = get_teacher_target(res, image, teacher_grid)
-        if teacher.ms > 0:
-            if teacher_key not in latency_data:
-                latency_data[teacher_key] = []
-            # First run for this config or rerun button pressed
-            if not latency_data[teacher_key] or rerun_teacher:
-                latency_data[teacher_key].append(teacher.ms)
+        t_full = get_teacher(res, image, teacher_grid, normalize=cfg.normalize)
+        t_glimpse = get_teacher(res, image, cfg.glimpse_grid, normalize=cfg.normalize, interp=True) if cfg.show_glimpse else None
 
-    # Cache expensive computations
-    scene_target_np = teacher.scene.cpu().numpy() if teacher.scene is not None else None
-    pca_teacher = fit_pca(scene_target_np) if scene_target_np is not None else None
+    scene_np = t_full.scene.cpu().numpy() if t_full.scene is not None else None
+    glimpse_np = t_glimpse.scene.cpu().numpy() if t_glimpse and t_glimpse.scene is not None else None
 
-    viewpoints: list[Viewpoint] = st.session_state.viewpoints
-    results: list[StepResult] = st.session_state.results
-    n = len(viewpoints)
+    return ImageCtx(
+        image=image, pil=pil, H=H, W=W,
+        teacher_full=t_full, teacher_glimpse=t_glimpse,
+        pca_full=fit_pca(scene_np) if scene_np is not None else None,
+        pca_glimpse=fit_pca(glimpse_np) if glimpse_np is not None else None,
+        teacher_grid=teacher_grid,
+    )
 
-    # Main layout
-    c1, c2, c3, c4, c5 = st.columns(5)
-    col_w = 300
 
-    with c1:
-        st.markdown("**Input** (click to add)")
-        last_policy = results[-1].policy_pred if results else None
-        display = draw_boxes(img_pil, viewpoints, H, W, policy_pred=last_policy).resize((col_w, col_w), Image.Resampling.LANCZOS)
-        coords = streamlit_image_coordinates(display, key="img")
+def do_step(res: Resources, cfg: Config, ctx: ImageCtx, seq: SeqState, vp: Viewpoint) -> None:
+    """Execute model step, update session state, rerun."""
+    seq.viewpoints.append(vp)
+    glimpse_px = cfg.glimpse_grid * res.patch_size
+    with torch.no_grad():
+        new_canvas, new_cls, result = run_step(
+            res, ctx.image, st.session_state.canvas, st.session_state.cls, vp,
+            glimpse_px=glimpse_px, canvas_grid=cfg.canvas_grid,
+            teacher=ctx.teacher_full, teacher_grid=ctx.teacher_grid, l2=cfg.l2_norm,
+        )
+    st.session_state.canvas = new_canvas
+    st.session_state.cls = new_cls
+    seq.results.append(result)
+    seq.latency.setdefault(f"Model {cfg.glimpse_grid}→{cfg.canvas_grid}", []).append(result.ms)
+    st.rerun()
 
-        if coords is not None:
-            click = (coords["x"], coords["y"])
-            if click != st.session_state.last_click:
-                st.session_state.last_click = click
-                cx, cy = click[0] * W / col_w, click[1] * H / col_w
-                vp = to_viewpoint(cx, cy, scale, H, W, device, f"t{n}")
-                viewpoints.append(vp)
 
-                with torch.no_grad():
-                    sync_device(device)
-                    new_canvas, new_cls, result = run_step(
-                        res, image, st.session_state.canvas, st.session_state.cls,
-                        vp, glimpse_px, canvas_grid, teacher.scene, teacher.cls,
-                        teacher_grid, l2_norm,
-                    )
-                    sync_device(device)
-                    st.session_state.canvas = new_canvas
-                    st.session_state.cls = new_cls
-                    results.append(result)
-                    # Add to persistent latency data
-                    if model_key not in latency_data:
-                        latency_data[model_key] = []
-                    latency_data[model_key].append(result.step_ms)
-                    cos_str = f"{result.scene_cos:.4f}" if result.scene_cos else "?"
-                    log.info(f"T{n}: pos=({cx:.1f},{cy:.1f}) scale={scale:.2f} cos={cos_str} time={result.step_ms:.1f}ms")
-                st.rerun()
+# --- Rendering ---
 
-        # "Use Policy" button - accept policy's suggested next viewpoint
-        if last_policy is not None:
-            if st.button("Use Policy →", help="Accept policy's suggested viewpoint"):
-                viewpoints.append(Viewpoint(
-                    name=f"pol_t{n}",
-                    centers=last_policy.centers.clone(),
-                    scales=last_policy.scales.clone(),
-                ))
-                with torch.no_grad():
-                    sync_device(device)
-                    new_canvas, new_cls, result = run_step(
-                        res, image, st.session_state.canvas, st.session_state.cls,
-                        last_policy, glimpse_px, canvas_grid, teacher.scene, teacher.cls,
-                        teacher_grid, l2_norm,
-                    )
-                    sync_device(device)
-                    st.session_state.canvas = new_canvas
-                    st.session_state.cls = new_cls
-                    results.append(result)
-                    if model_key not in latency_data:
-                        latency_data[model_key] = []
-                    latency_data[model_key].append(result.step_ms)
-                    log.info(f"T{n}: policy viewpoint, cos={result.scene_cos:.4f if result.scene_cos else '?'}")
-                st.rerun()
 
-    with c2:
-        st.markdown(f"**Teacher {teacher_grid}²**")
-        if scene_target_np is not None and pca_teacher is not None:
-            st.image(upscale(pca_rgb(pca=pca_teacher, features=scene_target_np, H=teacher_grid, W=teacher_grid, normalize=False, pc_offset=pc_offset), col_w), width=col_w)
+def render_top5(top5: list[tuple[str, float]], label: str) -> None:
+    if not top5:
+        return
+    st.markdown(f"**{label}**")
+    cols = st.columns(5)
+    for i, (name, prob) in enumerate(top5):
+        cols[i].metric(name, f"{100*prob:.1f}%")
 
-    with c3:
-        lbl = f"**Hidden {canvas_grid}²**" + (" (L2)" if l2_norm else "") + (f" T{n-1}" if n else "")
-        st.markdown(lbl)
-        if n > 0:
-            h = results[-1].hidden
-            st.image(upscale(pca_rgb(pca=fit_pca(h), features=h, H=canvas_grid, W=canvas_grid, normalize=False, pc_offset=pc_offset), col_w), width=col_w)
 
-    with c4:
-        pca_suffix = " (own)" if projected_pca == "own" else ""
-        st.markdown(f"**Projected {canvas_grid}²**{pca_suffix}" + (f" T{n-1}" if n else ""))
-        if n > 0:
-            p = results[-1].projected
-            pca_proj = fit_pca(p) if projected_pca == "own" else pca_teacher
-            if pca_proj is not None:
-                normalize = projected_pca == "teacher"
-                st.image(upscale(pca_rgb(pca=pca_proj, features=p, H=canvas_grid, W=canvas_grid, normalize=normalize, pc_offset=pc_offset), col_w), width=col_w)
-                if results[-1].scene_cos is not None:
-                    st.caption(f"cos = {results[-1].scene_cos:.4f}")
-
-    with c5:
-        pca_suffix = " (own)" if teacher_up_pca == "own" else ""
-        st.markdown(f"**Teacher↑ {canvas_grid}²**{pca_suffix}")
-        if scene_target_np is not None:
-            teacher_up = upsample_latents(scene_target_np, teacher_grid, canvas_grid)
-            pca_up = fit_pca(teacher_up) if teacher_up_pca == "own" else pca_teacher
-            if pca_up is not None:
-                normalize = teacher_up_pca == "teacher"
-                st.image(upscale(pca_rgb(pca=pca_up, features=teacher_up, H=canvas_grid, W=canvas_grid, normalize=normalize, pc_offset=pc_offset), col_w), width=col_w)
-
-    # Top-5 predictions (Model vs Teacher)
-    has_model_preds = n > 0 and results[-1].top5
-    has_teacher_preds = bool(teacher.top5)
-    if has_model_preds or has_teacher_preds:
-        st.markdown("---")
-        if has_model_preds:
-            st.markdown("**Model** (AVP-ViT)")
-            cols = st.columns(5)
-            for i, (label, prob) in enumerate(results[-1].top5):
-                with cols[i]:
-                    st.metric(label, f"{100*prob:.1f}%")
-        if has_teacher_preds:
-            st.markdown("**Teacher** (DINOv3)")
-            cols = st.columns(5)
-            for i, (label, prob) in enumerate(teacher.top5):
-                with cols[i]:
-                    st.metric(label, f"{100*prob:.1f}%")
-
-    # Metrics plots
-    if n > 0:
-        st.markdown("---")
-        scene_sims = [r.scene_cos for r in results if r.scene_cos is not None]
-        cls_sims = [r.cls_cos for r in results if r.cls_cos is not None]
-
-        col_sim, col_lat = st.columns(2)
-
-        with col_sim:
-            if scene_sims or cls_sims:
-                fig = go.Figure()
-                # Reference line at cos=1 (perfect alignment)
-                max_t = max(len(scene_sims) if scene_sims else 1, len(cls_sims) if cls_sims else 1)
-                fig.add_trace(go.Scatter(x=[0, max_t - 1], y=[1.0, 1.0], mode="lines", name="Target", line={"dash": "dash", "color": "gray", "width": 1}))
-                if scene_sims:
-                    fig.add_trace(go.Scatter(x=list(range(len(scene_sims))), y=scene_sims, mode="lines+markers", name="Scene"))
-                if cls_sims:
-                    fig.add_trace(go.Scatter(x=list(range(len(cls_sims))), y=cls_sims, mode="lines+markers", name="CLS"))
-                fig.update_layout(title="Cosine Similarity", xaxis_title="T", yaxis_title="cos", height=250, margin=dict(l=20, r=20, t=40, b=40), yaxis_range=[0, 1.05])
-                st.plotly_chart(fig, width="stretch")
-
-        with col_lat:
-            if latency_data:
-                fig = go.Figure()
-                colors = ["rgba(100,100,100,0.6)", "rgba(66,133,244,0.6)", "rgba(244,66,66,0.6)",
-                          "rgba(66,244,66,0.6)", "rgba(244,166,66,0.6)", "rgba(166,66,244,0.6)"]
-                for i, (label, times) in enumerate(sorted(latency_data.items())):
-                    fig.add_trace(go.Box(
-                        y=times, name=f"{label} (n={len(times)})",
-                        marker_color=colors[i % len(colors)], boxpoints="all", jitter=0.3
-                    ))
-                fig.update_layout(
-                    title="Latency Distribution",
-                    yaxis_title="ms", height=250, margin=dict(l=20, r=20, t=40, b=40), showlegend=False
-                )
-                st.plotly_chart(fig, width="stretch")
-
-    # Timeline (glimpse → hidden → projected)
-    n_results = len(results)
-    if n_results > 0:
-        st.markdown("---")
-        n_show = min(n_results, 8)
-        start_t = n_results - n_show  # Show last N
-        if n_results > 8:
-            st.markdown(f"**Timeline** (showing T{start_t}-T{n_results - 1} of {n_results})")
-        else:
-            st.markdown("**Timeline** (glimpse → hidden → projected)")
-        cols = st.columns(n_show)
-        for i in range(n_show):
-            t = start_t + i
-            with cols[i]:
-                # Glimpse (upscale for better expand view)
-                glimpse_pil = Image.fromarray((np.clip(results[t].glimpse, 0, 1) * 255).astype(np.uint8))
-                glimpse_big = glimpse_pil.resize((256, 256), Image.Resampling.LANCZOS)
-                st.image(glimpse_big, width=80)
-                # Hidden (own PCA) - upscale to 256 for expand, display at 80
-                h = results[t].hidden
-                pca_h = fit_pca(h)
-                st.image(upscale(pca_rgb(pca=pca_h, features=h, H=canvas_grid, W=canvas_grid, normalize=False, pc_offset=pc_offset), 256), width=80)
-                # Projected (teacher PCA)
-                if pca_teacher is not None:
-                    st.image(upscale(pca_rgb(pca=pca_teacher, features=results[t].projected, H=canvas_grid, W=canvas_grid, normalize=True, pc_offset=pc_offset), 256), width=80)
-                # Caption with scale and cos
-                vp_scale = viewpoints[t].scales[0].item() if t < len(viewpoints) else 0
-                cos = results[t].scene_cos
-                caption = f"T{t} s={vp_scale:.2f}"
-                if cos is not None:
-                    caption += f" cos={cos:.2f}"
-                st.caption(caption)
-
-    # Debug
+def render_plots(seq: SeqState, teacher_grid: int) -> None:
+    if not seq.results:
+        return
     st.markdown("---")
-    with st.expander(f"Debug ({n} viewpoints)"):
-        latency_summary = ", ".join(f"{k}: {np.mean(v):.1f}ms (n={len(v)})" for k, v in sorted(latency_data.items()))
-        policy_status = "✓" if res.model.policy is not None else "✗"
-        st.code(f"""backbone: {res.backbone}, step: {res.ckpt_step}
-patch: {res.patch_size}px, img: {img_size}px, glimpse: {glimpse_px}px
-teacher: {'✓' if res.teacher else '✗'}, scene_norm: {res.scene_norm.grid_size if res.scene_norm else '✗'}², probe: {'✓' if res.probe else '✗'}, policy: {policy_status}
-canvas: {tuple(st.session_state.canvas.shape)}, cls: {tuple(st.session_state.cls.shape)}
-latency: {latency_summary or 'none'}""")
+    c1, c2 = st.columns(2)
 
-        if last_policy is not None:
-            cy, cx = last_policy.centers[0].tolist()
-            s = last_policy.scales[0].item()
-            st.code(f"policy prediction: cy={cy:+.3f} cx={cx:+.3f} scale={s:.3f}")
+    # Cosine similarity
+    with c1:
+        scene = [r.scene_cos for r in seq.results if r.scene_cos is not None]
+        cls = [r.cls_cos for r in seq.results if r.cls_cos is not None]
+        if scene or cls:
+            fig = go.Figure()
+            mx = max(len(scene), len(cls), 1)
+            fig.add_trace(go.Scatter(x=[0, mx-1], y=[1, 1], mode="lines", line=dict(dash="dash", color="gray")))
+            if scene:
+                fig.add_trace(go.Scatter(y=scene, mode="lines+markers", name="Scene"))
+            if cls:
+                fig.add_trace(go.Scatter(y=cls, mode="lines+markers", name="CLS"))
+            fig.update_layout(title=f"Cos sim (vs {teacher_grid}²)", height=250, margin=dict(l=20,r=20,t=40,b=40), yaxis_range=[0,1.05])
+            st.plotly_chart(fig, use_container_width=True)
 
-        if viewpoints:
-            st.markdown("**Viewpoints**")
-            vp_lines = []
-            for i, vp in enumerate(viewpoints):
-                box = vp.to_pixel_box(0, H, W)
-                cy_n, cx_n = vp.centers[0].tolist()  # normalized (y,x) in [-1,1]
-                s = vp.scales[0].item()
-                scene_cos = results[i].scene_cos if i < len(results) else None
-                cls_cos = results[i].cls_cos if i < len(results) else None
-                cos_str = f"scene={scene_cos:.3f}" if scene_cos else "scene=?"
-                if cls_cos:
-                    cos_str += f" cls={cls_cos:.3f}"
-                vp_lines.append(f"T{i}: norm=({cy_n:+.2f},{cx_n:+.2f}) scale={s:.2f} → px=({box.center_x:.0f},{box.center_y:.0f}) {cos_str}")
-            st.code("\n".join(vp_lines))
+    # Latency
+    with c2:
+        if seq.latency:
+            fig = go.Figure()
+            colors = ["rgba(100,100,100,0.6)", "rgba(66,133,244,0.6)", "rgba(244,66,66,0.6)", "rgba(66,244,66,0.6)"]
+            for i, (k, v) in enumerate(sorted(seq.latency.items())):
+                fig.add_trace(go.Box(y=v, name=f"{k} (n={len(v)})", marker_color=colors[i % 4], boxpoints="all", jitter=0.3))
+            fig.update_layout(title="Latency", yaxis_title="ms", height=250, margin=dict(l=20,r=20,t=40,b=40), showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+
+def render_timeline(seq: SeqState, cfg: Config, pca_teacher: PCA | None, teacher_grid: int) -> None:
+    if not seq.results:
+        return
+    st.markdown("---")
+    n = min(len(seq.results), 8)
+    start = len(seq.results) - n
+    st.markdown(f"**Timeline** ({teacher_grid}² basis)")
+    cols = st.columns(n)
+    for i, col in enumerate(cols):
+        t = start + i
+        r = seq.results[t]
+        with col:
+            st.image(Image.fromarray((np.clip(r.glimpse, 0, 1) * 255).astype(np.uint8)).resize((256, 256), Image.Resampling.LANCZOS), width=80)
+            pca_h = fit_pca(r.hidden)
+            if pca_h:
+                st.image(pca_img(r.hidden, cfg.canvas_grid, pca_h, cfg.pc_offset, norm=False), width=80)
+            if pca_teacher:
+                st.image(pca_img(r.projected, cfg.canvas_grid, pca_teacher, cfg.pc_offset, norm=True), width=80)
+            cos = f" {r.scene_cos:.2f}" if r.scene_cos else ""
+            st.caption(f"T{t} s={seq.viewpoints[t].scales[0].item():.2f}{cos}")
+
+
+# --- Main ---
+
+
+def main() -> None:
+    cfg = sidebar()
+
+    # Upload
+    up = st.file_uploader("Image", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
+    if up:
+        st.session_state.file = up.read()
+        st.session_state.fname = up.name
+
+    if not Path(cfg.ckpt_path).exists():
+        st.error(f"Not found: {cfg.ckpt_path}")
+        return
+    if "file" not in st.session_state:
+        st.info("Upload image")
+        return
+
+    res = load_resources(cfg.ckpt_path, cfg.device)
+    seq = init_seq(res, cfg, st.session_state.get("fname", ""))
+    ctx = make_image_ctx(res, cfg, st.session_state.file)
+    device = torch.device(cfg.device)
+    tg = ctx.teacher_grid
+
+    # Record teacher latency (Re-teacher adds samples for variability measurement)
+    for key, t in [(f"Teacher {tg}²", ctx.teacher_full), (f"Teacher {cfg.glimpse_grid}²", ctx.teacher_glimpse)]:
+        if t and t.ms > 0 and (not seq.latency.get(key) or cfg.rerun_teacher):
+            seq.latency.setdefault(key, []).append(t.ms)
+
+    # Get numpy arrays for teacher features
+    full_np = ctx.teacher_full.scene.cpu().numpy() if ctx.teacher_full.scene is not None else None
+    glimpse_np = ctx.teacher_glimpse.scene.cpu().numpy() if ctx.teacher_glimpse and ctx.teacher_glimpse.scene is not None else None
+
+    # --- Columns ---
+    # Count: input + hidden + projected + conditionals
+    n_cols = 3 + cfg.show_full + cfg.show_glimpse + cfg.show_up + (cfg.show_glimpse and cfg.show_up)
+    cols = iter(st.columns(n_cols))
+
+    # Input
+    with next(cols):
+        st.markdown("**Input** (click)")
+        last_pol = seq.results[-1].policy if seq.results else None
+        disp = draw_boxes(ctx.pil, seq.viewpoints, ctx.H, ctx.W, last_pol).resize((COL_W, COL_W), Image.Resampling.LANCZOS)
+        coords = streamlit_image_coordinates(disp, key="img")
+        if coords and (click := (coords["x"], coords["y"])) != st.session_state.get("last_click"):
+            st.session_state.last_click = click
+            cx, cy = click[0] * ctx.W / COL_W, click[1] * ctx.H / COL_W
+            vp = click_to_vp(cx, cy, cfg.scale, ctx.H, ctx.W, device, f"t{len(seq.viewpoints)}")
+            do_step(res, cfg, ctx, seq, vp)
+        if last_pol and st.button("Policy →"):
+            vp = Viewpoint(name=f"pol_t{len(seq.viewpoints)}", centers=last_pol.centers.clone(), scales=last_pol.scales.clone())
+            do_step(res, cfg, ctx, seq, vp)
+
+    # Teacher full
+    if cfg.show_full and full_np is not None and ctx.pca_full:
+        with next(cols):
+            st.markdown(f"**Teacher {tg}²**" + ("" if cfg.normalize else " (raw)"))
+            st.image(pca_img(full_np, tg, ctx.pca_full, cfg.pc_offset, norm=False), width=COL_W)
+
+    # Teacher glimpse
+    if cfg.show_glimpse and glimpse_np is not None and ctx.pca_glimpse:
+        with next(cols):
+            st.markdown(f"**Teacher {cfg.glimpse_grid}²**" + (" (interp)" if cfg.normalize else " (raw)"))
+            st.image(pca_img(glimpse_np, cfg.glimpse_grid, ctx.pca_glimpse, cfg.pc_offset, norm=False), width=COL_W)
+
+    # Hidden
+    with next(cols):
+        suf = " (L2)" if cfg.l2_norm else ""
+        st.markdown(f"**Hidden {cfg.canvas_grid}²**{suf}" + (f" T{len(seq.results)-1}" if seq.results else ""))
+        if seq.results:
+            h = seq.results[-1].hidden
+            pca_h = fit_pca(h)
+            if pca_h:
+                st.image(pca_img(h, cfg.canvas_grid, pca_h, cfg.pc_offset, norm=False), width=COL_W)
+
+    # Projected
+    with next(cols):
+        basis_lbl = " (own)" if cfg.projected_basis == "own" else f" ({tg}²)"
+        st.markdown(f"**Projected {cfg.canvas_grid}²**{basis_lbl}" + (f" T{len(seq.results)-1}" if seq.results else ""))
+        if seq.results:
+            p = seq.results[-1].projected
+            pca = fit_pca(p) if cfg.projected_basis == "own" else ctx.pca_full
+            if pca:
+                st.image(pca_img(p, cfg.canvas_grid, pca, cfg.pc_offset, norm=(cfg.projected_basis == "teacher")), width=COL_W)
+                if seq.results[-1].scene_cos is not None:
+                    st.caption(f"cos vs {tg}² = {seq.results[-1].scene_cos:.4f}")
+
+    # Teacher↑ full
+    if cfg.show_up and full_np is not None:
+        with next(cols):
+            basis_lbl = " (own)" if cfg.up_basis == "own" else f" ({tg}²)"
+            st.markdown(f"**Teacher↑ {tg}²→{cfg.canvas_grid}²**{basis_lbl}")
+            up = upsample(full_np, tg, cfg.canvas_grid)
+            pca = fit_pca(up) if cfg.up_basis == "own" else ctx.pca_full
+            if pca:
+                st.image(pca_img(up, cfg.canvas_grid, pca, cfg.pc_offset, norm=(cfg.up_basis == "teacher")), width=COL_W)
+
+    # Teacher↑ glimpse
+    if cfg.show_glimpse and cfg.show_up and glimpse_np is not None:
+        with next(cols):
+            basis_lbl = " (own)" if cfg.up_basis == "own" else f" ({cfg.glimpse_grid}²)"
+            st.markdown(f"**Teacher↑ {cfg.glimpse_grid}²→{cfg.canvas_grid}²**{basis_lbl}")
+            up = upsample(glimpse_np, cfg.glimpse_grid, cfg.canvas_grid)
+            pca = fit_pca(up) if cfg.up_basis == "own" else ctx.pca_glimpse
+            if pca:
+                st.image(pca_img(up, cfg.canvas_grid, pca, cfg.pc_offset, norm=(cfg.up_basis == "teacher")), width=COL_W)
+
+    # --- Bottom ---
+    st.markdown("---")
+    render_top5(seq.results[-1].top5 if seq.results else [], "Model")
+    render_top5(ctx.teacher_full.top5, f"Teacher {tg}²")
+    if ctx.teacher_glimpse:
+        render_top5(ctx.teacher_glimpse.top5, f"Teacher {cfg.glimpse_grid}²")
+
+    render_plots(seq, tg)
+    render_timeline(seq, cfg, ctx.pca_full, tg)
+
+    # Debug (collapsed)
+    with st.expander(f"Debug ({len(seq.viewpoints)} vps)"):
+        lat = ", ".join(f"{k}:{np.mean(v):.1f}ms" for k, v in sorted(seq.latency.items()))
+        st.code(f"backbone:{res.backbone} step:{res.step} patch:{res.patch_size}px\nteacher:{'✓' if res.teacher else '✗'} norm:{res.scene_norm.grid_size if res.scene_norm else '✗'}² probe:{'✓' if res.probe else '✗'} policy:{'✓' if res.model.policy else '✗'}\n{lat or 'no latency'}")
 
 
 if __name__ == "__main__":
