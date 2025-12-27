@@ -205,13 +205,26 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Fa
 
     model = ActiveCanViT(backbone=backbone, cfg=cfg, policy=policy)
 
-    result = model.load_state_dict(ckpt["state_dict"], strict=strict)
+    # Filter state_dict to avoid size mismatches (e.g., architectural changes)
+    state_dict = ckpt["state_dict"]
+    model_state = model.state_dict()
+    filtered = {}
+    skipped = []
+    for k, v in state_dict.items():
+        if k in model_state and model_state[k].shape != v.shape:
+            skipped.append(f"{k}: ckpt {tuple(v.shape)} vs model {tuple(model_state[k].shape)}")
+        else:
+            filtered[k] = v
+    if skipped:
+        log.warning(f"Skipped {len(skipped)} keys with shape mismatch: {skipped}")
+
+    result = model.load_state_dict(filtered, strict=strict)
     if strict and (result.missing_keys or result.unexpected_keys):
         raise RuntimeError(
             f"State dict mismatch. Missing: {result.missing_keys}, Unexpected: {result.unexpected_keys}"
         )
     if result.missing_keys:
-        log.warning(f"Missing keys (ignored): {result.missing_keys}")
+        log.warning(f"Missing keys (freshly initialized): {result.missing_keys}")
     if result.unexpected_keys:
         log.warning(f"Unexpected keys (ignored): {result.unexpected_keys}")
 
