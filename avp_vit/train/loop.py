@@ -204,6 +204,23 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         if incompat.unexpected_keys:
             log.warning(f"Checkpoint has unexpected keys (ignored): {incompat.unexpected_keys}")
 
+        # Load optimizer/scheduler state (unless reset requested)
+        if cfg.reset_optimizer:
+            log.info("Reset optimizer: using fresh optimizer/scheduler state")
+        else:
+            opt_state = ckpt_data.get("optimizer_state")
+            sched_state = ckpt_data.get("scheduler_state")
+            if opt_state is not None:
+                optimizer.load_state_dict(opt_state)
+                log.info("Loaded optimizer state from checkpoint")
+            else:
+                log.warning("Checkpoint has no optimizer state, using fresh init")
+            if sched_state is not None:
+                scheduler.load_state_dict(sched_state)
+                log.info(f"Loaded scheduler state from checkpoint (step={sched_state.get('last_epoch', '?')})")
+            else:
+                log.warning("Checkpoint has no scheduler state, using fresh init")
+
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
     def compute_raw_targets(images: Tensor, sz: int) -> NormFeatures:
@@ -222,14 +239,21 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1, momentum=cfg.norm_momentum,
     ).to(cfg.device)
 
-    if ckpt_data is not None and ckpt_data.get("scene_norm_state") is not None:
-        scene_norm_state = ckpt_data["scene_norm_state"]
-        cls_norm_state = ckpt_data["cls_norm_state"]
-        assert scene_norm_state is not None and cls_norm_state is not None
-        scene_norm.load_state_dict(scene_norm_state)
-        cls_norm.load_state_dict(cls_norm_state)
-        log.info("Loaded normalizer states from checkpoint")
-    else:
+    norm_loaded = False
+    if ckpt_data is not None and not cfg.reset_normalizer:
+        scene_norm_state = ckpt_data.get("scene_norm_state")
+        cls_norm_state = ckpt_data.get("cls_norm_state")
+        if scene_norm_state is not None and cls_norm_state is not None:
+            scene_norm.load_state_dict(scene_norm_state)
+            cls_norm.load_state_dict(cls_norm_state)
+            log.info("Loaded normalizer states from checkpoint")
+            norm_loaded = True
+        else:
+            log.warning("Checkpoint has no normalizer states")
+    elif cfg.reset_normalizer:
+        log.info("Reset normalizer: will re-warmup")
+
+    if not norm_loaded:
         log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
         warmup_normalizer(scene_norm, cls_norm, train_loader, compute_raw_targets, cfg.norm_warmup_images, scene_size, cfg.device)
 
@@ -313,6 +337,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 comet_id=exp.get_key(),
                 scene_norm_state=scene_norm.state_dict(),
                 cls_norm_state=cls_norm.state_dict(),
+                optimizer_state=optimizer.state_dict(),
+                scheduler_state=scheduler.state_dict(),
             )
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
@@ -392,6 +418,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             comet_id=exp.get_key(),
             scene_norm_state=scene_norm.state_dict(),
             cls_norm_state=cls_norm.state_dict(),
+            optimizer_state=optimizer.state_dict(),
+            scheduler_state=scheduler.state_dict(),
         )
 
     ema_loss = ema.get("total_loss")

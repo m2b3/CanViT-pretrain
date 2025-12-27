@@ -53,6 +53,8 @@ class Config:
     ckpt_dir: Path = Path("checkpoints")
     resume_ckpt: Path | None = None
     reset_policy: bool = False  # Reinitialize policy weights when resuming
+    reset_optimizer: bool = False  # Reinitialize optimizer/scheduler when resuming
+    reset_normalizer: bool = False  # Re-warmup normalizer stats when resuming
     # Training
     num_workers: int = 8
     crop_scale_min: float = 0.8
