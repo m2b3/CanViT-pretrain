@@ -42,6 +42,7 @@ class Config:
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     warmup_steps: int = 100_000
     grad_clip: float = 1.0
+    policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
     n_steps: int = 500_000
     # Target normalization
     norm_warmup_images: int = 4096

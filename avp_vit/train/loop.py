@@ -370,6 +370,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 amp_ctx=amp_ctx,
             )
 
+            # Clip policy grads first (if present), then whole model
+            policy_grad_norm_t = None
+            if model.policy is not None:
+                policy_grad_norm_t = torch.nn.utils.clip_grad_norm_(
+                    model.policy.parameters(), cfg.policy_grad_clip
+                )
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
             optimizer.step()
             scheduler.step()
