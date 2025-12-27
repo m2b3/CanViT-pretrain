@@ -204,17 +204,22 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         if incompat.unexpected_keys:
             log.warning(f"Checkpoint has unexpected keys (ignored): {incompat.unexpected_keys}")
 
-        # Load optimizer/scheduler state (unless reset requested)
+        # Load optimizer state (unless reset requested)
         if cfg.reset_optimizer:
-            log.info("Reset optimizer: using fresh optimizer/scheduler state")
+            log.info("Reset optimizer: using fresh optimizer state")
         else:
             opt_state = ckpt_data.get("optimizer_state")
-            sched_state = ckpt_data.get("scheduler_state")
             if opt_state is not None:
                 optimizer.load_state_dict(opt_state)
                 log.info("Loaded optimizer state from checkpoint")
             else:
                 log.warning("Checkpoint has no optimizer state, using fresh init")
+
+        # Load scheduler state (unless reset requested)
+        if cfg.reset_scheduler:
+            log.info("Reset scheduler: using fresh LR schedule")
+        else:
+            sched_state = ckpt_data.get("scheduler_state")
             if sched_state is not None:
                 scheduler.load_state_dict(sched_state)
                 log.info(f"Loaded scheduler state from checkpoint (step={sched_state.get('last_epoch', '?')})")
