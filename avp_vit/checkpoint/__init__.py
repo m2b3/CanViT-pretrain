@@ -159,7 +159,7 @@ def _has_policy_keys(state_dict: dict[str, Tensor]) -> bool:
     return any(k.startswith("policy.") for k in state_dict)
 
 
-def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = True) -> ActiveCanViT:
+def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = False) -> ActiveCanViT:
     """Load ActiveCanViT from checkpoint.
 
     Policy handling:
