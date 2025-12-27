@@ -258,6 +258,123 @@ def run_step(
     )
 
 
+# --- Loss Landscape ---
+
+
+def compute_loss_landscape(
+    res: Resources,
+    cfg: Config,
+    ctx: ImageCtx,
+    canvas: Tensor,
+    cls_state: Tensor,
+    scale: float,
+    grid_size: int = 12,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute loss heatmap over all valid positions at given scale.
+
+    Returns (scene_cos, cls_cos) as [grid_size, grid_size] arrays in [0, 1].
+    """
+    device = canvas.device
+    B = grid_size * grid_size
+
+    # Valid center range: [-(1-s), (1-s)]
+    L = max(1.0 - scale, 0.01)  # clamp to avoid empty range at scale=1
+
+    # Create grid of centers (cy, cx) in normalized coords
+    lin = torch.linspace(-L, L, grid_size, device=device, dtype=torch.float32)
+    cy, cx = torch.meshgrid(lin, lin, indexing="ij")  # [grid, grid]
+    centers = torch.stack([cy.flatten(), cx.flatten()], dim=-1)  # [B, 2]
+    scales = torch.full((B,), scale, device=device, dtype=torch.float32)
+
+    # Expand inputs to batch size
+    image_batch = ctx.image.expand(B, -1, -1, -1)
+    canvas_batch = canvas.expand(B, -1, -1)
+    cls_batch = cls_state.expand(B, *cls_state.shape[1:])  # handle [1, 1, D] or [1, D]
+
+    vp = Viewpoint(name="landscape", centers=centers, scales=scales)
+    glimpse_px = cfg.glimpse_grid * res.patch_size
+
+    sync_device(device)
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out = res.model.forward_step(
+            image=image_batch, canvas=canvas_batch, cls=cls_batch,
+            viewpoint=vp, glimpse_size_px=glimpse_px,
+        )
+
+        # Predict teacher features (keep in no_grad)
+        scene_pred = res.model.predict_teacher_scene(out.canvas)  # [B, N, D]
+        cls_pred = res.model.predict_teacher_cls(out.cls, out.canvas)  # [B, ?, D]
+
+        # Get teacher targets
+        teacher_scene = ctx.teacher_full.scene
+        assert teacher_scene is not None, "Landscape requires teacher scene features"
+        teacher_cls = ctx.teacher_full.cls
+        tg = ctx.teacher_grid
+        D = scene_pred.shape[-1]
+
+        # Downsample model prediction to teacher grid
+        s2d = scene_pred.view(B, cfg.canvas_grid, cfg.canvas_grid, D).permute(0, 3, 1, 2)
+        s_down = F.interpolate(s2d, (tg, tg), mode="bilinear", align_corners=False)
+        s_down = s_down.permute(0, 2, 3, 1).reshape(B, -1, D)  # [B, N_teacher, D]
+
+        # Scene cosine similarity: [B, N_teacher] -> mean -> [B]
+        teacher_scene_exp = teacher_scene.unsqueeze(0).expand(B, -1, -1)
+        scene_cos = F.cosine_similarity(s_down, teacher_scene_exp, dim=-1).mean(dim=-1)
+
+        # CLS cosine similarity: [B]
+        if teacher_cls is not None:
+            t_cls = teacher_cls.flatten()  # [D]
+            t_cls_exp = t_cls.unsqueeze(0).expand(B, -1)  # [B, D]
+            c_pred = cls_pred.view(B, -1)  # [B, D]
+            cls_cos = F.cosine_similarity(c_pred, t_cls_exp, dim=-1)  # [B]
+        else:
+            cls_cos = torch.zeros(B, device=device)
+
+    sync_device(device)
+    ms = (time.perf_counter() - t0) * 1000
+    log.info(f"Landscape {grid_size}x{grid_size} = {B} fwd passes in {ms:.0f}ms")
+
+    # Reshape to grid
+    scene_hm = scene_cos.cpu().numpy().reshape(grid_size, grid_size)
+    cls_hm = cls_cos.cpu().numpy().reshape(grid_size, grid_size)
+    return scene_hm, cls_hm
+
+
+def landscape_to_img(hm: np.ndarray, size: int) -> Image.Image:
+    """Convert landscape heatmap to image with grid. Blue=low, red=high. Auto min/max scaling."""
+    vmin, vmax = hm.min(), hm.max()
+    h = ((hm - vmin) / (vmax - vmin + 1e-8)).clip(0, 1)
+    rgb = np.zeros((*hm.shape, 3), dtype=np.uint8)
+    rgb[..., 0] = (h * 255).astype(np.uint8)  # red = high
+    rgb[..., 2] = ((1 - h) * 255).astype(np.uint8)  # blue = low
+    img = Image.fromarray(rgb).resize((size, size), Image.Resampling.NEAREST)
+
+    # Draw grid lines
+    draw = ImageDraw.Draw(img)
+    grid = hm.shape[0]
+    cell = size / grid
+    for i in range(1, grid):
+        pos = int(i * cell)
+        draw.line([(pos, 0), (pos, size)], fill=(80, 80, 80), width=1)
+        draw.line([(0, pos), (size, pos)], fill=(80, 80, 80), width=1)
+
+    return img
+
+
+def draw_landscape_marker(img: Image.Image, ny: float, nx: float, color: tuple, grid: int) -> Image.Image:
+    """Draw marker on landscape at grid position. ny/nx in [0,1]."""
+    out = img.copy()
+    draw = ImageDraw.Draw(out)
+    cell = img.width / grid
+    # Center of the cell
+    x = int((nx * grid + 0.5) * cell)
+    y = int((ny * grid + 0.5) * cell)
+    r = max(4, int(cell / 3))
+    draw.ellipse([x - r, y - r, x + r, y + r], fill=color, outline=(255, 255, 255), width=2)
+    return out
+
+
 # --- Helpers ---
 
 
@@ -765,6 +882,69 @@ def main() -> None:
 
     # Similarity row
     render_similarity_row(feat_vizs, sim_positions, cfg.sim_sharpness)
+
+    # --- Loss Landscape ---
+    with st.expander("Loss Landscape", expanded=False):
+        grid_size = 12
+        L = max(1.0 - cfg.scale, 0.01)
+        st.markdown(f"**{grid_size}×{grid_size} = {grid_size**2} positions** at scale {cfg.scale:.2f} (center range ±{L:.2f})")
+
+        # Cache key: step count + scale
+        landscape_key = f"{len(seq.viewpoints)}:{cfg.scale:.3f}"
+        cached = st.session_state.get("_landscape")
+
+        if st.button("Compute Landscape"):
+            with st.spinner(f"Computing {grid_size**2} forward passes..."):
+                scene_hm, cls_hm = compute_loss_landscape(
+                    res, cfg, ctx,
+                    st.session_state.canvas, st.session_state.cls,
+                    cfg.scale, grid_size=grid_size,
+                )
+                st.session_state._landscape = (landscape_key, scene_hm, cls_hm)
+                st.rerun()
+
+        if cached and cached[0] == landscape_key:
+            _, scene_hm, cls_hm = cached
+
+            # Convert normalized viewpoint center to heatmap position [0, 1]
+            def center_to_hm_pos(cy: float, cx: float) -> tuple[float, float]:
+                ny = (cy + L) / (2 * L)  # map [-L, L] to [0, 1]
+                nx = (cx + L) / (2 * L)
+                return ny, nx
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Scene cos sim**")
+                img = landscape_to_img(scene_hm, COL_W)
+                # Mark last viewpoint (green) and policy (orange)
+                if seq.viewpoints:
+                    cy, cx = seq.viewpoints[-1].centers[0].tolist()
+                    ny, nx = center_to_hm_pos(cy, cx)
+                    img = draw_landscape_marker(img, ny, nx, (0, 255, 0), grid_size)
+                if seq.results and seq.results[-1].policy:
+                    cy, cx = seq.results[-1].policy.centers[0].tolist()
+                    ny, nx = center_to_hm_pos(cy, cx)
+                    img = draw_landscape_marker(img, ny, nx, (255, 200, 0), grid_size)
+                st.image(img, width=COL_W)
+                best_idx = np.unravel_index(scene_hm.argmax(), scene_hm.shape)
+                st.caption(f"[{scene_hm.min():.3f}, {scene_hm.max():.3f}] best@{best_idx}")
+
+            with c2:
+                st.markdown("**CLS cos sim**")
+                img = landscape_to_img(cls_hm, COL_W)
+                if seq.viewpoints:
+                    cy, cx = seq.viewpoints[-1].centers[0].tolist()
+                    ny, nx = center_to_hm_pos(cy, cx)
+                    img = draw_landscape_marker(img, ny, nx, (0, 255, 0), grid_size)
+                if seq.results and seq.results[-1].policy:
+                    cy, cx = seq.results[-1].policy.centers[0].tolist()
+                    ny, nx = center_to_hm_pos(cy, cx)
+                    img = draw_landscape_marker(img, ny, nx, (255, 200, 0), grid_size)
+                st.image(img, width=COL_W)
+                best_idx = np.unravel_index(cls_hm.argmax(), cls_hm.shape)
+                st.caption(f"[{cls_hm.min():.3f}, {cls_hm.max():.3f}] best@{best_idx}")
+        elif cached:
+            st.info(f"Cached for different state ({cached[0]}), click Compute to refresh")
 
     # --- Bottom ---
     st.markdown("---")
