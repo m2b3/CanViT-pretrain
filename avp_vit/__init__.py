@@ -3,13 +3,11 @@
 Re-exports from canvit for backward compatibility.
 """
 
-from canvit import CanViT, CanViTConfig
+from canvit import CanViT, CanViTConfig, GlimpseOutput, gram_mse, spatial_gram
 from canvit.attention import CanvasAttentionConfig
-from canvit.gram import gram_mse, spatial_gram
 from canvit.model.active.pretraining import (
     ActiveCanViTForReconstructivePretraining as ActiveCanViT,
     ActiveCanViTForReconstructivePretrainingConfig as ActiveCanViTConfig,
-    LossOutputs,
 )
 
 __all__ = [
@@ -18,7 +16,7 @@ __all__ = [
     "CanViT",
     "CanViTConfig",
     "CanvasAttentionConfig",
-    "LossOutputs",
+    "GlimpseOutput",
     "gram_mse",
     "spatial_gram",
 ]

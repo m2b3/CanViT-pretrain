@@ -3,9 +3,11 @@
 import logging
 from typing import NamedTuple
 
-from avp_vit import ActiveCanViT
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit.hub import create_backbone
+from canvit.policy import PolicyConfig, PolicyHead
+
+from avp_vit import ActiveCanViT
 
 from .config import Config
 
@@ -14,6 +16,7 @@ log = logging.getLogger(__name__)
 
 class ModelBundle(NamedTuple):
     """Model with derived runtime parameters."""
+
     model: ActiveCanViT
     glimpse_size_px: int
 
@@ -31,8 +34,12 @@ def load_teacher(cfg: Config) -> DINOv3Backbone:
 def load_student_backbone(cfg: Config) -> DINOv3Backbone:
     """Load student DINOv3 backbone (pretrained or random init)."""
     weights = str(cfg.student_ckpt) if cfg.student_ckpt else None
-    backbone = create_backbone(cfg.student_model, pretrained=weights is not None, weights=weights)
-    log.info(f"Student backbone ready: {cfg.student_model}, pretrained={weights is not None}")
+    backbone = create_backbone(
+        cfg.student_model, pretrained=weights is not None, weights=weights
+    )
+    log.info(
+        f"Student backbone ready: {cfg.student_model}, pretrained={weights is not None}"
+    )
     return backbone.to(cfg.device)
 
 
@@ -44,17 +51,23 @@ def create_model(
     """Create ActiveCanViT wrapping student backbone."""
     cfg.model.teacher_dim = teacher_dim
 
-    for p in student_backbone.parameters():
-        p.requires_grad = not cfg.freeze_student_backbone
+    policy = None
+    if cfg.enable_policy:
+        policy_cfg = PolicyConfig(min_scale=cfg.min_viewpoint_scale)
+        policy = PolicyHead(embed_dim=student_backbone.embed_dim, cfg=policy_cfg)
+        log.info(
+            f"Policy head created: embed_dim={student_backbone.embed_dim}, min_scale={cfg.min_viewpoint_scale}"
+        )
 
-    model = ActiveCanViT(backbone=student_backbone, cfg=cfg.model).to(cfg.device)
+    model = ActiveCanViT(backbone=student_backbone, cfg=cfg.model, policy=policy).to(
+        cfg.device
+    )
     glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
 
     log.info(
         f"Model created: canvas={cfg.grid_size}x{cfg.grid_size}, "
         f"glimpse={cfg.glimpse_grid_size}x{cfg.glimpse_grid_size} ({glimpse_size_px}px), "
         f"student_dim={student_backbone.embed_dim} -> teacher_dim={teacher_dim}, "
-        f"freeze_backbone={cfg.freeze_student_backbone}"
     )
     return ModelBundle(model, glimpse_size_px)
 

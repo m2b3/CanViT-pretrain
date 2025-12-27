@@ -17,7 +17,6 @@ class Config:
     # Student
     student_model: str = "dinov3_vitb16"
     student_ckpt: Path | None = None  # None = random init
-    freeze_student_backbone: bool = False
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
     model: ActiveCanViTConfig = field(
@@ -25,20 +24,22 @@ class Config:
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     gram_loss_weight: float = 0
-    include_init: bool = False  # include initial canvas in scene/cls loss
-    glimpse_grid_size: int = 3  # tokens per glimpse side
+    glimpse_grid_size: int = 8  # tokens per glimpse side
     grid_size: int = 32  # canvas grid size
     # Training
-    batch_size: int = 128
-    peak_lr: float = 5e-4
+    batch_size: int = 64
+    peak_lr: float = 1e-4
+    start_lr: float | None = 1e-8  # None = peak_lr / warmup_steps (old behavior)
+    end_lr: float | None = 1e-6  # None = 0 (old behavior)
     # weight_decay: float = 0.05  # standard in ViTs
     # we can use a much lower weight decay due to the richness of our training signal
     # and we *should*, due to the use of small batches
     # 1e-3 has proven to be safe and work well in our early experiments in this project
     # 1e-4 was used by the AdaGlimpse authors
     weight_decay: float = 1e-4
-    n_viewpoints_per_step: int = 2  # Inner loop viewpoints
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
+    enable_policy: bool = True  # Enable policy branch (t=1 POLICY viewpoint type)
+    ema_alpha: float = 0.1  # EMA smoothing for metrics
     warmup_steps: int = 100_000
     grad_clip: float = 1.0
     n_steps: int = 500_000
@@ -51,6 +52,7 @@ class Config:
     index_dir: Path | None = None
     ckpt_dir: Path = Path("checkpoints")
     resume_ckpt: Path | None = None
+    reset_policy: bool = False  # Reinitialize policy weights when resuming
     # Training
     num_workers: int = 8
     crop_scale_min: float = 0.8
@@ -58,6 +60,7 @@ class Config:
     # Logging
     log_every: int = 20
     val_every: int = 250
+    n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
     total_viz: int = 1000
     total_curves: int = 300  # ~3 curves/event, budget 900
     ckpt_every: int = 10_000

@@ -100,16 +100,41 @@ class TestPositionAwareNorm:
 # === Scheduler Tests ===
 
 class TestWarmupCosineScheduler:
-    def test_warmup_phase(self) -> None:
-        optimizer = torch.optim.Adam([torch.zeros(1, requires_grad=True)], lr=1e-3)
-        scheduler = warmup_cosine_scheduler(optimizer, total_steps=100, warmup_steps=10)
-        # At step 0, lr = base_lr * (1/warmup_steps) = 1e-3 * 0.1 = 1e-4
-        assert scheduler.get_last_lr()[0] <= 1e-4
+    def test_warmup_with_explicit_lr(self) -> None:
+        peak_lr = 1e-3
+        start_lr = 1e-4
+        end_lr = 1e-5
+        optimizer = torch.optim.Adam([torch.zeros(1, requires_grad=True)], lr=peak_lr)
+        scheduler = warmup_cosine_scheduler(
+            optimizer, total_steps=100, warmup_steps=10, peak_lr=peak_lr,
+            start_lr=start_lr, end_lr=end_lr,
+        )
+        # At step 0, lr = start_lr
+        assert abs(scheduler.get_last_lr()[0] - start_lr) < 1e-6
         # Warmup
         for _ in range(10):
             scheduler.step()
         # After warmup, should be at peak
-        assert abs(scheduler.get_last_lr()[0] - 1e-3) < 1e-5
+        assert abs(scheduler.get_last_lr()[0] - peak_lr) < 1e-5
+
+    def test_warmup_with_none_defaults(self) -> None:
+        peak_lr = 1e-3
+        warmup_steps = 10
+        optimizer = torch.optim.Adam([torch.zeros(1, requires_grad=True)], lr=peak_lr)
+        scheduler = warmup_cosine_scheduler(
+            optimizer, total_steps=100, warmup_steps=warmup_steps, peak_lr=peak_lr,
+        )
+        # At step 0, lr = peak_lr / warmup_steps (old behavior)
+        expected_start = peak_lr / warmup_steps
+        assert abs(scheduler.get_last_lr()[0] - expected_start) < 1e-7
+        # Warmup to peak
+        for _ in range(warmup_steps):
+            scheduler.step()
+        assert abs(scheduler.get_last_lr()[0] - peak_lr) < 1e-5
+        # Decay to 0
+        for _ in range(90):
+            scheduler.step()
+        assert scheduler.get_last_lr()[0] < 1e-6
 
 
 # === Viewpoint Tests ===
@@ -128,22 +153,41 @@ class TestRandomViewpoint:
 
 
 class TestMakeEvalViewpoints:
-    def test_returns_5_viewpoints(self) -> None:
+    def test_default_returns_10_viewpoints(self) -> None:
         vps = make_eval_viewpoints(2, torch.device("cpu"))
+        assert len(vps) == 10
+        assert vps[0].name == "full"
+
+    def test_explicit_n_viewpoints(self) -> None:
+        vps = make_eval_viewpoints(2, torch.device("cpu"), n_viewpoints=5)
         assert len(vps) == 5
         assert vps[0].name == "full"
 
 
 class TestPixelBox:
     def test_viewpoint_to_pixel_box(self) -> None:
+        # Pixel center convention: normalized [-1, 1] maps to pixel [0, W-1]
         centers = torch.tensor([[0.0, 0.0]])
         scales = torch.tensor([0.5])
         box = viewpoint_to_pixel_box(centers, scales, 0, H=100, W=100)
         assert isinstance(box, PixelBox)
-        assert box.center_x == 50.0
-        assert box.center_y == 50.0
-        assert box.width == 50.0
-        assert box.height == 50.0
+        # center at norm (0,0) -> pixel (99/2, 99/2) = (49.5, 49.5)
+        assert box.center_x == 49.5
+        assert box.center_y == 49.5
+        # scale 0.5 -> width/height = 0.5 * 99 = 49.5
+        assert box.width == 49.5
+        assert box.height == 49.5
+
+    def test_full_image_box(self) -> None:
+        # scale=1.0 should cover [0, W-1] and [0, H-1]
+        centers = torch.tensor([[0.0, 0.0]])
+        scales = torch.tensor([1.0])
+        box = viewpoint_to_pixel_box(centers, scales, 0, H=100, W=100)
+        assert box.left == 0.0
+        assert box.top == 0.0
+        # right = left + width = 0 + 99 = 99 (last pixel)
+        assert box.left + box.width == 99.0
+        assert box.top + box.height == 99.0
 
 
 # === Viz Tests ===

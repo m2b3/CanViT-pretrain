@@ -13,16 +13,22 @@ def warmup_cosine_scheduler(
     optimizer: Optimizer,
     total_steps: int,
     warmup_steps: int,
+    peak_lr: float,
+    start_lr: float | None = None,
+    end_lr: float | None = None,
 ) -> LRScheduler:
     """Create warmup + cosine decay scheduler.
 
-    Warmup: linear from 1/warmup_steps to 1.0 over warmup_steps.
-    Decay: cosine from 1.0 to 0.0 over remaining steps.
+    Warmup: linear from start_lr to peak_lr over warmup_steps.
+    Decay: cosine from peak_lr to end_lr over remaining steps.
 
     Args:
         optimizer: The optimizer to schedule.
         total_steps: Total training steps.
         warmup_steps: Number of warmup steps (0 = no warmup, pure cosine).
+        peak_lr: Learning rate at end of warmup.
+        start_lr: Learning rate at step 0. None = peak_lr / warmup_steps.
+        end_lr: Learning rate at final step. None = 0.
 
     Returns:
         LRScheduler (SequentialLR if warmup, else CosineAnnealingLR).
@@ -30,10 +36,14 @@ def warmup_cosine_scheduler(
     assert warmup_steps >= 0, "warmup_steps must be non-negative"
     assert warmup_steps < total_steps, "warmup_steps must be less than total_steps"
 
-    if warmup_steps == 0:
-        return CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=0.0)
+    effective_end_lr = end_lr if end_lr is not None else 0.0
 
-    start_factor = 1.0 / warmup_steps
+    if warmup_steps == 0:
+        return CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=effective_end_lr)
+
+    effective_start_lr = start_lr if start_lr is not None else peak_lr / warmup_steps
+    start_factor = effective_start_lr / peak_lr
+
     warmup = LinearLR(
         optimizer,
         start_factor=start_factor,
@@ -43,7 +53,7 @@ def warmup_cosine_scheduler(
     cosine = CosineAnnealingLR(
         optimizer,
         T_max=total_steps - warmup_steps,
-        eta_min=0.0,
+        eta_min=effective_end_lr,
     )
     return SequentialLR(
         optimizer,

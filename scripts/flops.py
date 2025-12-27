@@ -20,12 +20,11 @@ def _regular_read_flops(
     n_local: int, n_canvas: int, local_dim: int, canvas_dim: int
 ) -> int:
     """Regular cross-attention: local queries canvas (all Linear projections)."""
-    n_heads = canvas_dim // 64  # Assume head_dim=64
     q_proj = flops.linear(n_local, local_dim, canvas_dim)
     k_proj = flops.linear(n_canvas, canvas_dim, canvas_dim)
     v_proj = flops.linear(n_canvas, canvas_dim, canvas_dim)
     o_proj = flops.linear(n_local, canvas_dim, local_dim)
-    sdpa = n_heads * flops.sdpa(n_local, n_canvas, 64)
+    sdpa = flops.sdpa(n_local, n_canvas, canvas_dim)
     return q_proj + k_proj + v_proj + o_proj + sdpa
 
 
@@ -33,12 +32,11 @@ def _regular_write_flops(
     n_local: int, n_canvas: int, local_dim: int, canvas_dim: int
 ) -> int:
     """Regular cross-attention: canvas queries local (all Linear projections)."""
-    n_heads = canvas_dim // 64
     q_proj = flops.linear(n_canvas, canvas_dim, canvas_dim)
     k_proj = flops.linear(n_local, local_dim, canvas_dim)
     v_proj = flops.linear(n_local, local_dim, canvas_dim)
     o_proj = flops.linear(n_canvas, canvas_dim, canvas_dim)
-    sdpa = n_heads * flops.sdpa(n_canvas, n_local, 64)
+    sdpa = flops.sdpa(n_canvas, n_local, canvas_dim)
     return q_proj + k_proj + v_proj + o_proj + sdpa
 
 
@@ -46,9 +44,9 @@ def _regular_adapter_flops(
     n_local: int, n_canvas: int, local_dim: int, canvas_dim: int
 ) -> int:
     """One read + one write with regular cross-attention."""
-    return _regular_read_flops(n_local, n_canvas, local_dim, canvas_dim) + _regular_write_flops(
+    return _regular_read_flops(
         n_local, n_canvas, local_dim, canvas_dim
-    )
+    ) + _regular_write_flops(n_local, n_canvas, local_dim, canvas_dim)
 
 
 # =============================================================================
@@ -70,6 +68,20 @@ def _regular_attention_params(local_dim: int, canvas_dim: int) -> int:
     local_linear = 4 * local_dim * canvas_dim
     canvas_linear = 4 * canvas_dim * canvas_dim
     return local_linear + canvas_linear
+
+
+# =============================================================================
+# Decoder / Head FLOPs
+# =============================================================================
+
+
+def _policy_head_flops(embed_dim: int) -> int:
+    """Policy head: LN + Linear(D→D) + Linear(D→3) on 1 token."""
+    return (
+        flops.layer_norm(1, embed_dim)
+        + flops.linear(1, embed_dim, embed_dim)
+        + flops.linear(1, embed_dim, 3)
+    )
 
 
 # =============================================================================
@@ -97,7 +109,9 @@ def fmt(flops: int) -> str:
 def main() -> None:
     from canvit import CanViT, CanViTConfig
     from canvit.backbone.dinov3 import DINOv3Backbone
-    from dinov3.hub.backbones import dinov3_vitb16  # pyright: ignore[reportAttributeAccessIssue]
+    from dinov3.hub.backbones import (
+        dinov3_vitb16,  # pyright: ignore[reportAttributeAccessIssue]
+    )
 
     console = Console()
 
@@ -121,7 +135,7 @@ def _print_tables(
     n_adapters = len(model.read_after_blocks)
     ffn_ratio = backbone.ffn_ratio
 
-    glimpse_grids = [3]
+    glimpse_grids = [8]
     canvas_grids = [16, 32, 64, 128, 256, 512]
 
     console.rule(f"[bold]{name}[/bold] (local={local_dim}, canvas={canvas_dim})")
@@ -182,15 +196,19 @@ def _print_tables(
     console.print()
 
     # Table 2: Full Model FLOPs per Glimpse
+    teacher_dim = 768  # ViT-B teacher
+    policy_flops = _policy_head_flops(local_dim)
+
     table2 = Table(
         title=f"Full Model FLOPs per Glimpse ({n_blocks} blocks, {n_adapters} adapters)"
     )
     table2.add_column("Glimpse", style="bold")
     table2.add_column("Canvas", style="bold")
-    table2.add_column("Backbone", justify="right")
-    table2.add_column("Adapters", justify="right")
-    table2.add_column("Total", justify="right", style="bold")
-    table2.add_column("Backbone@Canvas", justify="right", style="dim")
+    table2.add_column("Mode", style="bold")
+    table2.add_column("Total", justify="right")
+    table2.add_column("ViT@Glimpse", justify="right", style="dim")
+    table2.add_column("Overhead", justify="right", style="yellow")
+    table2.add_column("ViT@Canvas", justify="right", style="dim")
     table2.add_column("Savings", justify="right", style="green")
 
     for g in glimpse_grids:
@@ -200,37 +218,51 @@ def _print_tables(
         # Backbone: patch embed + blocks
         patch_emb = flops.patch_embed(n_patches, patch_size, local_dim)
         blocks = n_blocks * flops.vit_block(n_local, local_dim, ffn_ratio)
-        backbone_total = patch_emb + blocks
+        backbone_flops = patch_emb + blocks
 
         for c in canvas_grids:
             n_canvas = n_canvas_registers + c * c
             n_canvas_patches = c * c
 
             # Canvas attention (all adapters)
-            adapters_total = n_adapters * flops.canvas_adapter(
+            adapters_flops = n_adapters * flops.canvas_adapter(
                 n_local, n_canvas, local_dim, canvas_dim
             )
 
-            total = backbone_total + adapters_total
+            # Heads: policy (per glimpse) + scene (per glimpse, scales with canvas²)
+            scene_flops = flops.scene_head(n_canvas_patches, canvas_dim, teacher_dim)
+            heads_flops = policy_flops + scene_flops
 
-            # Baseline: backbone at canvas resolution
+            total_no_heads = backbone_flops + adapters_flops
+            total_with_heads = total_no_heads + heads_flops
+
+            # Baseline: ViT at canvas resolution
             canvas_patch_emb = flops.patch_embed(n_canvas_patches, patch_size, local_dim)
             canvas_n_tokens = n_backbone_prefix + n_canvas_patches
             canvas_blocks = n_blocks * flops.vit_block(canvas_n_tokens, local_dim, ffn_ratio)
-            backbone_at_canvas = canvas_patch_emb + canvas_blocks
-
-            savings = backbone_at_canvas / total
+            vit_at_canvas = canvas_patch_emb + canvas_blocks
 
             table2.add_row(
                 f"{g}×{g}",
                 f"{c}×{c}",
-                fmt(backbone_total),
-                fmt(adapters_total),
-                fmt(total),
-                fmt(backbone_at_canvas),
-                f"×{savings:.1f}",
+                "w/o Heads",
+                fmt(total_no_heads),
+                fmt(backbone_flops),
+                f"×{total_no_heads / backbone_flops:.2f}",
+                fmt(vit_at_canvas),
+                f"×{vit_at_canvas / total_no_heads:.1f}",
             )
-        table2.add_section()
+            table2.add_row(
+                "",
+                "",
+                "[cyan]w/ Heads[/cyan]",
+                f"[cyan]{fmt(total_with_heads)}[/cyan]",
+                "",
+                f"[cyan]×{total_with_heads / backbone_flops:.2f}[/cyan]",
+                "",
+                f"[cyan]×{vit_at_canvas / total_with_heads:.1f}[/cyan]",
+                end_section=True,
+            )
 
     console.print(table2)
 
