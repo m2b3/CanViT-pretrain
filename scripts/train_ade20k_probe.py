@@ -99,7 +99,7 @@ class Config:
     probe_teacher_glimpse: bool = True
 
     # Finetuning probes (backbone gradients enabled)
-    # Same features as frozen counterparts, but backbone is trained too
+    # Uses separate model copy, frozen model stays untouched
     probe_finetune_hidden: bool = True
     ft_ref_lr: float = 1e-6  # backbone LR = ft_ref_lr * batch_size
 
@@ -119,7 +119,7 @@ class Config:
 
     log_every: int = 10
     val_every: int = 200
-    viz_every: int = 500
+    viz_every: int = 200  # same as val_every by default
     n_viz_samples: int = 4
 
     comet_project: str = "avp-ade20k-probe"
@@ -472,31 +472,15 @@ class FinetuneProbe:
     best_miou: float = 0.0
 
 
-def create_finetune_probe(
-    name: str,
-    embed_dim: int,
-    num_classes: int,
-    backbone_params: list,
-    probe_lr: float,
-    backbone_lr: float,
-    weight_decay: float,
-    warmup_steps: int,
-    max_steps: int,
-    device: torch.device,
-) -> FinetuneProbe:
-    """Create a finetuning probe with its own optimizer (backbone + probe params)."""
+def create_finetune_probe_head(name: str, embed_dim: int, num_classes: int, device: torch.device) -> FinetuneProbe:
+    """Create finetune probe head only. Optimizer created later with correct model."""
     base_feature = name.replace("finetune_", "")
     probe = LinearSegmentationHead(embed_dim, num_classes).to(device)
-    param_groups = [
-        {"params": backbone_params, "lr": backbone_lr},
-        {"params": list(probe.parameters()), "lr": probe_lr},
-    ]
-    optimizer = AdamW(param_groups, weight_decay=weight_decay)
-    warmup = LinearLR(optimizer, start_factor=1e-3, end_factor=1.0, total_iters=max(1, warmup_steps))
-    cosine = CosineAnnealingLR(optimizer, T_max=max_steps - warmup_steps)
-    scheduler = SequentialLR(optimizer, [warmup, cosine], milestones=[warmup_steps])
-    log.info(f"FinetuneProbe '{name}': embed_dim={embed_dim}, backbone_lr={backbone_lr:.2e}, probe_lr={probe_lr:.2e}")
-    return FinetuneProbe(name=name, base_feature=base_feature, probe=probe, optimizer=optimizer, scheduler=scheduler)
+    # Optimizer/scheduler will be set after ft_model is created
+    return FinetuneProbe(
+        name=name, base_feature=base_feature, probe=probe,
+        optimizer=None, scheduler=None,  # type: ignore - set later
+    )
 
 
 # === Validation ===
@@ -641,7 +625,9 @@ def main(cfg: Config) -> None:
         log.warning(f"Missing keys: {result.missing_keys}")
     if result.unexpected_keys:
         log.warning(f"Unexpected keys: {result.unexpected_keys}")
-    model = model.to(device).train()  # train mode for finetune probes
+    model = model.to(device).eval()  # frozen model for frozen probes
+    for p in model.parameters():
+        p.requires_grad_(False)
 
     # === Extract and validate settings from checkpoint ===
     patch_size = model.backbone.patch_size_px
@@ -738,32 +724,53 @@ def main(cfg: Config) -> None:
         device=device,
     )
 
-    # === Create finetuning probes ===
+    # === Create finetuning probe heads (optimizers created after ft_model) ===
     finetune_probes: list[FinetuneProbe] = []
     if cfg.probe_finetune_hidden:
-        backbone_params = list(model.parameters())
-        backbone_lr = cfg.ft_ref_lr * cfg.batch_size
-        ft_probe = create_finetune_probe(
-            name="finetune_hidden",
-            embed_dim=hidden_dim,
-            num_classes=NUM_CLASSES,
-            backbone_params=backbone_params,
-            probe_lr=peak_lr,
-            backbone_lr=backbone_lr,
-            weight_decay=cfg.weight_decay,
-            warmup_steps=warmup_steps,
-            max_steps=cfg.max_steps,
-            device=device,
-        )
+        ft_probe = create_finetune_probe_head("finetune_hidden", hidden_dim, NUM_CLASSES, device)
         finetune_probes.append(ft_probe)
 
     # Frozen probes set (for extractor, validation, viz)
     frozen_enabled = enabled.copy()
 
-    if finetune_probes and frozen_enabled:
-        log.warning("⚠️  Running frozen and finetune probes together. After step 0, frozen probes "
-                    "will see the finetuned backbone, not the original checkpoint. This is useful "
-                    "for comparison but may not reflect original checkpoint quality.")
+    # Create separate model copy for finetuning (frozen model stays untouched)
+    ft_model: ActiveCanViT | None = None
+    ft_extractor: FeatureExtractor | None = None
+    if finetune_probes:
+        log.info("Creating separate model copy for finetuning...")
+        ft_backbone = create_backbone(ckpt["backbone"], pretrained=False)
+        ft_policy: PolicyHead | None = None
+        if (pc := ckpt.get("policy_config")) is not None:
+            ft_policy_cfg = dacite.from_dict(PolicyConfig, pc)
+            ft_policy = PolicyHead(embed_dim=ft_backbone.embed_dim, cfg=ft_policy_cfg)
+        ft_model = ActiveCanViT(backbone=ft_backbone, cfg=model_cfg, policy=ft_policy)
+        ft_model.load_state_dict(ckpt["state_dict"], strict=False)
+        ft_model = ft_model.to(device).train()
+
+        ft_extractor = FeatureExtractor(
+            model=ft_model,
+            scene_norm=scene_norm,
+            canvas_grid=canvas_grid,
+            glimpse_grid=glimpse_grid,
+            glimpse_px=glimpse_px,
+            patch_size=patch_size,
+            device=device,
+            teacher=None,  # finetune doesn't need teacher
+        )
+
+        # Update finetune probe optimizers to use ft_model params
+        for ft in finetune_probes:
+            ft_backbone_params = list(ft_model.parameters())
+            ft.optimizer = AdamW([
+                {"params": ft_backbone_params, "lr": cfg.ft_ref_lr * cfg.batch_size},
+                {"params": list(ft.probe.parameters()), "lr": peak_lr},
+            ], weight_decay=cfg.weight_decay)
+            # Recreate schedulers with new optimizer
+            ft_warmup = LinearLR(ft.optimizer, start_factor=1e-3, end_factor=1.0, total_iters=max(1, warmup_steps))
+            ft_cosine = CosineAnnealingLR(ft.optimizer, T_max=cfg.max_steps - warmup_steps)
+            ft.scheduler = SequentialLR(ft.optimizer, [ft_warmup, ft_cosine], milestones=[warmup_steps])
+
+        log.info("Finetune model created (separate copy, frozen model untouched)")
 
     # === Data ===
     train_ds = ADE20kDataset(cfg.ade20k_root.expanduser(), "training", cfg.image_size)
@@ -850,30 +857,31 @@ def main(cfg: Config) -> None:
             # Train frozen probes
             grad_norms = probes.train_step(features, masks, cfg.grad_clip)
 
-            # Train finetune probes (with backbone gradients)
+            # Train finetune probes (with backbone gradients, using ft_model)
             ft_grad_norms: dict[str, Tensor] = {}
-            for ft in finetune_probes:
-                ft.probe.train()
-                ft.optimizer.zero_grad()
-                feat = extractor.extract_for_finetune(images, ft.name)
-                H_feat = feat.shape[1]
-                scale = H_mask // H_feat
-                logits = ft.probe(feat)
-                loss = implicit_upsample_ce(logits, masks, scale)
-                loss.backward()
-                grad_norm = nn.utils.clip_grad_norm_(
-                    list(model.parameters()) + list(ft.probe.parameters()), cfg.grad_clip
-                )
-                ft.optimizer.step()
-                ft.scheduler.step()
+            if ft_extractor is not None and ft_model is not None:
+                for ft in finetune_probes:
+                    ft.probe.train()
+                    ft.optimizer.zero_grad()
+                    feat = ft_extractor.extract_for_finetune(images, ft.name)
+                    H_feat = feat.shape[1]
+                    scale = H_mask // H_feat
+                    logits = ft.probe(feat)
+                    loss = implicit_upsample_ce(logits, masks, scale)
+                    loss.backward()
+                    grad_norm = nn.utils.clip_grad_norm_(
+                        list(ft_model.parameters()) + list(ft.probe.parameters()), cfg.grad_clip
+                    )
+                    ft.optimizer.step()
+                    ft.scheduler.step()
 
-                # Accumulate loss (no sync)
-                if ft.loss_sum is None:
-                    ft.loss_sum = loss.detach()
-                else:
-                    ft.loss_sum = ft.loss_sum + loss.detach()
-                ft.loss_count += 1
-                ft_grad_norms[ft.name] = grad_norm.detach()
+                    # Accumulate loss (no sync)
+                    if ft.loss_sum is None:
+                        ft.loss_sum = loss.detach()
+                    else:
+                        ft.loss_sum = ft.loss_sum + loss.detach()
+                    ft.loss_count += 1
+                    ft_grad_norms[ft.name] = grad_norm.detach()
 
             step += 1
             pbar.update(1)
