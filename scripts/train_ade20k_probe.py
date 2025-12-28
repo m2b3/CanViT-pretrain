@@ -219,6 +219,16 @@ def compute_entropy(logits: Tensor, target_size: int) -> Tensor:
 MAX_ENTROPY = math.log(NUM_CLASSES)
 
 
+PROBE_ABBREV = {
+    "hidden": "hid",
+    "predicted_norm": "prd_n",
+    "predicted_denorm": "prd_d",
+    "teacher_full": "tch_f",
+    "teacher_glimpse": "tch_g",
+    "finetune_hidden": "ft_hid",
+}
+
+
 def log_viz(
     exp: comet_ml.Experiment,
     step: int,
@@ -253,17 +263,18 @@ def log_viz(
         for name in probe_names:
             logits = logits_dict[name]
             H_mask = masks.shape[1]
+            abbrev = PROBE_ABBREV.get(name, name[:6])
 
             # Prediction
             pred_up = pred_nearest(logits[i:i+1], H_mask)[0].cpu().numpy()
             axes[i, col].imshow(colorize_mask(pred_up))
-            axes[i, col].set_title(f"{name[:8]}")
+            axes[i, col].set_title(abbrev)
             col += 1
 
             # Entropy
             entropy = compute_entropy(logits[i:i+1], H_mask)[0].cpu().numpy()
             axes[i, col].imshow(entropy, cmap="magma", vmin=0, vmax=MAX_ENTROPY)
-            axes[i, col].set_title(f"{name[:8]}_H")
+            axes[i, col].set_title(f"{abbrev}_H")
             col += 1
 
         for ax in axes[i]:
@@ -875,11 +886,19 @@ def main(cfg: Config) -> None:
             if step % cfg.viz_every == 0:
                 for state in probes.probes.values():
                     state.probe.eval()
+                for ft in finetune_probes:
+                    ft.probe.eval()
                 with torch.no_grad():
                     logits_dict = {}
+                    # Frozen probes
                     for name in frozen_enabled:
                         if name in features:
                             logits_dict[name] = probes.probes[name].probe(features[name])
+                    # Finetune probes
+                    if ft_extractor is not None:
+                        for ft in finetune_probes:
+                            feat = ft_extractor.extract_for_finetune(images, ft.name)
+                            logits_dict[ft.name] = ft.probe(feat)
                 log_viz(exp, step, images, masks, logits_dict, cfg.n_viz_samples, cfg.image_size)
 
             # Train frozen probes
