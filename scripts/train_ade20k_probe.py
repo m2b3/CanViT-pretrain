@@ -101,7 +101,7 @@ class Config:
     probe_teacher_glimpse: bool = True
 
     # Finetuning: backprop through backbone (not just probe head)
-    finetune: bool = False
+    finetune: bool = True
     ft_ref_lr: float = 1e-6  # backbone LR = ft_ref_lr * batch_size
 
     # Image/grid settings - will be validated against checkpoint
