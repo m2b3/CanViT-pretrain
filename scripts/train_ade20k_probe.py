@@ -336,7 +336,7 @@ class ProbeManager:
             state.scheduler.step()
 
             # Store tensors - NO .item() here to avoid sync
-            metrics[name] = (loss.detach(), grad_norm.detach() if isinstance(grad_norm, Tensor) else torch.tensor(grad_norm))
+            metrics[name] = (loss.detach(), grad_norm.detach())
 
         return metrics
 
