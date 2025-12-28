@@ -351,17 +351,17 @@ class FeatureExtractor:
                         predicted_denorm_flat = predicted_norm_flat
                     result["predicted_denorm"] = predicted_denorm_flat.view(B, self.canvas_grid, self.canvas_grid, -1)
 
-        # Teacher features
+        # Teacher features (always frozen, always use inference_mode)
         if self.teacher is not None:
             if "teacher_full" in enabled:
-                with self._ctx():
+                with torch.inference_mode():
                     feats = self.teacher.forward_norm_features(images)
                 result["teacher_full"] = feats.patches.view(B, self.canvas_grid, self.canvas_grid, -1)
 
             if "teacher_glimpse" in enabled:
                 glimpse_size = self.glimpse_grid * self.patch_size
                 images_small = F.interpolate(images, size=(glimpse_size, glimpse_size), mode="bilinear", align_corners=False)
-                with self._ctx():
+                with torch.inference_mode():
                     feats = self.teacher.forward_norm_features(images_small)
                 result["teacher_glimpse"] = feats.patches.view(B, self.glimpse_grid, self.glimpse_grid, -1)
 
