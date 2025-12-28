@@ -504,23 +504,28 @@ def validate(
     probes: ProbeManager,
     loader: DataLoader,
     device: torch.device,
-    enabled_probes: set[str],
-    image_size: int,
+    frozen_enabled: set[str],
+    ft_extractor: FeatureExtractor | None,
+    finetune_probes: list[FinetuneProbe],
 ) -> dict[str, float]:
-    """Compute val metrics for all probes (upsample preds, not downsample masks).
+    """Single-pass validation for all probes (frozen + finetune).
 
-    Also computes cross-evaluation: teacher_full probe applied to predicted_denorm.
-    This tests whether model predictions are in teacher space.
+    Also computes cross-evaluation: teacher_full probe on predicted_denorm.
     """
+    # Set all probes to eval mode
     for state in probes.probes.values():
         state.probe.eval()
+    for ft in finetune_probes:
+        ft.probe.eval()
 
+    # Metrics accumulators
+    all_names = list(frozen_enabled) + [ft.name for ft in finetune_probes]
     metrics_iou = {name: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
-                   for name in enabled_probes}
-    loss_sums = {name: 0.0 for name in enabled_probes}
+                   for name in all_names}
+    loss_sums = {name: 0.0 for name in all_names}
 
     # Cross-eval: teacher_full probe on predicted_denorm
-    do_cross = "teacher_full" in enabled_probes and "predicted_denorm" in enabled_probes
+    do_cross = "teacher_full" in frozen_enabled and "predicted_denorm" in frozen_enabled
     if do_cross:
         cross_iou = MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
         cross_loss_sum = 0.0
@@ -532,39 +537,43 @@ def validate(
         B = images.shape[0]
         H_mask = masks.shape[1]
 
-        features = extractor.extract_frozen(images, enabled_probes)
+        # Extract frozen features
+        frozen_features = extractor.extract_frozen(images, frozen_enabled)
 
-        for name in enabled_probes:
-            if name not in features:
+        # Evaluate frozen probes
+        for name in frozen_enabled:
+            if name not in frozen_features:
                 continue
-            feat = features[name]
+            feat = frozen_features[name]
             H_feat = feat.shape[1]
             scale = H_mask // H_feat
-
-            state = probes.probes[name]
-            logits = state.probe(feat)
-
-            # Loss: implicit upsample CE
+            logits = probes.probes[name].probe(feat)
             loss_sums[name] += implicit_upsample_ce(logits, masks, scale).item() * B
+            metrics_iou[name].update(pred_nearest(logits, H_mask), masks)
 
-            # mIoU: upsample predictions to mask resolution
-            preds_up = pred_nearest(logits, H_mask)
-            metrics_iou[name].update(preds_up, masks)
-
-        # Cross-eval: apply teacher_full probe to predicted_denorm
+        # Cross-eval
         if do_cross:
-            feat = features["predicted_denorm"]
+            feat = frozen_features["predicted_denorm"]
             H_feat = feat.shape[1]
             scale = H_mask // H_feat
-            teacher_probe = probes.probes["teacher_full"].probe
-            logits = teacher_probe(feat)
+            logits = probes.probes["teacher_full"].probe(feat)
             cross_loss_sum += implicit_upsample_ce(logits, masks, scale).item() * B
             cross_iou.update(pred_nearest(logits, H_mask), masks)
+
+        # Evaluate finetune probes (extract features from ft_model)
+        if ft_extractor is not None:
+            for ft in finetune_probes:
+                feat = ft_extractor.extract_for_finetune(images, ft.name)
+                H_feat = feat.shape[1]
+                scale = H_mask // H_feat
+                logits = ft.probe(feat)
+                loss_sums[ft.name] += implicit_upsample_ce(logits, masks, scale).item() * B
+                metrics_iou[ft.name].update(pred_nearest(logits, H_mask), masks)
 
         n += B
 
     results = {}
-    for name in enabled_probes:
+    for name in all_names:
         results[f"{name}/val_loss"] = loss_sums[name] / n
         results[f"{name}/val_miou"] = metrics_iou[name].compute().item()
 
@@ -828,13 +837,17 @@ def main(cfg: Config) -> None:
 
             # Validation BEFORE training (step 0 = untrained baseline)
             if step % cfg.val_every == 0:
-                val_metrics = validate(extractor, probes, val_loader, device, frozen_enabled, cfg.image_size)
+                val_metrics = validate(
+                    extractor, probes, val_loader, device, frozen_enabled,
+                    ft_extractor, finetune_probes,
+                )
                 for k, v in val_metrics.items():
                     exp.log_metric(k, v, step=step)
                     if step == 0:
                         log.info(f"  {k}: {v:.4f}")
 
                 postfix = {}
+                # Track best for frozen probes
                 for name in frozen_enabled:
                     miou = val_metrics[f"{name}/val_miou"]
                     state = probes.probes[name]
@@ -845,38 +858,16 @@ def main(cfg: Config) -> None:
                         log.info(f"Step {step}: new best {name} mIoU: {miou:.4f} -> {ckpt_path}")
                     postfix[f"{name[:3]}"] = f"{miou:.3f}"
 
-                # Validate finetune probes (uses ft_model, separate from frozen)
-                if ft_extractor is not None and ft_model is not None:
-                    for ft in finetune_probes:
-                        ft.probe.eval()
-                        ft_iou = MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
-                        ft_loss_sum = 0.0
-                        ft_n = 0
-                        with torch.no_grad():
-                            for val_images, val_masks in val_loader:
-                                val_images = val_images.to(device)
-                                val_masks = val_masks.to(device)
-                                B = val_images.shape[0]
-                                H_mask = val_masks.shape[1]
-                                feat = ft_extractor.extract_for_finetune(val_images, ft.name)
-                                H_feat = feat.shape[1]
-                                scale = H_mask // H_feat
-                                logits = ft.probe(feat)
-                                ft_loss_sum += implicit_upsample_ce(logits, val_masks, scale).item() * B
-                                ft_iou.update(pred_nearest(logits, H_mask), val_masks)
-                                ft_n += B
-                        ft_val_loss = ft_loss_sum / ft_n
-                        ft_val_miou = ft_iou.compute().item()
-                        exp.log_metric(f"{ft.name}/val_loss", ft_val_loss, step=step)
-                        exp.log_metric(f"{ft.name}/val_miou", ft_val_miou, step=step)
-                        if step == 0:
-                            log.info(f"  {ft.name}/val_miou: {ft_val_miou:.4f}")
-                        if ft_val_miou > ft.best_miou:
-                            ft.best_miou = ft_val_miou
-                            ckpt_path = f"probe_{ft.name}_best_{exp.id}.pt"
-                            torch.save({"probe": ft.probe.state_dict(), "backbone": ft_model.state_dict()}, ckpt_path)
-                            log.info(f"Step {step}: new best {ft.name} mIoU: {ft_val_miou:.4f} -> {ckpt_path}")
-                        postfix[f"{ft.name[:6]}"] = f"{ft_val_miou:.3f}"
+                # Track best for finetune probes
+                for ft in finetune_probes:
+                    miou = val_metrics[f"{ft.name}/val_miou"]
+                    if miou > ft.best_miou:
+                        ft.best_miou = miou
+                        assert ft_model is not None
+                        ckpt_path = f"probe_{ft.name}_best_{exp.id}.pt"
+                        torch.save({"probe": ft.probe.state_dict(), "backbone": ft_model.state_dict()}, ckpt_path)
+                        log.info(f"Step {step}: new best {ft.name} mIoU: {miou:.4f} -> {ckpt_path}")
+                    postfix[f"{ft.name[:6]}"] = f"{miou:.3f}"
 
                 pbar.set_postfix(postfix)
 
