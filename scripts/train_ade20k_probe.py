@@ -102,6 +102,7 @@ class Config:
 
     # Finetuning: backprop through backbone (not just probe head)
     finetune: bool = False
+    ft_ref_lr: float = 1e-6  # backbone LR = ft_ref_lr * batch_size
 
     # Image/grid settings - will be validated against checkpoint
     image_size: int = 512
@@ -289,6 +290,7 @@ class FeatureExtractor:
         patch_size: int,
         device: torch.device,
         teacher: nn.Module | None = None,
+        finetune: bool = False,
     ):
         self.model = model
         self.scene_norm = scene_norm
@@ -298,9 +300,15 @@ class FeatureExtractor:
         self.patch_size = patch_size
         self.device = device
         self.teacher = teacher
+        self.finetune = finetune
 
         from canvit.viewpoint import Viewpoint
         self.Viewpoint = Viewpoint
+
+    def _ctx(self):
+        """Context manager: inference_mode when frozen, nullcontext when finetuning."""
+        from contextlib import nullcontext
+        return nullcontext() if self.finetune else torch.inference_mode()
 
     def extract(self, images: Tensor, enabled: set[str]) -> dict[str, Tensor]:
         """Extract requested feature types at t=0 (full scene).
@@ -322,7 +330,7 @@ class FeatureExtractor:
                 scales=torch.ones(B, device=self.device),
             )
 
-            with torch.inference_mode():
+            with self._ctx():
                 out = self.model.forward_step(
                     image=images, canvas=canvas, cls=cls,
                     viewpoint=vp, glimpse_size_px=self.glimpse_px,
@@ -346,15 +354,14 @@ class FeatureExtractor:
         # Teacher features
         if self.teacher is not None:
             if "teacher_full" in enabled:
-                with torch.inference_mode():
+                with self._ctx():
                     feats = self.teacher.forward_norm_features(images)
                 result["teacher_full"] = feats.patches.view(B, self.canvas_grid, self.canvas_grid, -1)
 
             if "teacher_glimpse" in enabled:
-                # Resize to glimpse resolution
                 glimpse_size = self.glimpse_grid * self.patch_size
                 images_small = F.interpolate(images, size=(glimpse_size, glimpse_size), mode="bilinear", align_corners=False)
-                with torch.inference_mode():
+                with self._ctx():
                     feats = self.teacher.forward_norm_features(images_small)
                 result["teacher_glimpse"] = feats.patches.view(B, self.glimpse_grid, self.glimpse_grid, -1)
 
@@ -384,20 +391,51 @@ class ProbeManager:
         warmup_steps: int,
         max_steps: int,
         device: torch.device,
+        finetune: bool = False,
+        backbone_params: list | None = None,  # backbone params for finetuning
+        backbone_lr: float | None = None,  # separate LR for backbone
     ):
         self.probes: dict[str, ProbeState] = {}
         self.device = device
+        self.finetune = finetune
 
+        # Create probes
+        all_probe_params = []
         for name, embed_dim in probe_configs.items():
             probe = LinearSegmentationHead(embed_dim, num_classes).to(device)
-            optimizer = AdamW(probe.parameters(), lr=peak_lr, weight_decay=weight_decay)
-
-            warmup = LinearLR(optimizer, start_factor=1e-3, end_factor=1.0, total_iters=max(1, warmup_steps))
-            cosine = CosineAnnealingLR(optimizer, T_max=max_steps - warmup_steps)
-            scheduler = SequentialLR(optimizer, [warmup, cosine], milestones=[warmup_steps])
-
-            self.probes[name] = ProbeState(probe=probe, optimizer=optimizer, scheduler=scheduler)
+            all_probe_params.extend(probe.parameters())
+            # Placeholder optimizer/scheduler - will be replaced if finetuning
+            self.probes[name] = ProbeState(
+                probe=probe,
+                optimizer=AdamW([torch.zeros(1)], lr=1e-3),  # dummy
+                scheduler=None,  # type: ignore
+            )
             log.info(f"Probe '{name}': embed_dim={embed_dim}, params={sum(p.numel() for p in probe.parameters()):,}")
+
+        # Create optimizer(s)
+        if finetune and backbone_params:
+            assert backbone_lr is not None, "backbone_lr required when finetuning"
+            # Unified optimizer with param groups
+            param_groups = [
+                {"params": backbone_params, "lr": backbone_lr},
+                {"params": all_probe_params, "lr": peak_lr},
+            ]
+            self._optimizer = AdamW(param_groups, weight_decay=weight_decay)
+            warmup = LinearLR(self._optimizer, start_factor=1e-3, end_factor=1.0, total_iters=max(1, warmup_steps))
+            cosine = CosineAnnealingLR(self._optimizer, T_max=max_steps - warmup_steps)
+            self._scheduler = SequentialLR(self._optimizer, [warmup, cosine], milestones=[warmup_steps])
+            log.info(f"Finetuning: backbone_lr={backbone_lr:.2e}, probe_lr={peak_lr:.2e}")
+        else:
+            # Per-probe optimizers (frozen backbone)
+            self._optimizer = None
+            self._scheduler = None
+            for name, state in self.probes.items():
+                optimizer = AdamW(state.probe.parameters(), lr=peak_lr, weight_decay=weight_decay)
+                warmup = LinearLR(optimizer, start_factor=1e-3, end_factor=1.0, total_iters=max(1, warmup_steps))
+                cosine = CosineAnnealingLR(optimizer, T_max=max_steps - warmup_steps)
+                scheduler = SequentialLR(optimizer, [warmup, cosine], milestones=[warmup_steps])
+                state.optimizer = optimizer
+                state.scheduler = scheduler
 
     def train_step(
         self,
@@ -417,28 +455,56 @@ class ProbeManager:
         metrics: dict[str, tuple[Tensor, Tensor]] = {}
         H_mask = masks.shape[1]
 
-        for name, state in self.probes.items():
-            if name not in features:
-                continue
+        if self.finetune:
+            # Unified optimizer mode: accumulate losses, single backward
+            assert self._optimizer is not None and self._scheduler is not None
+            self._optimizer.zero_grad()
+            total_loss = torch.tensor(0.0, device=self.device)
 
-            feat = features[name].detach()
-            H_feat = feat.shape[1]
-            scale = H_mask // H_feat
-            assert H_mask == H_feat * scale, f"mask {H_mask} not divisible by feat {H_feat}"
+            for name, state in self.probes.items():
+                if name not in features:
+                    continue
+                feat = features[name]  # NO detach - gradients flow to backbone
+                H_feat = feat.shape[1]
+                scale = H_mask // H_feat
 
-            state.probe.train()
-            state.optimizer.zero_grad()
+                state.probe.train()
+                logits = state.probe(feat)
+                loss = implicit_upsample_ce(logits, masks, scale)
+                total_loss = total_loss + loss
+                metrics[name] = (loss.detach(), torch.tensor(0.0))  # grad_norm computed after
 
-            logits = state.probe(feat)  # (B, C, H_feat, W_feat)
-            loss = implicit_upsample_ce(logits, masks, scale)
-            loss.backward()
+            total_loss.backward()
+            grad_norm = nn.utils.clip_grad_norm_(self._optimizer.param_groups[0]["params"] + self._optimizer.param_groups[1]["params"], grad_clip)
+            self._optimizer.step()
+            self._scheduler.step()
 
-            grad_norm = nn.utils.clip_grad_norm_(state.probe.parameters(), grad_clip)
-            state.optimizer.step()
-            state.scheduler.step()
+            # Update grad_norm in metrics
+            for name in metrics:
+                metrics[name] = (metrics[name][0], grad_norm.detach())
+        else:
+            # Per-probe optimizer mode
+            for name, state in self.probes.items():
+                if name not in features:
+                    continue
 
-            # Store tensors - NO .item() here to avoid sync
-            metrics[name] = (loss.detach(), grad_norm.detach())
+                feat = features[name].detach()  # detach - frozen backbone
+                H_feat = feat.shape[1]
+                scale = H_mask // H_feat
+                assert H_mask == H_feat * scale, f"mask {H_mask} not divisible by feat {H_feat}"
+
+                state.probe.train()
+                state.optimizer.zero_grad()
+
+                logits = state.probe(feat)
+                loss = implicit_upsample_ce(logits, masks, scale)
+                loss.backward()
+
+                grad_norm = nn.utils.clip_grad_norm_(state.probe.parameters(), grad_clip)
+                state.optimizer.step()
+                state.scheduler.step()
+
+                metrics[name] = (loss.detach(), grad_norm.detach())
 
         return metrics
 
@@ -450,7 +516,10 @@ class ProbeManager:
             state.loss_ema = ema_alpha * loss_val + (1 - ema_alpha) * state.loss_ema if state.loss_ema > 0 else loss_val
 
     def get_lr(self) -> float:
-        """Get current LR (same for all probes)."""
+        """Get current probe LR."""
+        if self._scheduler is not None:
+            # Finetuning mode: param group 1 is probes
+            return self._scheduler.get_last_lr()[1]
         first = next(iter(self.probes.values()))
         return first.scheduler.get_last_lr()[0]
 
@@ -573,9 +642,14 @@ def main(cfg: Config) -> None:
         log.warning(f"Missing keys: {result.missing_keys}")
     if result.unexpected_keys:
         log.warning(f"Unexpected keys: {result.unexpected_keys}")
-    model = model.to(device).eval()
-    for p in model.parameters():
-        p.requires_grad_(False)
+    model = model.to(device)
+    if cfg.finetune:
+        model.train()
+        log.info("Finetuning: backbone gradients ENABLED")
+    else:
+        model.eval()
+        for p in model.parameters():
+            p.requires_grad_(False)
 
     # === Extract and validate settings from checkpoint ===
     patch_size = model.backbone.patch_size_px
@@ -642,6 +716,7 @@ def main(cfg: Config) -> None:
         patch_size=patch_size,
         device=device,
         teacher=teacher,
+        finetune=cfg.finetune,
     )
 
     # === Create probes ===
@@ -662,6 +737,14 @@ def main(cfg: Config) -> None:
     peak_lr = cfg.ref_lr * cfg.batch_size
     warmup_steps = int(cfg.warmup_ratio * cfg.max_steps)
 
+    # Collect backbone params for finetuning
+    backbone_params: list | None = None
+    backbone_lr: float | None = None
+    if cfg.finetune:
+        backbone_params = list(model.parameters())
+        backbone_lr = cfg.ft_ref_lr * cfg.batch_size
+        log.info(f"Finetuning: backbone_lr={backbone_lr:.2e} ({len(backbone_params)} params)")
+
     probes = ProbeManager(
         probe_configs=probe_dims,
         num_classes=NUM_CLASSES,
@@ -670,6 +753,9 @@ def main(cfg: Config) -> None:
         warmup_steps=warmup_steps,
         max_steps=cfg.max_steps,
         device=device,
+        finetune=cfg.finetune,
+        backbone_params=backbone_params,
+        backbone_lr=backbone_lr,
     )
 
     # === Data ===
@@ -702,6 +788,9 @@ def main(cfg: Config) -> None:
     exp.log_parameter("train_size", len(train_ds))
     exp.log_parameter("val_size", len(val_ds))
     exp.log_parameter("enabled_probes", list(enabled))
+    exp.log_parameter("finetune", cfg.finetune)
+    if cfg.finetune:
+        exp.log_parameter("backbone_lr", backbone_lr)
 
     # === Training ===
     step = 0
