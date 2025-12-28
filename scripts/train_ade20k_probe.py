@@ -100,7 +100,7 @@ class Config:
 
     # Finetuning probes (backbone gradients enabled)
     # Same features as frozen counterparts, but backbone is trained too
-    probe_finetune_hidden: bool = False  # TODO: implement
+    probe_finetune_hidden: bool = True
     ft_ref_lr: float = 1e-6  # backbone LR = ft_ref_lr * batch_size
 
     # Image/grid settings - will be validated against checkpoint
@@ -467,7 +467,8 @@ class FinetuneProbe:
     probe: LinearSegmentationHead
     optimizer: AdamW
     scheduler: SequentialLR
-    loss_ema: float = 0.0
+    loss_sum: Tensor | None = None  # accumulated on device
+    loss_count: int = 0
     best_miou: float = 0.0
 
 
@@ -640,14 +641,7 @@ def main(cfg: Config) -> None:
         log.warning(f"Missing keys: {result.missing_keys}")
     if result.unexpected_keys:
         log.warning(f"Unexpected keys: {result.unexpected_keys}")
-    model = model.to(device)
-    if cfg.finetune:
-        model.train()
-        log.info("Finetuning: backbone gradients ENABLED")
-    else:
-        model.eval()
-        for p in model.parameters():
-            p.requires_grad_(False)
+    model = model.to(device).train()  # train mode for finetune probes
 
     # === Extract and validate settings from checkpoint ===
     patch_size = model.backbone.patch_size_px
@@ -744,6 +738,33 @@ def main(cfg: Config) -> None:
         device=device,
     )
 
+    # === Create finetuning probes ===
+    finetune_probes: list[FinetuneProbe] = []
+    if cfg.probe_finetune_hidden:
+        backbone_params = list(model.parameters())
+        backbone_lr = cfg.ft_ref_lr * cfg.batch_size
+        ft_probe = create_finetune_probe(
+            name="finetune_hidden",
+            embed_dim=hidden_dim,
+            num_classes=NUM_CLASSES,
+            backbone_params=backbone_params,
+            probe_lr=peak_lr,
+            backbone_lr=backbone_lr,
+            weight_decay=cfg.weight_decay,
+            warmup_steps=warmup_steps,
+            max_steps=cfg.max_steps,
+            device=device,
+        )
+        finetune_probes.append(ft_probe)
+
+    # Frozen probes set (for extractor, validation, viz)
+    frozen_enabled = enabled.copy()
+
+    if finetune_probes and frozen_enabled:
+        log.warning("⚠️  Running frozen and finetune probes together. After step 0, frozen probes "
+                    "will see the finetuned backbone, not the original checkpoint. This is useful "
+                    "for comparison but may not reflect original checkpoint quality.")
+
     # === Data ===
     train_ds = ADE20kDataset(cfg.ade20k_root.expanduser(), "training", cfg.image_size)
     val_ds = ADE20kDataset(cfg.ade20k_root.expanduser(), "validation", cfg.image_size)
@@ -773,7 +794,8 @@ def main(cfg: Config) -> None:
     exp.log_parameter("avp_train_step", train_step)
     exp.log_parameter("train_size", len(train_ds))
     exp.log_parameter("val_size", len(val_ds))
-    exp.log_parameter("enabled_probes", list(enabled))
+    exp.log_parameter("frozen_probes", list(frozen_enabled))
+    exp.log_parameter("finetune_probes", [fp.name for fp in finetune_probes])
 
     # === Training ===
     step = 0
@@ -787,20 +809,21 @@ def main(cfg: Config) -> None:
 
             images = images.to(device, non_blocking=True)
             masks = masks.to(device, non_blocking=True)
+            H_mask = masks.shape[1]
 
-            # Extract features for frozen probes
-            features = extractor.extract_frozen(images, enabled)
+            # Extract features for frozen probes (no grad)
+            features = extractor.extract_frozen(images, frozen_enabled)
 
             # Validation BEFORE training (step 0 = untrained baseline)
             if step % cfg.val_every == 0:
-                val_metrics = validate(extractor, probes, val_loader, device, enabled, cfg.image_size)
+                val_metrics = validate(extractor, probes, val_loader, device, frozen_enabled, cfg.image_size)
                 for k, v in val_metrics.items():
                     exp.log_metric(k, v, step=step)
                     if step == 0:
                         log.info(f"  {k}: {v:.4f}")
 
                 postfix = {}
-                for name in enabled:
+                for name in frozen_enabled:
                     miou = val_metrics[f"{name}/val_miou"]
                     state = probes.probes[name]
                     if miou > state.best_miou:
@@ -809,6 +832,8 @@ def main(cfg: Config) -> None:
                         torch.save(state.probe.state_dict(), ckpt_path)
                         log.info(f"Step {step}: new best {name} mIoU: {miou:.4f} -> {ckpt_path}")
                     postfix[f"{name[:3]}"] = f"{miou:.3f}"
+
+                # TODO: validate finetune probes (separate pass since they modify backbone)
                 pbar.set_postfix(postfix)
 
             # Visualization BEFORE training
@@ -817,12 +842,38 @@ def main(cfg: Config) -> None:
                     state.probe.eval()
                 with torch.no_grad():
                     logits_dict = {}
-                    for name in enabled:
-                        logits_dict[name] = probes.probes[name].probe(features[name])
+                    for name in frozen_enabled:
+                        if name in features:
+                            logits_dict[name] = probes.probes[name].probe(features[name])
                 log_viz(exp, step, images, masks, logits_dict, cfg.n_viz_samples, cfg.image_size)
 
-            # Train step
+            # Train frozen probes
             grad_norms = probes.train_step(features, masks, cfg.grad_clip)
+
+            # Train finetune probes (with backbone gradients)
+            ft_grad_norms: dict[str, Tensor] = {}
+            for ft in finetune_probes:
+                ft.probe.train()
+                ft.optimizer.zero_grad()
+                feat = extractor.extract_for_finetune(images, ft.name)
+                H_feat = feat.shape[1]
+                scale = H_mask // H_feat
+                logits = ft.probe(feat)
+                loss = implicit_upsample_ce(logits, masks, scale)
+                loss.backward()
+                grad_norm = nn.utils.clip_grad_norm_(
+                    list(model.parameters()) + list(ft.probe.parameters()), cfg.grad_clip
+                )
+                ft.optimizer.step()
+                ft.scheduler.step()
+
+                # Accumulate loss (no sync)
+                if ft.loss_sum is None:
+                    ft.loss_sum = loss.detach()
+                else:
+                    ft.loss_sum = ft.loss_sum + loss.detach()
+                ft.loss_count += 1
+                ft_grad_norms[ft.name] = grad_norm.detach()
 
             step += 1
             pbar.update(1)
@@ -833,7 +884,19 @@ def main(cfg: Config) -> None:
                 log_dict = {"lr": probes.get_lr()}
                 for name in avg_losses:
                     log_dict[f"{name}/train_loss"] = avg_losses[name]
-                    log_dict[f"{name}/grad_norm"] = grad_norms[name].item()
+                    if name in grad_norms:
+                        log_dict[f"{name}/grad_norm"] = grad_norms[name].item()
+
+                # Finetune probe metrics
+                for ft in finetune_probes:
+                    if ft.loss_count > 0:
+                        assert ft.loss_sum is not None
+                        log_dict[f"{ft.name}/train_loss"] = (ft.loss_sum / ft.loss_count).item()
+                        ft.loss_sum = None
+                        ft.loss_count = 0
+                    if ft.name in ft_grad_norms:
+                        log_dict[f"{ft.name}/grad_norm"] = ft_grad_norms[ft.name].item()
+
                 exp.log_metrics(log_dict, step=step)
 
     pbar.close()
@@ -841,9 +904,12 @@ def main(cfg: Config) -> None:
     # Final summary
     log.info("=" * 60)
     log.info("Training complete. Best mIoU per probe:")
-    for name in enabled:
+    for name in frozen_enabled:
         log.info(f"  {name}: {probes.probes[name].best_miou:.4f}")
         exp.log_metric(f"best_{name}_miou", probes.probes[name].best_miou)
+    for ft in finetune_probes:
+        log.info(f"  {ft.name}: {ft.best_miou:.4f}")
+        exp.log_metric(f"best_{ft.name}_miou", ft.best_miou)
     log.info("=" * 60)
 
 
