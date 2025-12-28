@@ -545,15 +545,25 @@ def validate(
     enabled_probes: set[str],
     image_size: int,
 ) -> dict[str, float]:
-    """Compute val metrics for all probes (upsample preds, not downsample masks)."""
+    """Compute val metrics for all probes (upsample preds, not downsample masks).
+
+    Also computes cross-evaluation: teacher_full probe applied to predicted_denorm.
+    This tests whether model predictions are in teacher space.
+    """
     for state in probes.probes.values():
         state.probe.eval()
 
     metrics_iou = {name: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
                    for name in enabled_probes}
     loss_sums = {name: 0.0 for name in enabled_probes}
-    n = 0
 
+    # Cross-eval: teacher_full probe on predicted_denorm
+    do_cross = "teacher_full" in enabled_probes and "predicted_denorm" in enabled_probes
+    if do_cross:
+        cross_iou = MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
+        cross_loss_sum = 0.0
+
+    n = 0
     for images, masks in loader:
         images = images.to(device)
         masks = masks.to(device)
@@ -579,12 +589,26 @@ def validate(
             preds_up = pred_nearest(logits, H_mask)
             metrics_iou[name].update(preds_up, masks)
 
+        # Cross-eval: apply teacher_full probe to predicted_denorm
+        if do_cross:
+            feat = features["predicted_denorm"]
+            H_feat = feat.shape[1]
+            scale = H_mask // H_feat
+            teacher_probe = probes.probes["teacher_full"].probe
+            logits = teacher_probe(feat)
+            cross_loss_sum += implicit_upsample_ce(logits, masks, scale).item() * B
+            cross_iou.update(pred_nearest(logits, H_mask), masks)
+
         n += B
 
     results = {}
     for name in enabled_probes:
         results[f"{name}/val_loss"] = loss_sums[name] / n
         results[f"{name}/val_miou"] = metrics_iou[name].compute().item()
+
+    if do_cross:
+        results["cross_teacher_on_denorm/val_loss"] = cross_loss_sum / n
+        results["cross_teacher_on_denorm/val_miou"] = cross_iou.compute().item()
 
     return results
 
