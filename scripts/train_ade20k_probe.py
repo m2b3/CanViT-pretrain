@@ -121,7 +121,6 @@ class Config:
     val_every: int = 200
     viz_every: int = 500
     n_viz_samples: int = 4
-    ema_alpha: float = 0.1
 
     comet_project: str = "avp-ade20k-probe"
     device: str | None = None
@@ -382,7 +381,8 @@ class ProbeState:
     probe: LinearSegmentationHead
     optimizer: AdamW
     scheduler: SequentialLR
-    loss_ema: float = 0.0
+    loss_sum: float = 0.0  # accumulate losses between log intervals
+    loss_count: int = 0
     best_miou: float = 0.0
 
 
@@ -416,9 +416,9 @@ class ProbeManager:
         features: dict[str, Tensor],
         masks: Tensor,
         grad_clip: float,
-    ) -> dict[str, tuple[Tensor, Tensor]]:
-        """Train frozen probes. Returns (loss, grad_norm) tensors per probe."""
-        metrics: dict[str, tuple[Tensor, Tensor]] = {}
+    ) -> dict[str, Tensor]:
+        """Train frozen probes. Returns grad_norm tensor per probe (no sync)."""
+        grad_norms: dict[str, Tensor] = {}
         H_mask = masks.shape[1]
 
         for name, state in self.probes.items():
@@ -436,16 +436,23 @@ class ProbeManager:
             grad_norm = nn.utils.clip_grad_norm_(state.probe.parameters(), grad_clip)
             state.optimizer.step()
             state.scheduler.step()
-            metrics[name] = (loss.detach(), grad_norm.detach())
 
-        return metrics
+            # Accumulate loss (no sync) - will be averaged at log time
+            state.loss_sum += loss.detach()
+            state.loss_count += 1
+            grad_norms[name] = grad_norm.detach()
 
-    def update_ema(self, metrics: dict[str, tuple[Tensor, Tensor]], ema_alpha: float) -> None:
-        """Update EMA loss. Call at log intervals (syncs GPU)."""
-        for name, (loss, _) in metrics.items():
-            loss_val = loss.item()
-            state = self.probes[name]
-            state.loss_ema = ema_alpha * loss_val + (1 - ema_alpha) * state.loss_ema if state.loss_ema > 0 else loss_val
+        return grad_norms
+
+    def get_and_reset_losses(self) -> dict[str, float]:
+        """Get average losses since last call, reset accumulators. Syncs GPU."""
+        losses = {}
+        for name, state in self.probes.items():
+            if state.loss_count > 0:
+                losses[name] = (state.loss_sum / state.loss_count).item()
+                state.loss_sum = 0.0
+                state.loss_count = 0
+        return losses
 
     def get_lr(self) -> float:
         """Get current probe LR."""
@@ -815,18 +822,18 @@ def main(cfg: Config) -> None:
                 log_viz(exp, step, images, masks, logits_dict, cfg.n_viz_samples, cfg.image_size)
 
             # Train step
-            train_metrics = probes.train_step(features, masks, cfg.grad_clip)
+            grad_norms = probes.train_step(features, masks, cfg.grad_clip)
 
             step += 1
             pbar.update(1)
 
-            # Log training metrics
+            # Log training metrics (syncs GPU here only)
             if step % cfg.log_every == 0:
-                probes.update_ema(train_metrics, cfg.ema_alpha)
+                avg_losses = probes.get_and_reset_losses()
                 log_dict = {"lr": probes.get_lr()}
-                for name, (loss, grad_norm) in train_metrics.items():
-                    log_dict[f"{name}/train_loss"] = probes.probes[name].loss_ema
-                    log_dict[f"{name}/grad_norm"] = grad_norm.item()
+                for name in avg_losses:
+                    log_dict[f"{name}/train_loss"] = avg_losses[name]
+                    log_dict[f"{name}/grad_norm"] = grad_norms[name].item()
                 exp.log_metrics(log_dict, step=step)
 
     pbar.close()
