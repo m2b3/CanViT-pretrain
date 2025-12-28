@@ -100,6 +100,9 @@ class Config:
     probe_teacher_full: bool = True
     probe_teacher_glimpse: bool = True
 
+    # Finetuning: backprop through backbone (not just probe head)
+    finetune: bool = False
+
     # Image/grid settings - will be validated against checkpoint
     image_size: int = 512
 
@@ -611,8 +614,9 @@ def main(cfg: Config) -> None:
 
     # Get glimpse settings from model config
     model_config = ckpt["model_config"]
-    assert "glimpse_grid_size" in model_config, "glimpse_grid_size missing from checkpoint - ancient checkpoint?"
-    glimpse_grid = model_config["glimpse_grid_size"]
+    glimpse_grid = model_config.get("glimpse_grid_size", 8)
+    if "glimpse_grid_size" not in model_config:
+        log.warning(f"glimpse_grid_size not in checkpoint, defaulting to {glimpse_grid}")
     glimpse_px = glimpse_grid * patch_size
     log.info(f"Glimpse: grid={glimpse_grid}, px={glimpse_px}")
 
