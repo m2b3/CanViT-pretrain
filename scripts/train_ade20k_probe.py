@@ -14,7 +14,6 @@ Usage:
 """
 
 import logging
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -423,17 +422,37 @@ def main(cfg: Config) -> None:
     log.info(f"Device: {device}")
 
     # === Load AVP model ===
-    from avp_vit.checkpoint import load_model, load as load_ckpt
+    from avp_vit.checkpoint import load as load_ckpt
     from avp_vit.train.norm import PositionAwareNorm
-    from avp_vit.train.config import Config as TrainConfig
+    from avp_vit import ActiveCanViT, ActiveCanViTConfig
+    from canvit.hub import create_backbone
+    from canvit.policy import PolicyConfig, PolicyHead
+    import dacite
 
     log.info(f"Loading AVP checkpoint: {cfg.avp_ckpt}")
-    model = load_model(cfg.avp_ckpt, device)
-    model.eval()
+    ckpt = load_ckpt(cfg.avp_ckpt, device)
+
+    # Create model from checkpoint (inlined to avoid double load)
+    backbone = create_backbone(ckpt["backbone"], pretrained=False)
+    model_cfg_dict = ckpt["model_config"]
+    if "teacher_dim" not in model_cfg_dict:
+        model_cfg_dict = {**model_cfg_dict, "teacher_dim": ckpt["teacher_dim"]}
+    model_cfg = dacite.from_dict(ActiveCanViTConfig, model_cfg_dict)
+
+    policy: PolicyHead | None = None
+    if (pc := ckpt.get("policy_config")) is not None:
+        policy_cfg = dacite.from_dict(PolicyConfig, pc)
+        policy = PolicyHead(embed_dim=backbone.embed_dim, cfg=policy_cfg)
+
+    model = ActiveCanViT(backbone=backbone, cfg=model_cfg, policy=policy)
+    result = model.load_state_dict(ckpt["state_dict"], strict=False)
+    if result.missing_keys:
+        log.warning(f"Missing keys: {result.missing_keys}")
+    if result.unexpected_keys:
+        log.warning(f"Unexpected keys: {result.unexpected_keys}")
+    model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)
-
-    ckpt = load_ckpt(cfg.avp_ckpt, device)
 
     # === Extract and validate settings from checkpoint ===
     patch_size = model.backbone.patch_size_px
@@ -442,7 +461,7 @@ def main(cfg: Config) -> None:
     backbone_name = ckpt["backbone"]
     train_step = ckpt.get("step", "unknown")
 
-    log.info(f"Checkpoint info:")
+    log.info("Checkpoint info:")
     log.info(f"  backbone: {backbone_name}")
     log.info(f"  train_step: {train_step}")
     log.info(f"  patch_size: {patch_size}")
@@ -472,7 +491,11 @@ def main(cfg: Config) -> None:
 
     # Get glimpse settings from model config
     model_config = ckpt.get("model_config", {})
-    glimpse_grid = model_config.get("glimpse_grid_size", 8)
+    if "glimpse_grid_size" not in model_config:
+        log.warning("⚠️  glimpse_grid_size not in checkpoint model_config! Using fallback=8")
+        glimpse_grid = 8
+    else:
+        glimpse_grid = model_config["glimpse_grid_size"]
     glimpse_px = glimpse_grid * patch_size
     log.info(f"Glimpse: grid={glimpse_grid}, px={glimpse_px}")
 
@@ -543,6 +566,23 @@ def main(cfg: Config) -> None:
     for k, v in val_metrics.items():
         exp.log_metric(k, v, step=0)
         log.info(f"  {k}: {v:.4f}")
+
+    # Viz at step 0
+    log.info("Logging visualization at step 0...")
+    viz_iter = iter(train_loader)
+    viz_images, viz_masks = next(viz_iter)
+    viz_images = viz_images.to(device)
+    viz_masks = viz_masks.to(device)
+    with torch.no_grad():
+        viz_features = extractor.extract(viz_images)
+        predictions = {}
+        for name in enabled:
+            logits = probes.probes[name].probe(viz_features[name])
+            pred = logits.argmax(dim=1)
+            pred_up = F.interpolate(pred.unsqueeze(1).float(), size=cfg.image_size, mode="nearest").squeeze(1).long()
+            predictions[name] = pred_up
+    log_viz(exp, 0, viz_images, viz_masks, predictions, cfg.n_viz_samples)
+    del viz_iter, viz_images, viz_masks, viz_features, predictions
 
     while step < cfg.max_steps:
         for images, masks in train_loader:
