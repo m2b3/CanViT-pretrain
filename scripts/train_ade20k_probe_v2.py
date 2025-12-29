@@ -193,12 +193,12 @@ class FeatureExtractor:
                         result["predicted_denorm"] = denorm.view(B, self.canvas_grid, self.canvas_grid, -1)
 
         if self.teacher is not None:
-            with torch.inference_mode():
+            with torch.no_grad():  # not inference_mode - tensors must be usable by probe heads
                 if "teacher_full" in features:
                     feats = self.teacher.forward_norm_features(images)
                     result["teacher_full"] = feats.patches.view(B, self.canvas_grid, self.canvas_grid, -1)
                 if "teacher_glimpse" in features:
-                    small = F.interpolate(images, (self.glimpse_grid * 16, self.glimpse_grid * 16), mode="bilinear", align_corners=False)
+                    small = F.interpolate(images, (self.glimpse_grid * 16, self.glimpse_grid * 16), mode="bilinear", align_corners=False)  # 16 = DINOv3 patch size
                     feats = self.teacher.forward_norm_features(small)
                     result["teacher_glimpse"] = feats.patches.view(B, self.glimpse_grid, self.glimpse_grid, -1)
 
