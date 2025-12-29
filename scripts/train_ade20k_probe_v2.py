@@ -55,9 +55,9 @@ class Config:
     avp_ckpt: Path
     ade20k_root: Path = Path("/datasets/ADE20k/ADEChallengeData2016")
 
-    # Which probes to train (frozen = backbone frozen, ft = backbone trained)
-    frozen: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "predicted_denorm", "teacher_full", "teacher_glimpse"])
-    finetune: list[FeatureType] = field(default_factory=lambda: ["hidden"])
+    # Which feature types to train probes on
+    frozen_features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "predicted_denorm", "teacher_full", "teacher_glimpse"])
+    finetune_features: list[FeatureType] = field(default_factory=lambda: ["hidden"])
 
     image_size: int = 512
     batch_size: int = 128
@@ -268,18 +268,18 @@ class ProbeTrainer:
 
         # Cross-eval: teacher_full probe on predicted features
         teacher_full_probe = next((p for p in self.probes if p.name == "teacher_full"), None)
-        cross_targets = ["predicted_norm", "predicted_denorm"] if teacher_full_probe else []
-        cross_ious = {t: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(self.device)
-                      for t in cross_targets}
-        cross_losses = {t: 0.0 for t in cross_targets}
+        cross_features = ["predicted_norm", "predicted_denorm"] if teacher_full_probe else []
+        cross_ious = {f: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(self.device)
+                      for f in cross_features}
+        cross_losses = {f: 0.0 for f in cross_features}
 
         n = 0
         for images, masks in loader:
             images, masks = images.to(self.device), masks.to(self.device)
             B, H_mask = images.shape[0], masks.shape[1]
 
-            # Extract all features (include cross targets)
-            frozen_features = {p.feature for p in self.frozen_probes} | set(cross_targets)
+            # Extract all features (include cross-eval features)
+            frozen_features = {p.feature for p in self.frozen_probes} | set(cross_features)
             frozen_feats = self.frozen_ext.extract(images, frozen_features, with_grad=False) if frozen_features else {}
 
             ft_feats: dict[FeatureType, Tensor] = {}
@@ -299,23 +299,23 @@ class ProbeTrainer:
 
             # Cross-eval: apply teacher_full probe to predicted features
             if teacher_full_probe:
-                for target in cross_targets:
-                    feat = frozen_feats.get(target)
+                for f in cross_features:
+                    feat = frozen_feats.get(f)
                     if feat is None:
                         continue
                     scale = H_mask // feat.shape[1]
                     logits = teacher_full_probe.head(feat)
-                    cross_losses[target] += implicit_upsample_ce(logits, masks, scale).item() * B
+                    cross_losses[f] += implicit_upsample_ce(logits, masks, scale).item() * B
                     preds = logits.argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
-                    cross_ious[target].update(preds, masks)
+                    cross_ious[f].update(preds, masks)
 
             n += B
 
         result = {f"{name}/val_loss": losses[name] / n for name in losses}
         result |= {f"{name}/val_miou": ious[name].compute().item() for name in ious}
-        for target in cross_targets:
-            result[f"cross/tch_full_on_{ABBREV[target]}/val_loss"] = cross_losses[target] / n
-            result[f"cross/tch_full_on_{ABBREV[target]}/val_miou"] = cross_ious[target].compute().item()
+        for f in cross_features:
+            result[f"cross/tch_full_on_{ABBREV[f]}/val_loss"] = cross_losses[f] / n
+            result[f"cross/tch_full_on_{ABBREV[f]}/val_miou"] = cross_ious[f].compute().item()
         return result
 
 
@@ -387,7 +387,7 @@ def main(cfg: Config) -> None:
     backbone_name = ckpt["backbone"]
     model_cfg = dacite.from_dict(ActiveCanViTConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]})
 
-    def make_model(train: bool = False) -> ActiveCanViT:
+    def make_model(trainable: bool = False) -> ActiveCanViT:
         bb = create_backbone(backbone_name, pretrained=False)
         policy = None
         if (pc := ckpt.get("policy_config")) is not None:
@@ -395,7 +395,7 @@ def main(cfg: Config) -> None:
         m = ActiveCanViT(backbone=bb, cfg=model_cfg, policy=policy)
         m.load_state_dict(ckpt["state_dict"], strict=False)
         m = m.to(device)
-        if train:
+        if trainable:
             m.train()
         else:
             m.eval()
@@ -403,8 +403,8 @@ def main(cfg: Config) -> None:
                 p.requires_grad_(False)
         return m
 
-    frozen_model = make_model(train=False)
-    ft_model = make_model(train=True) if cfg.finetune else None
+    frozen_model = make_model(trainable=False)
+    ft_model = make_model(trainable=True) if cfg.finetune_features else None
 
     # Scene norm
     scene_norm = None
@@ -415,7 +415,7 @@ def main(cfg: Config) -> None:
         scene_norm = scene_norm.eval().to(device)
 
     # Teacher
-    need_teacher = bool(set(cfg.frozen) & {"teacher_full", "teacher_glimpse"})
+    need_teacher = bool(set(cfg.frozen_features) & {"teacher_full", "teacher_glimpse"})
     teacher = None
     if need_teacher:
         teacher = create_backbone(backbone_name, pretrained=True)
@@ -440,7 +440,7 @@ def main(cfg: Config) -> None:
             return teacher_dim
         return teacher.embed_dim if teacher else teacher_dim
 
-    # Extractors
+    # Extractors (ft_ext has no teacher - finetune only supports AVP features)
     frozen_ext = FeatureExtractor(frozen_model, scene_norm, teacher, canvas_grid, glimpse_grid, glimpse_px, teacher_patch_size, device)
     ft_ext = FeatureExtractor(ft_model, scene_norm, None, canvas_grid, glimpse_grid, glimpse_px, teacher_patch_size, device) if ft_model else None
 
@@ -461,8 +461,8 @@ def main(cfg: Config) -> None:
         sched = SequentialLR(opt, [warmup, cosine], [warmup_steps])
         return Probe(name, feature, finetune, head, opt, sched)
 
-    probes = [make_probe(f, f, False) for f in cfg.frozen]
-    probes += [make_probe(f"ft_{f}", f, True) for f in cfg.finetune]
+    probes = [make_probe(f, f, False) for f in cfg.frozen_features]
+    probes += [make_probe(f"ft_{f}", f, True) for f in cfg.finetune_features]
 
     trainer = ProbeTrainer(probes, frozen_ext, ft_ext, ft_model, device, cfg.grad_clip)
 
@@ -514,7 +514,7 @@ def main(cfg: Config) -> None:
                         save_dict["backbone"] = ft_model.state_dict()
                     torch.save(save_dict, ckpt_path)
                     log.info(f"Step {step}: new best {p.name} mIoU: {miou:.4f}")
-                postfix[p.name[:6]] = f"{miou:.3f}"
+                postfix[ABBREV.get(p.name.replace("ft_", ""), p.name[:6])] = f"{miou:.3f}"
             pbar.set_postfix(postfix)
 
             # Viz
