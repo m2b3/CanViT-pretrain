@@ -177,10 +177,10 @@ class FeatureExtractor:
         avp_features = {"hidden", "predicted_norm", "predicted_denorm"}
         if features & avp_features:
             with ctx:
-                canvas = self.model.init_canvas(B, self.canvas_grid)
-                cls = self.model.init_cls(B)
+                canvas = self.model.init_canvas(batch_size=B, canvas_grid_size=self.canvas_grid)
+                cls = self.model.init_cls(batch_size=B)
                 vp = Viewpoint(torch.zeros(B, 2, device=self.device), torch.ones(B, device=self.device))
-                out = self.model.forward_step(images, canvas, cls, vp, self.glimpse_px)
+                out = self.model.forward_step(image=images, canvas=canvas, cls=cls, viewpoint=vp, glimpse_size_px=self.glimpse_px)
 
                 if "hidden" in features:
                     result["hidden"] = self.model.get_spatial(out.canvas).view(B, self.canvas_grid, self.canvas_grid, -1)
