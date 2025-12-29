@@ -36,7 +36,9 @@ from canvit.hub import create_backbone
 from canvit.policy import PolicyConfig, PolicyHead
 from canvit.viewpoint import Viewpoint
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 log = logging.getLogger(__name__)
 
 # === Constants ===
@@ -45,9 +47,16 @@ IGNORE_LABEL = 255
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 
-FeatureType = Literal["hidden", "predicted_norm", "predicted_denorm", "teacher_full", "teacher_glimpse"]
-ABBREV = {"hidden": "hid", "predicted_norm": "prd_n", "predicted_denorm": "prd_d",
-          "teacher_full": "tch_f", "teacher_glimpse": "tch_g"}
+FeatureType = Literal[
+    "hidden", "predicted_norm", "predicted_denorm", "teacher_full", "teacher_glimpse"
+]
+ABBREV = {
+    "hidden": "hid",
+    "predicted_norm": "prd_n",
+    "predicted_denorm": "prd_d",
+    "teacher_full": "tch_f",
+    "teacher_glimpse": "tch_g",
+}
 
 
 # === Config ===
@@ -57,7 +66,15 @@ class Config:
     ade20k_root: Path = Path("/datasets/ADE20k/ADEChallengeData2016")
 
     # Which feature types to train probes on
-    frozen_features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "predicted_denorm", "teacher_full", "teacher_glimpse"])
+    frozen_features: list[FeatureType] = field(
+        default_factory=lambda: [
+            "hidden",
+            "predicted_norm",
+            "predicted_denorm",
+            "teacher_full",
+            "teacher_glimpse",
+        ]
+    )
     finetune_features: list[FeatureType] = field(default_factory=lambda: ["hidden"])
 
     image_size: int = 512
@@ -86,7 +103,11 @@ def implicit_upsample_ce(logits: Tensor, masks: Tensor, scale: int) -> Tensor:
     """CE with implicit nearest-neighbor upsampling. ~95x memory reduction."""
     B, C, h, w = logits.shape
     log_probs = F.log_softmax(logits, dim=1).permute(0, 2, 3, 1).reshape(-1, C)
-    mask_patches = masks.reshape(B, h, scale, w, scale).permute(0, 1, 3, 2, 4).reshape(-1, scale * scale)
+    mask_patches = (
+        masks.reshape(B, h, scale, w, scale)
+        .permute(0, 1, 3, 2, 4)
+        .reshape(-1, scale * scale)
+    )
     valid = mask_patches != IGNORE_LABEL
     gathered = log_probs.gather(1, mask_patches.clamp(0, C - 1).long())
     return -(gathered * valid).sum() / valid.sum().clamp(min=1)
@@ -95,6 +116,7 @@ def implicit_upsample_ce(logits: Tensor, masks: Tensor, scale: int) -> Tensor:
 # === Probe head ===
 class ProbeHead(nn.Module):
     """BN + 1x1 conv."""
+
     def __init__(self, embed_dim: int) -> None:
         super().__init__()
         self.bn = nn.BatchNorm2d(embed_dim)
@@ -107,23 +129,29 @@ class ProbeHead(nn.Module):
 
 # === Dataset ===
 def make_train_transform(size: int) -> A.Compose:
-    return A.Compose([
-        A.RandomScale(scale_limit=(-0.5, 1.0), p=1.0),  # 0.5x to 2.0x
-        A.HorizontalFlip(p=0.5),
-        A.PadIfNeeded(size, size, border_mode=0, fill=0, fill_mask=IGNORE_LABEL),
-        A.RandomCrop(size, size),
-    ])
+    return A.Compose(
+        [
+            A.RandomScale(scale_limit=(-0.5, 1.0), p=1.0),  # 0.5x to 2.0x
+            A.HorizontalFlip(p=0.5),
+            A.PadIfNeeded(size, size, border_mode=0, fill=0, fill_mask=IGNORE_LABEL),
+            A.RandomCrop(size, size),
+        ]
+    )
 
 
 class ADE20kDataset(Dataset):
-    def __init__(self, root: Path, split: str, size: int, augment: bool = False) -> None:
+    def __init__(
+        self, root: Path, split: str, size: int, augment: bool = False
+    ) -> None:
         self.size = size
         self.transform = make_train_transform(size) if augment else None
         img_dir = root / "images" / split
         ann_dir = root / "annotations" / split
         self.imgs = sorted(img_dir.glob("*.jpg"))
         self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
-        log.info(f"ADE20k {split}: {len(self)} images @ {size}x{size}, augment={augment}")
+        log.info(
+            f"ADE20k {split}: {len(self)} images @ {size}x{size}, augment={augment}"
+        )
 
     def __len__(self) -> int:
         return len(self.imgs)
@@ -137,8 +165,16 @@ class ADE20kDataset(Dataset):
             img, mask = out["image"], out["mask"]
         else:
             # Validation: simple resize
-            img = np.array(Image.fromarray(img).resize((self.size, self.size), Image.Resampling.BILINEAR))
-            mask = np.array(Image.fromarray(mask).resize((self.size, self.size), Image.Resampling.NEAREST))
+            img = np.array(
+                Image.fromarray(img).resize(
+                    (self.size, self.size), Image.Resampling.BILINEAR
+                )
+            )
+            mask = np.array(
+                Image.fromarray(mask).resize(
+                    (self.size, self.size), Image.Resampling.NEAREST
+                )
+            )
 
         img_t = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
         img_t = (img_t - IMAGENET_MEAN.view(3, 1, 1)) / IMAGENET_STD.view(3, 1, 1)
@@ -181,9 +217,17 @@ class Probe:
 
 # === Feature extraction ===
 class FeatureExtractor:
-    def __init__(self, model: ActiveCanViT, scene_norm: PositionAwareNorm | None,
-                 teacher: DINOv3Backbone | None, canvas_grid: int, glimpse_grid: int,
-                 glimpse_px: int, teacher_patch_size: int, device: torch.device):
+    def __init__(
+        self,
+        model: ActiveCanViT,
+        scene_norm: PositionAwareNorm | None,
+        teacher: DINOv3Backbone | None,
+        canvas_grid: int,
+        glimpse_grid: int,
+        glimpse_px: int,
+        teacher_patch_size: int,
+        device: torch.device,
+    ):
         self.model = model
         self.scene_norm = scene_norm
         self.teacher = teacher
@@ -193,7 +237,9 @@ class FeatureExtractor:
         self.teacher_patch_size = teacher_patch_size
         self.device = device
 
-    def extract(self, images: Tensor, features: set[FeatureType], with_grad: bool) -> dict[FeatureType, Tensor]:
+    def extract(
+        self, images: Tensor, features: set[FeatureType], with_grad: bool
+    ) -> dict[FeatureType, Tensor]:
         B = images.shape[0]
         result: dict[FeatureType, Tensor] = {}
         ctx = torch.enable_grad() if with_grad else torch.no_grad()
@@ -201,39 +247,75 @@ class FeatureExtractor:
         avp_features = {"hidden", "predicted_norm", "predicted_denorm"}
         if features & avp_features:
             with ctx:
-                canvas = self.model.init_canvas(batch_size=B, canvas_grid_size=self.canvas_grid)
+                canvas = self.model.init_canvas(
+                    batch_size=B, canvas_grid_size=self.canvas_grid
+                )
                 cls = self.model.init_cls(batch_size=B)
-                vp = Viewpoint(torch.zeros(B, 2, device=self.device), torch.ones(B, device=self.device))
-                out = self.model.forward_step(image=images, canvas=canvas, cls=cls, viewpoint=vp, glimpse_size_px=self.glimpse_px)
+                vp = Viewpoint(
+                    torch.zeros(B, 2, device=self.device),
+                    torch.ones(B, device=self.device),
+                )
+                out = self.model.forward_step(
+                    image=images,
+                    canvas=canvas,
+                    cls=cls,
+                    viewpoint=vp,
+                    glimpse_size_px=self.glimpse_px,
+                )
 
                 if "hidden" in features:
-                    result["hidden"] = self.model.get_spatial(out.canvas).view(B, self.canvas_grid, self.canvas_grid, -1)
+                    result["hidden"] = self.model.get_spatial(out.canvas).view(
+                        B, self.canvas_grid, self.canvas_grid, -1
+                    )
                 if "predicted_norm" in features or "predicted_denorm" in features:
                     pred = self.model.predict_teacher_scene(out.canvas)
                     if "predicted_norm" in features:
-                        result["predicted_norm"] = pred.view(B, self.canvas_grid, self.canvas_grid, -1)
+                        result["predicted_norm"] = pred.view(
+                            B, self.canvas_grid, self.canvas_grid, -1
+                        )
                     if "predicted_denorm" in features:
-                        denorm = self.scene_norm.denormalize(pred) if self.scene_norm else pred
-                        result["predicted_denorm"] = denorm.view(B, self.canvas_grid, self.canvas_grid, -1)
+                        denorm = (
+                            self.scene_norm.denormalize(pred)
+                            if self.scene_norm
+                            else pred
+                        )
+                        result["predicted_denorm"] = denorm.view(
+                            B, self.canvas_grid, self.canvas_grid, -1
+                        )
 
         if self.teacher is not None:
-            with torch.no_grad():  # not inference_mode - tensors must be usable by probe heads
+            with (
+                torch.no_grad()
+            ):  # not inference_mode - tensors must be usable by probe heads
                 if "teacher_full" in features:
                     feats = self.teacher.forward_norm_features(images)
-                    result["teacher_full"] = feats.patches.view(B, self.canvas_grid, self.canvas_grid, -1)
+                    result["teacher_full"] = feats.patches.view(
+                        B, self.canvas_grid, self.canvas_grid, -1
+                    )
                 if "teacher_glimpse" in features:
                     sz = self.glimpse_grid * self.teacher_patch_size
-                    small = F.interpolate(images, (sz, sz), mode="bilinear", align_corners=False)
+                    small = F.interpolate(
+                        images, (sz, sz), mode="bilinear", align_corners=False
+                    )
                     feats = self.teacher.forward_norm_features(small)
-                    result["teacher_glimpse"] = feats.patches.view(B, self.glimpse_grid, self.glimpse_grid, -1)
+                    result["teacher_glimpse"] = feats.patches.view(
+                        B, self.glimpse_grid, self.glimpse_grid, -1
+                    )
 
         return result
 
 
 # === Training ===
 class ProbeTrainer:
-    def __init__(self, probes: list[Probe], frozen_ext: FeatureExtractor, ft_ext: FeatureExtractor | None,
-                 ft_model: ActiveCanViT | None, device: torch.device, grad_clip: float):
+    def __init__(
+        self,
+        probes: list[Probe],
+        frozen_ext: FeatureExtractor,
+        ft_ext: FeatureExtractor | None,
+        ft_model: ActiveCanViT | None,
+        device: torch.device,
+        grad_clip: float,
+    ):
         self.probes = probes
         self.frozen_ext = frozen_ext
         self.ft_ext = ft_ext
@@ -258,7 +340,9 @@ class ProbeTrainer:
                 p.optimizer.zero_grad()
                 loss = implicit_upsample_ce(p.head(feat.detach()), masks, scale)
                 loss.backward()
-                grad_norms[p.name] = nn.utils.clip_grad_norm_(p.head.parameters(), self.grad_clip).detach()
+                grad_norms[p.name] = nn.utils.clip_grad_norm_(
+                    p.head.parameters(), self.grad_clip
+                ).detach()
                 p.optimizer.step()
                 p.scheduler.step()
                 p.accumulate_loss(loss)
@@ -266,14 +350,18 @@ class ProbeTrainer:
         # Finetune probes
         if self.ft_ext is not None and self.ft_model is not None:
             for p in self.ft_probes:
-                feat = self.ft_ext.extract(images, {p.feature}, with_grad=True)[p.feature]
+                feat = self.ft_ext.extract(images, {p.feature}, with_grad=True)[
+                    p.feature
+                ]
                 scale = H_mask // feat.shape[1]
                 p.head.train()
                 p.optimizer.zero_grad()
                 loss = implicit_upsample_ce(p.head(feat), masks, scale)
                 loss.backward()
                 params = list(self.ft_model.parameters()) + list(p.head.parameters())
-                grad_norms[p.name] = nn.utils.clip_grad_norm_(params, self.grad_clip).detach()
+                grad_norms[p.name] = nn.utils.clip_grad_norm_(
+                    params, self.grad_clip
+                ).detach()
                 p.optimizer.step()
                 p.scheduler.step()
                 p.accumulate_loss(loss)
@@ -285,39 +373,66 @@ class ProbeTrainer:
         for p in self.probes:
             p.head.eval()
 
-        ious = {p.name: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(self.device)
-                for p in self.probes}
+        ious = {
+            p.name: MulticlassJaccardIndex(
+                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
+            ).to(self.device)
+            for p in self.probes
+        }
         losses = {p.name: 0.0 for p in self.probes}
 
         # Cross-eval: teacher_full probe on predicted features
-        teacher_full_probe = next((p for p in self.probes if p.name == "teacher_full"), None)
-        cross_features = ["predicted_norm", "predicted_denorm"] if teacher_full_probe else []
-        cross_ious = {f: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(self.device)
-                      for f in cross_features}
+        teacher_full_probe = next(
+            (p for p in self.probes if p.name == "teacher_full"), None
+        )
+        cross_features = (
+            ["predicted_norm", "predicted_denorm"] if teacher_full_probe else []
+        )
+        cross_ious = {
+            f: MulticlassJaccardIndex(
+                NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro"
+            ).to(self.device)
+            for f in cross_features
+        }
         cross_losses = {f: 0.0 for f in cross_features}
+
+        # Precompute feature sets (avoid recomputing per batch)
+        frozen_feature_set = {p.feature for p in self.frozen_probes} | set(
+            cross_features
+        )
+        ft_feature_set = {p.feature for p in self.ft_probes}
 
         n = 0
         for images, masks in loader:
             images, masks = images.to(self.device), masks.to(self.device)
             B, H_mask = images.shape[0], masks.shape[1]
 
-            # Extract all features (include cross-eval features)
-            frozen_features = {p.feature for p in self.frozen_probes} | set(cross_features)
-            frozen_feats = self.frozen_ext.extract(images, frozen_features, with_grad=False) if frozen_features else {}
+            frozen_feats = (
+                self.frozen_ext.extract(images, frozen_feature_set, with_grad=False)
+                if frozen_feature_set
+                else {}
+            )
 
             ft_feats: dict[FeatureType, Tensor] = {}
-            if self.ft_ext is not None:
-                ft_features = {p.feature for p in self.ft_probes}
-                ft_feats = self.ft_ext.extract(images, ft_features, with_grad=False) if ft_features else {}
+            if self.ft_ext is not None and ft_feature_set:
+                ft_feats = self.ft_ext.extract(images, ft_feature_set, with_grad=False)
 
             for p in self.probes:
-                feat = ft_feats.get(p.feature) if p.finetune else frozen_feats.get(p.feature)
+                feat = (
+                    ft_feats.get(p.feature)
+                    if p.finetune
+                    else frozen_feats.get(p.feature)
+                )
                 if feat is None:
                     continue
                 scale = H_mask // feat.shape[1]
                 logits = p.head(feat)
                 losses[p.name] += implicit_upsample_ce(logits, masks, scale).item() * B
-                preds = logits.argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
+                preds = (
+                    logits.argmax(1)
+                    .repeat_interleave(scale, 1)
+                    .repeat_interleave(scale, 2)
+                )
                 ious[p.name].update(preds, masks)
 
             # Cross-eval: apply teacher_full probe to predicted features
@@ -328,8 +443,14 @@ class ProbeTrainer:
                         continue
                     scale = H_mask // feat.shape[1]
                     logits = teacher_full_probe.head(feat)
-                    cross_losses[f] += implicit_upsample_ce(logits, masks, scale).item() * B
-                    preds = logits.argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
+                    cross_losses[f] += (
+                        implicit_upsample_ce(logits, masks, scale).item() * B
+                    )
+                    preds = (
+                        logits.argmax(1)
+                        .repeat_interleave(scale, 1)
+                        .repeat_interleave(scale, 2)
+                    )
                     cross_ious[f].update(preds, masks)
 
             n += B
@@ -338,21 +459,35 @@ class ProbeTrainer:
         result |= {f"{name}/val_miou": ious[name].compute().item() for name in ious}
         for f in cross_features:
             result[f"cross/tch_full_on_{ABBREV[f]}/val_loss"] = cross_losses[f] / n
-            result[f"cross/tch_full_on_{ABBREV[f]}/val_miou"] = cross_ious[f].compute().item()
+            result[f"cross/tch_full_on_{ABBREV[f]}/val_miou"] = (
+                cross_ious[f].compute().item()
+            )
         return result
 
 
 # === Visualization ===
-def log_viz(exp: comet_ml.Experiment, step: int, trainer: ProbeTrainer,
-            images: Tensor, masks: Tensor, n_samples: int = 4) -> None:
+def log_viz(
+    exp: comet_ml.Experiment,
+    step: int,
+    trainer: ProbeTrainer,
+    images: Tensor,
+    masks: Tensor,
+    n_samples: int = 4,
+) -> None:
     import matplotlib.pyplot as plt
 
     n = min(n_samples, images.shape[0])
     H_mask = masks.shape[1]
 
     # Get all logits
-    frozen_feats = trainer.frozen_ext.extract(images, {p.feature for p in trainer.frozen_probes}, False)
-    ft_feats = trainer.ft_ext.extract(images, {p.feature for p in trainer.ft_probes}, False) if trainer.ft_ext else {}
+    frozen_feats = trainer.frozen_ext.extract(
+        images, {p.feature for p in trainer.frozen_probes}, False
+    )
+    ft_feats = (
+        trainer.ft_ext.extract(images, {p.feature for p in trainer.ft_probes}, False)
+        if trainer.ft_ext
+        else {}
+    )
 
     logits_dict = {}
     for p in trainer.probes:
@@ -368,14 +503,18 @@ def log_viz(exp: comet_ml.Experiment, step: int, trainer: ProbeTrainer,
     if n == 1:
         axes = axes[np.newaxis, :]
 
-    palette = np.random.RandomState(42).randint(0, 255, (NUM_CLASSES + 1, 3), dtype=np.uint8)
+    palette = np.random.RandomState(42).randint(
+        0, 255, (NUM_CLASSES + 1, 3), dtype=np.uint8
+    )
     palette[NUM_CLASSES] = 0
 
     def colorize(m: np.ndarray) -> np.ndarray:
         return palette[np.where(m == IGNORE_LABEL, NUM_CLASSES, m)]
 
     def denorm(t: Tensor) -> np.ndarray:
-        t = t * IMAGENET_STD.view(3, 1, 1).to(t.device) + IMAGENET_MEAN.view(3, 1, 1).to(t.device)
+        t = t * IMAGENET_STD.view(3, 1, 1).to(t.device) + IMAGENET_MEAN.view(
+            3, 1, 1
+        ).to(t.device)
         return (t.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
 
     for i in range(n):
@@ -386,10 +525,19 @@ def log_viz(exp: comet_ml.Experiment, step: int, trainer: ProbeTrainer,
 
         for j, (name, logits) in enumerate(logits_dict.items()):
             scale = H_mask // logits.shape[2]
-            pred = logits[i].argmax(0).repeat_interleave(scale, 0).repeat_interleave(scale, 1).cpu().numpy()
+            pred = (
+                logits[i]
+                .argmax(0)
+                .repeat_interleave(scale, 0)
+                .repeat_interleave(scale, 1)
+                .cpu()
+                .numpy()
+            )
             axes[i, 2 + j].imshow(colorize(pred))
             abbrev = ABBREV.get(name.replace("ft_", ""), name[:6])
-            axes[i, 2 + j].set_title(f"{'ft_' if name.startswith('ft_') else ''}{abbrev}")
+            axes[i, 2 + j].set_title(
+                f"{'ft_' if name.startswith('ft_') else ''}{abbrev}"
+            )
 
         for ax in axes[i]:
             ax.axis("off")
@@ -402,19 +550,25 @@ def log_viz(exp: comet_ml.Experiment, step: int, trainer: ProbeTrainer,
 # === Main ===
 def main(cfg: Config) -> None:
     torch.set_float32_matmul_precision("high")
-    device = torch.device(cfg.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    device = torch.device(
+        cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     log.info(f"Device: {device}")
 
     # Load checkpoint
     ckpt = load_ckpt(cfg.avp_ckpt, device)
     backbone_name = ckpt["backbone"]
-    model_cfg = dacite.from_dict(ActiveCanViTConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]})
+    model_cfg = dacite.from_dict(
+        ActiveCanViTConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]}
+    )
 
     def make_model(trainable: bool = False) -> ActiveCanViT:
         bb = create_backbone(backbone_name, pretrained=False)
         policy = None
         if (pc := ckpt.get("policy_config")) is not None:
-            policy = PolicyHead(embed_dim=bb.embed_dim, cfg=dacite.from_dict(PolicyConfig, pc))
+            policy = PolicyHead(
+                embed_dim=bb.embed_dim, cfg=dacite.from_dict(PolicyConfig, pc)
+            )
         m = ActiveCanViT(backbone=bb, cfg=model_cfg, policy=policy)
         m.load_state_dict(ckpt["state_dict"], strict=False)
         m = m.to(device)
@@ -433,7 +587,7 @@ def main(cfg: Config) -> None:
     scene_norm = None
     if (ns := ckpt.get("scene_norm_state")) is not None:
         n, d = ns["mean"].shape
-        scene_norm = PositionAwareNorm(n, d, int(n ** 0.5))
+        scene_norm = PositionAwareNorm(n, d, int(n**0.5))
         scene_norm.load_state_dict(ns)
         scene_norm = scene_norm.eval().to(device)
 
@@ -464,8 +618,30 @@ def main(cfg: Config) -> None:
         return teacher.embed_dim if teacher else teacher_dim
 
     # Extractors (ft_ext has no teacher - finetune only supports AVP features)
-    frozen_ext = FeatureExtractor(frozen_model, scene_norm, teacher, canvas_grid, glimpse_grid, glimpse_px, teacher_patch_size, device)
-    ft_ext = FeatureExtractor(ft_model, scene_norm, None, canvas_grid, glimpse_grid, glimpse_px, teacher_patch_size, device) if ft_model else None
+    frozen_ext = FeatureExtractor(
+        frozen_model,
+        scene_norm,
+        teacher,
+        canvas_grid,
+        glimpse_grid,
+        glimpse_px,
+        teacher_patch_size,
+        device,
+    )
+    ft_ext = (
+        FeatureExtractor(
+            ft_model,
+            scene_norm,
+            None,
+            canvas_grid,
+            glimpse_grid,
+            glimpse_px,
+            teacher_patch_size,
+            device,
+        )
+        if ft_model
+        else None
+    )
 
     # Create probes
     peak_lr = cfg.peak_lr
@@ -474,13 +650,17 @@ def main(cfg: Config) -> None:
     def make_probe(name: str, feature: FeatureType, finetune: bool) -> Probe:
         head = ProbeHead(get_dim(feature)).to(device)
         if finetune and ft_model is not None:
-            params = [{"params": list(ft_model.parameters()), "lr": cfg.ft_backbone_lr},
-                      {"params": list(head.parameters()), "lr": peak_lr}]
+            params = [
+                {"params": list(ft_model.parameters()), "lr": cfg.ft_backbone_lr},
+                {"params": list(head.parameters()), "lr": peak_lr},
+            ]
         else:
             params = [{"params": list(head.parameters()), "lr": peak_lr}]
         opt = AdamW(params, weight_decay=cfg.weight_decay)
         warmup = LinearLR(opt, cfg.min_lr / peak_lr, 1.0, max(1, warmup_steps))
-        cosine = CosineAnnealingLR(opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr)
+        cosine = CosineAnnealingLR(
+            opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr
+        )
         sched = SequentialLR(opt, [warmup, cosine], [warmup_steps])
         return Probe(name, feature, finetune, head, opt, sched)
 
@@ -494,14 +674,33 @@ def main(cfg: Config) -> None:
     # Data
     train_ds = ADE20kDataset(cfg.ade20k_root, "training", cfg.image_size, augment=True)
     val_ds = ADE20kDataset(cfg.ade20k_root, "validation", cfg.image_size, augment=False)
-    train_loader = DataLoader(train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_ds, cfg.eval_batch_size, num_workers=cfg.num_workers, pin_memory=True)
+    train_loader = DataLoader(
+        train_ds,
+        cfg.batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_ds, cfg.eval_batch_size, num_workers=cfg.num_workers, pin_memory=True
+    )
 
     # Comet
-    exp = comet_ml.Experiment(project_name=cfg.comet_project, workspace=cfg.comet_workspace)
+    exp = comet_ml.Experiment(
+        project_name=cfg.comet_project, workspace=cfg.comet_workspace
+    )
     exp.log_parameters(asdict(cfg))
-    exp.log_parameters({"peak_lr": peak_lr, "warmup_steps": warmup_steps, "canvas_grid": canvas_grid,
-                        "hidden_dim": hidden_dim, "teacher_dim": teacher_dim, "backbone": backbone_name})
+    exp.log_parameters(
+        {
+            "peak_lr": peak_lr,
+            "warmup_steps": warmup_steps,
+            "canvas_grid": canvas_grid,
+            "hidden_dim": hidden_dim,
+            "teacher_dim": teacher_dim,
+            "backbone": backbone_name,
+        }
+    )
 
     # Training loop
     step = 0
@@ -515,7 +714,10 @@ def main(cfg: Config) -> None:
             train_iter = iter(train_loader)
             images, masks = next(train_iter)
 
-        images, masks = images.to(device, non_blocking=True), masks.to(device, non_blocking=True)
+        images, masks = (
+            images.to(device, non_blocking=True),
+            masks.to(device, non_blocking=True),
+        )
 
         # Validate before training (step 0 = baseline)
         if step % cfg.val_every == 0:
@@ -537,7 +739,12 @@ def main(cfg: Config) -> None:
                         save_dict["backbone"] = ft_model.state_dict()
                     torch.save(save_dict, ckpt_path)
                     log.info(f"Step {step}: new best {p.name} mIoU: {miou:.4f}")
-                postfix[ABBREV.get(p.name.replace("ft_", ""), p.name[:6])] = f"{miou:.3f}"
+                key = (
+                    f"ft_{ABBREV[p.feature]}"
+                    if p.finetune
+                    else ABBREV.get(p.name, p.name[:6])
+                )
+                postfix[key] = f"{miou:.3f}"
             pbar.set_postfix(postfix)
 
             # Viz
