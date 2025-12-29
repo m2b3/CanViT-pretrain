@@ -457,7 +457,7 @@ def main(cfg: Config) -> None:
         else:
             params = [{"params": list(head.parameters()), "lr": peak_lr}]
         opt = AdamW(params, weight_decay=cfg.weight_decay)
-        warmup = LinearLR(opt, 1e-3, 1.0, max(1, warmup_steps))
+        warmup = LinearLR(opt, cfg.min_lr / peak_lr, 1.0, max(1, warmup_steps))
         cosine = CosineAnnealingLR(opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr)
         sched = SequentialLR(opt, [warmup, cosine], [warmup_steps])
         return Probe(name, feature, finetune, head, opt, sched)
