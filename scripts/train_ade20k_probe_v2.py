@@ -265,14 +265,21 @@ class ProbeTrainer:
         ious = {p.name: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(self.device)
                 for p in self.probes}
         losses = {p.name: 0.0 for p in self.probes}
-        n = 0
 
+        # Cross-eval: teacher_full probe on predicted features
+        teacher_full_probe = next((p for p in self.probes if p.name == "teacher_full"), None)
+        cross_targets = ["predicted_norm", "predicted_denorm"] if teacher_full_probe else []
+        cross_ious = {t: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(self.device)
+                      for t in cross_targets}
+        cross_losses = {t: 0.0 for t in cross_targets}
+
+        n = 0
         for images, masks in loader:
             images, masks = images.to(self.device), masks.to(self.device)
             B, H_mask = images.shape[0], masks.shape[1]
 
-            # Extract all features
-            frozen_features = {p.feature for p in self.frozen_probes}
+            # Extract all features (include cross targets)
+            frozen_features = {p.feature for p in self.frozen_probes} | set(cross_targets)
             frozen_feats = self.frozen_ext.extract(images, frozen_features, with_grad=False) if frozen_features else {}
 
             ft_feats: dict[FeatureType, Tensor] = {}
@@ -290,10 +297,26 @@ class ProbeTrainer:
                 preds = logits.argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
                 ious[p.name].update(preds, masks)
 
+            # Cross-eval: apply teacher_full probe to predicted features
+            if teacher_full_probe:
+                for target in cross_targets:
+                    feat = frozen_feats.get(target)
+                    if feat is None:
+                        continue
+                    scale = H_mask // feat.shape[1]
+                    logits = teacher_full_probe.head(feat)
+                    cross_losses[target] += implicit_upsample_ce(logits, masks, scale).item() * B
+                    preds = logits.argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
+                    cross_ious[target].update(preds, masks)
+
             n += B
 
-        return {f"{name}/val_loss": losses[name] / n for name in losses} | \
-               {f"{name}/val_miou": ious[name].compute().item() for name in ious}
+        result = {f"{name}/val_loss": losses[name] / n for name in losses}
+        result |= {f"{name}/val_miou": ious[name].compute().item() for name in ious}
+        for target in cross_targets:
+            result[f"cross/tch_full_on_{ABBREV[target]}/val_loss"] = cross_losses[target] / n
+            result[f"cross/tch_full_on_{ABBREV[target]}/val_miou"] = cross_ious[target].compute().item()
+        return result
 
 
 # === Visualization ===
