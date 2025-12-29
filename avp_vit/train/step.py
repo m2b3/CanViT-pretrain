@@ -32,19 +32,21 @@ class StepMetrics(NamedTuple):
 
     total_loss: Tensor
     branches: dict[tuple[ViewpointType, ViewpointType], BranchMetrics]
+    n_glimpses: int  # trajectory length this step
 
 
 @dataclass
 class ChunkState:
-    """Mutable state for TBPTT chunk processing."""
+    """State for TBPTT chunk processing."""
 
     canvas: Tensor
     cls_tok: Tensor
     vpe: Tensor | None
-    chunk_scene: Tensor  # accumulated loss (with grad)
+    chunk_scene: Tensor  # loss accumulator (with grad)
     chunk_cls: Tensor
-    total_scene: Tensor  # accumulated loss (detached, for metrics)
+    total_scene: Tensor  # loss accumulator (detached, for metrics)
     total_cls: Tensor
+    n_steps: int
     scene_pred: Tensor
     cls_pred: Tensor
 
@@ -58,25 +60,32 @@ def training_step(
     glimpse_size_px: int,
     canvas_grid_size: int,
     n_branches: int,
-    n_glimpses: int,
+    min_glimpses: int,
+    continue_prob: float,
     min_viewpoint_scale: float,
     amp_ctx: AbstractContextManager,
-    use_checkpointing: bool = True,
+    use_checkpointing: bool,
 ) -> StepMetrics:
-    """Memory-efficient training with truncated BPTT.
+    """Training with truncated BPTT (1-step lookahead).
 
-    BPTT window = 2: backprop flows through at most 2 consecutive glimpses.
-    State carries forward but is detached between chunks.
+    Chunks of 2 steps: backward after every 2 glimpses, gradient flows through both.
+    Trajectory length is stochastic: min_glimpses + geometric(continue_prob).
+    Memory is constant due to chunking - no max needed.
     """
     assert n_branches >= 2 and n_branches % 2 == 0
-    assert n_glimpses >= 2
+    assert min_glimpses >= 2
+    assert 0.0 <= continue_prob <= 1.0
     device = images.device
     B = images.shape[0]
 
     canvas_init = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
     cls_init = model.init_cls(batch_size=B)
 
-    # Viewpoint types: random permutation of half/half at each timestep
+    # Sample trajectory length (shared across branches)
+    n_glimpses = min_glimpses
+    while random.random() < continue_prob:
+        n_glimpses += 1
+
     vp_types = _assign_viewpoint_types(
         n_glimpses=n_glimpses,
         n_branches=n_branches,
@@ -139,17 +148,18 @@ def training_step(
         loss_t0: tuple[Tensor, Tensor, Tensor, Tensor],
         retain_first_chunk: bool,
     ) -> None:
-        """Run trajectory with truncated BPTT. Backward after every 2 glimpses."""
-        scene_loss_t0, cls_loss_t0, scene_pred_t0, cls_pred_t0 = loss_t0
+        """TBPTT with 1-step lookahead: backward every 2 steps, gradient flows through both."""
+        scene_t0, cls_t0, scene_pred_t0, cls_pred_t0 = loss_t0
 
         state = ChunkState(
             canvas=out_t0.canvas,
             cls_tok=out_t0.cls,
             vpe=out_t0.vpe,
-            chunk_scene=scene_loss_t0.float(),
-            chunk_cls=cls_loss_t0.float(),
-            total_scene=scene_loss_t0.detach().float(),
-            total_cls=cls_loss_t0.detach().float(),
+            chunk_scene=scene_t0.float(),
+            chunk_cls=cls_t0.float(),
+            total_scene=scene_t0.detach().float(),
+            total_cls=cls_t0.detach().float(),
+            n_steps=1,
             scene_pred=scene_pred_t0,
             cls_pred=cls_pred_t0,
         )
@@ -162,20 +172,23 @@ def training_step(
                 out = forward_glimpse(canvas=state.canvas, cls=state.cls_tok, vp=vp, use_ckpt=use_ckpt)
                 sl, cl, state.scene_pred, state.cls_pred = compute_loss(out)
 
-                state.chunk_scene = state.chunk_scene + sl.float()
-                state.chunk_cls = state.chunk_cls + cl.float()
-                state.total_scene = state.total_scene + sl.detach().float()
-                state.total_cls = state.total_cls + cl.detach().float()
+            state.chunk_scene = state.chunk_scene + sl.float()
+            state.chunk_cls = state.chunk_cls + cl.float()
+            state.total_scene = state.total_scene + sl.detach().float()
+            state.total_cls = state.total_cls + cl.detach().float()
+            state.n_steps += 1
 
             is_chunk_end = (t % 2 == 1)
-            is_last_step = (t == n_glimpses - 1)
+            is_last = (t == n_glimpses - 1)
 
             if is_chunk_end:
+                # Backward chunk (gradient flows through both steps in chunk)
                 chunk_loss = (state.chunk_scene + state.chunk_cls) / n_glimpses / n_branches
                 retain = retain_first_chunk if t == 1 else False
                 chunk_loss.backward(retain_graph=retain)
 
-                if not is_last_step:
+                # Detach for next chunk
+                if not is_last:
                     state.canvas = out.canvas.detach()
                     state.cls_tok = out.cls.detach()
                     state.vpe = out.vpe.detach() if out.vpe is not None else None
@@ -186,15 +199,15 @@ def training_step(
             else:
                 state.canvas, state.cls_tok, state.vpe = out.canvas, out.cls, out.vpe
 
-        # Trailing step (if n_glimpses is odd, last chunk has 1 step)
+        # Trailing step (if n_glimpses is odd)
         if (n_glimpses - 1) % 2 == 0:
             chunk_loss = (state.chunk_scene + state.chunk_cls) / n_glimpses / n_branches
             chunk_loss.backward()
 
         # Record metrics
-        traj_losses[branch_idx] = (state.total_scene + state.total_cls) / n_glimpses
-        scene_losses[branch_idx] = state.total_scene / n_glimpses
-        cls_losses[branch_idx] = state.total_cls / n_glimpses
+        traj_losses[branch_idx] = (state.total_scene + state.total_cls) / state.n_steps
+        scene_losses[branch_idx] = state.total_scene / state.n_steps
+        cls_losses[branch_idx] = state.total_cls / state.n_steps
         scene_cos[branch_idx] = F.cosine_similarity(state.scene_pred, scene_target, dim=-1).mean()
         cls_cos[branch_idx] = F.cosine_similarity(state.cls_pred, cls_target, dim=-1).mean()
 
@@ -234,7 +247,7 @@ def training_step(
         cls_cos=cls_cos,
     )
 
-    return StepMetrics(total_loss=traj_losses.mean(), branches=branches)
+    return StepMetrics(total_loss=traj_losses.mean(), branches=branches, n_glimpses=n_glimpses)
 
 
 def _assign_viewpoint_types(

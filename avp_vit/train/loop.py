@@ -267,7 +267,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         log.info(f"Warming up normalizers ({cfg.norm_warmup_images} images)...")
         warmup_normalizer(scene_norm, cls_norm, train_loader, compute_raw_targets, cfg.norm_warmup_images, scene_size, cfg.device)
 
-    log.info(f"Training: {cfg.n_branches} branches × {cfg.n_glimpses} glimpses (balanced RANDOM/FULL at t0, RANDOM/POLICY at t>=1)")
+    log.info(f"Training: {cfg.n_branches} branches, min_glimpses={cfg.min_glimpses}, continue_prob={cfg.continue_prob}")
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
@@ -363,9 +363,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
                 n_branches=cfg.n_branches,
-                n_glimpses=cfg.n_glimpses,
+                min_glimpses=cfg.min_glimpses,
+                continue_prob=cfg.continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 amp_ctx=amp_ctx,
+                use_checkpointing=cfg.use_checkpointing,
             )
 
             # Clip policy grads first (if present), then whole model
@@ -377,6 +379,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             # Update EMA for all metrics
             ema.update("total_loss", step_metrics.total_loss)
+            ema.update("n_glimpses", torch.tensor(step_metrics.n_glimpses, dtype=torch.float32))
             for (t0, t1), m in step_metrics.branches.items():
                 prefix = f"{t0.name.lower()}_{t1.name.lower()}"
                 ema.update(f"{prefix}/loss", m.loss)

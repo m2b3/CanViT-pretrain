@@ -27,7 +27,9 @@ class Config:
     n_branches: int = (
         2  # must be >= 2 and even; K/2 RANDOM/FULL at t0, K/2 RANDOM/POLICY at t>=1
     )
-    n_glimpses: int = 2  # >= 2; t=0 stored, t>=1 checkpointed
+    min_glimpses: int = 2  # minimum trajectory length (>= 2)
+    continue_prob: float = 0.5  # prob of continuing past min_glimpses (geometric)
+    use_checkpointing: bool = True  # checkpoint odd steps in TBPTT chunks
     grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 64
