@@ -19,6 +19,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import tyro
+from canvit.backbone.dinov3 import DINOv3Backbone
+from canvit.hub import create_backbone
+from canvit.policy import PolicyConfig, PolicyHead
+from canvit.viewpoint import Viewpoint
 from PIL import Image
 from torch import Tensor
 from torch.optim import AdamW
@@ -26,15 +31,10 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
-import tyro
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.checkpoint import load as load_ckpt
 from avp_vit.train.norm import PositionAwareNorm
-from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit.hub import create_backbone
-from canvit.policy import PolicyConfig, PolicyHead
-from canvit.viewpoint import Viewpoint
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -82,7 +82,7 @@ class Config:
     eval_batch_size: int = 32
     num_workers: int = 4
 
-    peak_lr: float = 1e-5
+    peak_lr: float = 1e-4
     min_lr: float = 1e-7
     ft_backbone_lr: float = 1e-6  # backbone LR for finetune
     weight_decay: float = 1e-4
