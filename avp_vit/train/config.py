@@ -24,12 +24,14 @@ class Config:
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     glimpse_grid_size: int = 8  # tokens per glimpse side
-    n_branches: int = 2  # must be >= 2 and even; K/2 RANDOM/FULL at t0, K/2 RANDOM/POLICY at t>=1
+    n_branches: int = (
+        2  # must be >= 2 and even; K/2 RANDOM/FULL at t0, K/2 RANDOM/POLICY at t>=1
+    )
     n_glimpses: int = 2  # glimpses per trajectory; t=0 stored, t>=1 checkpointed
     grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 64
-    peak_lr: float = 1e-4
+    peak_lr: float = 1e-5
     start_lr: float | None = 1e-8  # None = peak_lr / warmup_steps (old behavior)
     end_lr: float | None = 1e-6  # None = 0 (old behavior)
     # weight_decay: float = 0.05  # standard in ViTs
@@ -41,7 +43,7 @@ class Config:
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
     enable_policy: bool = True  # Enable policy branch (t=1 POLICY viewpoint type)
     ema_alpha: float = 0.1  # EMA smoothing for metrics
-    warmup_steps: int = 100_000
+    warmup_steps: int = 2_000
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
     n_steps: int = 500_000
@@ -56,7 +58,9 @@ class Config:
     resume_ckpt: Path | None = None
     reset_policy: bool = False  # Reinitialize policy weights when resuming
     reset_optimizer: bool = False  # Reinitialize optimizer state when resuming
-    reset_scheduler: bool = True  # Reinitialize scheduler state when resuming (fresh LR schedule)
+    reset_scheduler: bool = (
+        True  # Reinitialize scheduler state when resuming (fresh LR schedule)
+    )
     reset_normalizer: bool = False  # Re-warmup normalizer stats when resuming
     # Training
     num_workers: int = 8
