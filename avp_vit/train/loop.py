@@ -210,7 +210,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             opt_state = ckpt_data.get("optimizer_state")
             if opt_state is not None:
                 optimizer.load_state_dict(opt_state)
-                log.info("Loaded optimizer state from checkpoint")
+                # Restore current config's LR (checkpoint may have different peak_lr)
+                for pg in optimizer.param_groups:
+                    pg["lr"] = cfg.peak_lr
+                    pg["initial_lr"] = cfg.peak_lr
+                log.info("Loaded optimizer state from checkpoint (LR reset to current config)")
             else:
                 log.warning("Checkpoint has no optimizer state, using fresh init")
 

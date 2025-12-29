@@ -48,7 +48,7 @@ def training_step(
     """Memory-efficient training with balanced branches.
 
     n_branches (>= 2, even): parallel trajectories
-    n_glimpses (>= 1): glimpses per trajectory
+    n_glimpses (>= 2): glimpses per trajectory (t=0 + at least one t>=1)
 
     At each timestep t:
       - Half branches use RANDOM, half use FULL (t=0) or POLICY (t>=1)
@@ -60,7 +60,7 @@ def training_step(
     Memory: ~6.6 GB constant (FULL t=0 shared, RANDOM branches processed one at a time)
     """
     assert n_branches >= 2 and n_branches % 2 == 0
-    assert n_glimpses >= 1
+    assert n_glimpses >= 2
     device = images.device
     B = images.shape[0]
 
@@ -196,27 +196,14 @@ def training_step(
         traj_loss = run_trajectory(i, out, loss, scene_loss, cls_loss, scene_pred, cls_pred)
         (traj_loss / n_branches).backward()
 
-    # Aggregate metrics by (t0, t1) for compatibility
+    # Aggregate metrics by (t0, t1)
     branches: dict[tuple[ViewpointType, ViewpointType], BranchMetrics] = {}
-    if n_glimpses >= 2:
-        t1_options = [ViewpointType.RANDOM, ViewpointType.POLICY] if model.policy else [ViewpointType.RANDOM]
-        for t0 in [ViewpointType.RANDOM, ViewpointType.FULL]:
-            for t1 in t1_options:
-                mask = torch.tensor([vp_types[0][i] == t0 and vp_types[1][i] == t1 for i in range(n_branches)])
-                if mask.any():
-                    branches[(t0, t1)] = BranchMetrics(
-                        loss=traj_losses[mask].mean(),
-                        scene_loss=scene_losses[mask].mean(),
-                        cls_loss=cls_losses[mask].mean(),
-                        gram_loss=None,
-                        scene_cos=scene_cos[mask].mean(),
-                        cls_cos=cls_cos[mask].mean(),
-                    )
-    else:
-        for t0 in [ViewpointType.RANDOM, ViewpointType.FULL]:
-            mask = torch.tensor([vp_types[0][i] == t0 for i in range(n_branches)])
+    t1_options = [ViewpointType.RANDOM, ViewpointType.POLICY] if model.policy else [ViewpointType.RANDOM]
+    for t0 in [ViewpointType.RANDOM, ViewpointType.FULL]:
+        for t1 in t1_options:
+            mask = torch.tensor([vp_types[0][i] == t0 and vp_types[1][i] == t1 for i in range(n_branches)])
             if mask.any():
-                branches[(t0, t0)] = BranchMetrics(
+                branches[(t0, t1)] = BranchMetrics(
                     loss=traj_losses[mask].mean(),
                     scene_loss=scene_losses[mask].mean(),
                     cls_loss=cls_losses[mask].mean(),

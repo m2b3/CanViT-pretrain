@@ -27,7 +27,7 @@ class Config:
     n_branches: int = (
         2  # must be >= 2 and even; K/2 RANDOM/FULL at t0, K/2 RANDOM/POLICY at t>=1
     )
-    n_glimpses: int = 2  # glimpses per trajectory; t=0 stored, t>=1 checkpointed
+    n_glimpses: int = 2  # >= 2; t=0 stored, t>=1 checkpointed
     grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 64
