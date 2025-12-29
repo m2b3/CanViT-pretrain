@@ -24,30 +24,34 @@ class Config:
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     glimpse_grid_size: int = 8  # tokens per glimpse side
-    n_branches: int = (
-        2  # must be >= 2 and even; K/2 RANDOM/FULL at t0, K/2 RANDOM/POLICY at t>=1
-    )
-    min_glimpses: int = 2  # minimum trajectory length (>= 2)
-    continue_prob: float = 0.5  # peak prob of continuing past min_glimpses
-    continue_prob_warmup_steps: int = 10_000  # ramp 0 → continue_prob over this many steps
     use_checkpointing: bool = True  # checkpoint odd steps in TBPTT chunks
     grid_size: int = 32  # canvas grid size
     # Training
     batch_size: int = 64
-    peak_lr: float = 1e-5
-    start_lr: float | None = 1e-8  # None = peak_lr / warmup_steps (old behavior)
+    warmup_steps: int = 100_000
+    start_lr: float | None = 1e-7  # None = peak_lr / warmup_steps (old behavior)
+    peak_lr: float = 5e-4
     end_lr: float | None = 1e-6  # None = 0 (old behavior)
     # weight_decay: float = 0.05  # standard in ViTs
     # we can use a much lower weight decay due to the richness of our training signal
     # and we *should*, due to the use of small batches
     # 1e-3 has proven to be safe and work well in our early experiments in this project
     # 1e-4 was used by the AdaGlimpse authors
-    weight_decay: float = 1e-4
+    weight_decay: float = 1e-3
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
-    enable_policy: bool = True  # Enable policy branch (t=1 POLICY viewpoint type)
-    enable_glimpse_losses: bool = True  # Enable glimpse losses (direct backbone gradient)
+    n_branches: int = (
+        2  # must be >= 2 and even; K/2 RANDOM/FULL at t0, K/2 RANDOM/POLICY at t>=1
+    )
+    min_glimpses: int = 2  # minimum trajectory length (>= 2)
+    continue_prob: float = 0.5  # peak prob of continuing past min_glimpses
+    continue_prob_warmup_steps: int = (
+        100_000  # ramp 0 → continue_prob over this many steps
+    )
+    enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
+    enable_glimpse_losses: bool = (
+        True  # Enable glimpse losses (direct backbone gradient)
+    )
     ema_alpha: float = 0.1  # EMA smoothing for metrics
-    warmup_steps: int = 2_000
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
     n_steps: int = 500_000
@@ -61,7 +65,9 @@ class Config:
     ckpt_dir: Path = Path("checkpoints")
     resume_ckpt: Path | None = None
     reset_policy: bool = False  # Reinitialize policy weights when resuming
-    reset_opt_and_sched: bool = True  # Reset both optimizer and scheduler (tied together)
+    reset_opt_and_sched: bool = (
+        True  # Reset both optimizer and scheduler (tied together)
+    )
     reset_normalizer: bool = False  # Re-warmup normalizer stats when resuming
     # Training
     num_workers: int = 8
