@@ -84,7 +84,6 @@ class Config:
 
     peak_lr: float = 1e-4
     min_lr: float = 1e-7
-    ft_backbone_lr: float = 1e-6  # backbone LR for finetune
     weight_decay: float = 1e-4
     warmup_ratio: float = 0.1
     max_steps: int = 20_000
@@ -650,13 +649,10 @@ def main(cfg: Config) -> None:
     def make_probe(name: str, feature: FeatureType, finetune: bool) -> Probe:
         head = ProbeHead(get_dim(feature)).to(device)
         if finetune and ft_model is not None:
-            params = [
-                {"params": list(ft_model.parameters()), "lr": cfg.ft_backbone_lr},
-                {"params": list(head.parameters()), "lr": peak_lr},
-            ]
+            params = list(ft_model.parameters()) + list(head.parameters())
         else:
-            params = [{"params": list(head.parameters()), "lr": peak_lr}]
-        opt = AdamW(params, weight_decay=cfg.weight_decay)
+            params = list(head.parameters())
+        opt = AdamW(params, lr=peak_lr, weight_decay=cfg.weight_decay)
         warmup = LinearLR(opt, cfg.min_lr / peak_lr, 1.0, max(1, warmup_steps))
         cosine = CosineAnnealingLR(
             opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr
