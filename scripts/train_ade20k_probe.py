@@ -137,11 +137,10 @@ class ProbeHead(nn.Module):
 
 # === Dataset ===
 def make_train_transform(size: int) -> A.Compose:
+    """Random crop + flip. Images are loaded at 2x size, cropped to target."""
     return A.Compose(
         [
-            A.RandomScale(scale_limit=(-0.5, 1.0), p=1.0),  # 0.5x to 2.0x
             A.HorizontalFlip(p=0.5),
-            A.PadIfNeeded(size, size, border_mode=0, fill=0, fill_mask=IGNORE_LABEL),
             A.RandomCrop(size, size),
         ]
     )
@@ -152,37 +151,36 @@ class ADE20kDataset(Dataset):
         self, root: Path, split: str, size: int, augment: bool = False
     ) -> None:
         self.size = size
+        self.augment = augment
+        # Load at 2x for training (random crop = zoom in only), 1x for val
+        self.load_size = size * 2 if augment else size
         self.transform = make_train_transform(size) if augment else None
         img_dir = root / "images" / split
         ann_dir = root / "annotations" / split
         self.imgs = sorted(img_dir.glob("*.jpg"))
         self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
         log.info(
-            f"ADE20k {split}: {len(self)} images @ {size}x{size}, augment={augment}"
+            f"ADE20k {split}: {len(self)} images, load@{self.load_size} -> {size}, augment={augment}"
         )
 
     def __len__(self) -> int:
         return len(self.imgs)
 
     def __getitem__(self, i: int) -> tuple[Tensor, Tensor]:
-        img = np.array(Image.open(self.imgs[i]).convert("RGB"))
-        mask = np.array(Image.open(self.anns[i]))
+        img = np.array(
+            Image.open(self.imgs[i])
+            .convert("RGB")
+            .resize((self.load_size, self.load_size), Image.Resampling.BILINEAR)
+        )
+        mask = np.array(
+            Image.open(self.anns[i]).resize(
+                (self.load_size, self.load_size), Image.Resampling.NEAREST
+            )
+        )
 
         if self.transform:
             out = self.transform(image=img, mask=mask)
             img, mask = out["image"], out["mask"]
-        else:
-            # Validation: simple resize
-            img = np.array(
-                Image.fromarray(img).resize(
-                    (self.size, self.size), Image.Resampling.BILINEAR
-                )
-            )
-            mask = np.array(
-                Image.fromarray(mask).resize(
-                    (self.size, self.size), Image.Resampling.NEAREST
-                )
-            )
 
         img_t = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
         img_t = (img_t - IMAGENET_MEAN.view(3, 1, 1)) / IMAGENET_STD.view(3, 1, 1)
