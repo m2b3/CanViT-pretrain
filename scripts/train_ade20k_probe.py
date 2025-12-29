@@ -97,6 +97,7 @@ class Config:
     comet_workspace: str = "m2b3-ava"
     device: str | None = None
     amp: bool = True
+    resume_ckpt: Path | None = None  # resume from combined checkpoint
 
 
 # === Loss ===
@@ -151,6 +152,29 @@ def implicit_upsample_focal(logits: Tensor, masks: Tensor, scale: int) -> Tensor
 
 
 # === Probe head ===
+def save_checkpoint(
+    path: str | Path,
+    step: int,
+    probes: list["Probe"],
+    ft_model: "ActiveCanViT | None",
+) -> None:
+    """Save combined checkpoint with all probe states."""
+    path = Path(path)
+    probe_states = {}
+    for p in probes:
+        probe_states[p.name] = {
+            "head": p.head.state_dict(),
+            "optimizer": p.optimizer.state_dict(),
+            "scheduler": p.scheduler.state_dict(),
+            "best_miou": p.best_miou,
+        }
+    save_dict: dict[str, object] = {"step": step, "probes": probe_states}
+    if ft_model is not None:
+        save_dict["ft_model"] = ft_model.state_dict()
+    torch.save(save_dict, path)
+    log.info(f"Saved checkpoint to {path} (step {step}, {path.stat().st_size / 1e6:.1f}MB)")
+
+
 class ProbeHead(nn.Module):
     """LN + linear."""
 
@@ -731,6 +755,26 @@ def main(cfg: Config) -> None:
     probes = [make_probe(f, f, False) for f in cfg.frozen_features]
     probes += [make_probe(f"ft_{f}", f, True) for f in cfg.finetune_features]
 
+    # Resume from checkpoint
+    start_step = 0
+    if cfg.resume_ckpt is not None:
+        resume = torch.load(cfg.resume_ckpt, map_location=device, weights_only=False)
+        start_step = resume["step"]
+        for p in probes:
+            if p.name in resume["probes"]:
+                state = resume["probes"][p.name]
+                p.head.load_state_dict(state["head"])
+                p.optimizer.load_state_dict(state["optimizer"])
+                p.scheduler.load_state_dict(state["scheduler"])
+                p.best_miou = state["best_miou"]
+                log.info(f"Resumed {p.name}: best_miou={p.best_miou:.4f}")
+            else:
+                log.warning(f"Probe {p.name} not found in checkpoint, starting fresh")
+        if ft_model is not None and "ft_model" in resume:
+            ft_model.load_state_dict(resume["ft_model"])
+            log.info("Resumed ft_model weights")
+        log.info(f"Resuming from step {start_step}")
+
     trainer = ProbeTrainer(probes, frozen_ext, ft_ext, ft_model, device, cfg.grad_clip, amp_ctx, cfg.boundary_width)
 
     log.info(f"Probes: {[p.name for p in probes]}")
@@ -767,9 +811,10 @@ def main(cfg: Config) -> None:
     )
 
     # Training loop
-    step = 0
+    step = start_step
     train_iter = iter(train_loader)
-    pbar = tqdm(total=cfg.max_steps, desc="Training")
+    pbar = tqdm(total=cfg.max_steps, initial=start_step, desc="Training")
+    ckpt_path = Path(f"probe_ckpt_{exp.id}.pt")
 
     while step < cfg.max_steps:
         try:
@@ -810,6 +855,9 @@ def main(cfg: Config) -> None:
                 )
                 postfix[key] = f"{miou:.3f}"
             pbar.set_postfix(postfix)
+
+            # Save combined checkpoint
+            save_checkpoint(ckpt_path, step, probes, ft_model)
 
             # Viz
             log_viz(exp, step, trainer, images, masks)
