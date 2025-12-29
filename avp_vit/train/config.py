@@ -57,10 +57,7 @@ class Config:
     ckpt_dir: Path = Path("checkpoints")
     resume_ckpt: Path | None = None
     reset_policy: bool = False  # Reinitialize policy weights when resuming
-    reset_optimizer: bool = False  # Reinitialize optimizer state when resuming
-    reset_scheduler: bool = (
-        True  # Reinitialize scheduler state when resuming (fresh LR schedule)
-    )
+    reset_opt_and_sched: bool = True  # Reset both optimizer and scheduler (tied together)
     reset_normalizer: bool = False  # Re-warmup normalizer stats when resuming
     # Training
     num_workers: int = 8

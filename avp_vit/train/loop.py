@@ -203,31 +203,20 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         if incompat.unexpected_keys:
             log.warning(f"Checkpoint has unexpected keys (ignored): {incompat.unexpected_keys}")
 
-        # Load optimizer state (unless reset requested)
-        if cfg.reset_optimizer:
-            log.info("Reset optimizer: using fresh optimizer state")
+        # Load optimizer + scheduler state (tied together)
+        if cfg.reset_opt_and_sched:
+            log.info("Reset optimizer+scheduler: using fresh state")
         else:
             opt_state = ckpt_data.get("optimizer_state")
-            if opt_state is not None:
-                optimizer.load_state_dict(opt_state)
-                # Restore current config's LR (checkpoint may have different peak_lr)
-                for pg in optimizer.param_groups:
-                    pg["lr"] = cfg.peak_lr
-                    pg["initial_lr"] = cfg.peak_lr
-                log.info("Loaded optimizer state from checkpoint (LR reset to current config)")
-            else:
-                log.warning("Checkpoint has no optimizer state, using fresh init")
-
-        # Load scheduler state (unless reset requested)
-        if cfg.reset_scheduler:
-            log.info("Reset scheduler: using fresh LR schedule")
-        else:
             sched_state = ckpt_data.get("scheduler_state")
-            if sched_state is not None:
+            if opt_state is not None and sched_state is not None:
+                optimizer.load_state_dict(opt_state)
                 scheduler.load_state_dict(sched_state)
-                log.info(f"Loaded scheduler state from checkpoint (step={sched_state.get('last_epoch', '?')})")
+                log.info(f"Loaded optimizer+scheduler from checkpoint (step={sched_state.get('last_epoch', '?')})")
+            elif opt_state is not None or sched_state is not None:
+                log.warning("Checkpoint has only one of optimizer/scheduler - using fresh init for both")
             else:
-                log.warning("Checkpoint has no scheduler state, using fresh init")
+                log.warning("Checkpoint has no optimizer/scheduler state, using fresh init")
 
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 

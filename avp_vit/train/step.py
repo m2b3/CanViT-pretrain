@@ -107,11 +107,10 @@ def training_step(
             cls=cls,
         )
 
-    def compute_loss(out: GlimpseOutput) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def compute_loss(out: GlimpseOutput) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         scene_pred = model.predict_teacher_scene(out.canvas)
         cls_pred = model.predict_teacher_cls(out.cls, out.canvas)
         return (
-            F.mse_loss(scene_pred, scene_target) + F.mse_loss(cls_pred, cls_target),
             F.mse_loss(scene_pred, scene_target),
             F.mse_loss(cls_pred, cls_target),
             scene_pred,
@@ -121,16 +120,15 @@ def training_step(
     def run_trajectory(
         i: int,
         out_t0: GlimpseOutput,
-        loss_t0: Tensor,
         scene_loss_t0: Tensor,
         cls_loss_t0: Tensor,
         scene_pred_t0: Tensor,
         cls_pred_t0: Tensor,
     ) -> Tensor:
         """Run t>=1 for branch i, return trajectory loss."""
-        loss_sum = loss_t0
-        scene_loss_sum = scene_loss_t0
-        cls_loss_sum = cls_loss_t0
+        # Accumulate in fp32 to avoid precision issues with bfloat16
+        scene_loss_sum = scene_loss_t0.float()
+        cls_loss_sum = cls_loss_t0.float()
         scene_pred, cls_pred = scene_pred_t0, cls_pred_t0
         canvas, cls_tok, vpe = out_t0.canvas, out_t0.cls, out_t0.vpe
 
@@ -146,13 +144,12 @@ def training_step(
                 out_raw = checkpoint(fwd_step, canvas, cls_tok, vp.centers, vp.scales, use_reentrant=False)
                 assert isinstance(out_raw, GlimpseOutput)
                 out = out_raw
-                loss_t, scene_loss_t, cls_loss_t, scene_pred, cls_pred = compute_loss(out)
-                loss_sum = loss_sum + loss_t
-                scene_loss_sum = scene_loss_sum + scene_loss_t
-                cls_loss_sum = cls_loss_sum + cls_loss_t
+                scene_loss_t, cls_loss_t, scene_pred, cls_pred = compute_loss(out)
+                scene_loss_sum = scene_loss_sum + scene_loss_t.float()
+                cls_loss_sum = cls_loss_sum + cls_loss_t.float()
                 canvas, cls_tok, vpe = out.canvas, out.cls, out.vpe
 
-        traj_loss = loss_sum / n_glimpses
+        traj_loss = (scene_loss_sum + cls_loss_sum) / n_glimpses
         with torch.no_grad():
             traj_losses[i] = traj_loss
             scene_losses[i] = scene_loss_sum / n_glimpses
@@ -173,10 +170,10 @@ def training_step(
                 glimpse_size_px=glimpse_size_px,
                 cls=cls_init,
             )
-            loss_full, scene_loss_full, cls_loss_full, scene_pred_full, cls_pred_full = compute_loss(out_full)
+            scene_loss_full, cls_loss_full, scene_pred_full, cls_pred_full = compute_loss(out_full)
 
         for idx, i in enumerate(full_indices):
-            traj_loss = run_trajectory(i, out_full, loss_full, scene_loss_full, cls_loss_full, scene_pred_full, cls_pred_full)
+            traj_loss = run_trajectory(i, out_full, scene_loss_full, cls_loss_full, scene_pred_full, cls_pred_full)
             is_last = idx == len(full_indices) - 1
             (traj_loss / n_branches).backward(retain_graph=not is_last)
 
@@ -191,9 +188,9 @@ def training_step(
                 glimpse_size_px=glimpse_size_px,
                 cls=cls_init,
             )
-            loss, scene_loss, cls_loss, scene_pred, cls_pred = compute_loss(out)
+            scene_loss, cls_loss, scene_pred, cls_pred = compute_loss(out)
 
-        traj_loss = run_trajectory(i, out, loss, scene_loss, cls_loss, scene_pred, cls_pred)
+        traj_loss = run_trajectory(i, out, scene_loss, cls_loss, scene_pred, cls_pred)
         (traj_loss / n_branches).backward()
 
     # Aggregate metrics by (t0, t1)
