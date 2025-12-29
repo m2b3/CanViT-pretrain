@@ -1,5 +1,6 @@
 """Training step with memory-efficient balanced branches."""
 
+import random
 from contextlib import AbstractContextManager
 from typing import NamedTuple
 
@@ -70,14 +71,14 @@ def training_step(
     # Assign viewpoint types: at each timestep, random permutation of half/half split
     vp_types: list[list[ViewpointType]] = []
     for t in range(n_glimpses):
-        perm = torch.randperm(n_branches, device=device)
         if t == 0:
             base = [ViewpointType.RANDOM] * (n_branches // 2) + [ViewpointType.FULL] * (n_branches // 2)
         elif model.policy is not None:
             base = [ViewpointType.RANDOM] * (n_branches // 2) + [ViewpointType.POLICY] * (n_branches // 2)
         else:
             base = [ViewpointType.RANDOM] * n_branches
-        vp_types.append([base[int(perm[i].item())] for i in range(n_branches)])
+        random.shuffle(base)
+        vp_types.append(base)
 
     full_indices = [i for i in range(n_branches) if vp_types[0][i] == ViewpointType.FULL]
     random_indices = [i for i in range(n_branches) if vp_types[0][i] == ViewpointType.RANDOM]
