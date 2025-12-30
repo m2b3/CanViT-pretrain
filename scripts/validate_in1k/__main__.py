@@ -132,14 +132,16 @@ def validate(cfg: Config) -> dict[str, float]:
     log.info(f"Dataset: {len(dataset)} images, {len(loader)} batches")
     log.info(f"Viewpoints: {cfg.n_viewpoints}")
 
-    correct_top1 = [0] * cfg.n_viewpoints
-    correct_top5 = [0] * cfg.n_viewpoints
-    teacher_correct_top1 = 0
-    teacher_correct_top5 = 0
+    # Accumulators on GPU - no sync until needed
+    correct_top1 = torch.zeros(cfg.n_viewpoints, device=device, dtype=torch.long)
+    correct_top5 = torch.zeros(cfg.n_viewpoints, device=device, dtype=torch.long)
+    teacher_correct_top1 = torch.zeros(1, device=device, dtype=torch.long)
+    teacher_correct_top5 = torch.zeros(1, device=device, dtype=torch.long)
     total = 0
 
+    pbar_sync_interval = 20  # Sync for pbar every N batches
     pbar = tqdm(loader, desc="Validating", unit="batch")
-    for images, labels in pbar:
+    for batch_idx, (images, labels) in enumerate(pbar):
         images = images.to(device)
         labels = labels.to(device)
 
@@ -150,8 +152,8 @@ def validate(cfg: Config) -> dict[str, float]:
             logits = probe(cls_raw)
             _, top5_pred = logits.topk(5, dim=-1)
             top1_pred = top5_pred[:, 0]
-            correct_top1[t] += (top1_pred == labels).sum().item()
-            correct_top5[t] += (top5_pred == labels.unsqueeze(1)).any(dim=1).sum().item()
+            correct_top1[t] += (top1_pred == labels).sum()
+            correct_top5[t] += (top5_pred == labels.unsqueeze(1)).any(dim=1).sum()
 
         # Teacher baseline (raw CLS features)
         if teacher is not None:
@@ -159,29 +161,37 @@ def validate(cfg: Config) -> dict[str, float]:
             teacher_logits = probe(teacher_cls)
             _, teacher_top5 = teacher_logits.topk(5, dim=-1)
             teacher_top1 = teacher_top5[:, 0]
-            teacher_correct_top1 += (teacher_top1 == labels).sum().item()
-            teacher_correct_top5 += (teacher_top5 == labels.unsqueeze(1)).any(dim=1).sum().item()
+            teacher_correct_top1 += (teacher_top1 == labels).sum()
+            teacher_correct_top5 += (teacher_top5 == labels.unsqueeze(1)).any(dim=1).sum()
 
         total += labels.shape[0]
-        ts = " ".join(f"t{t}={100*correct_top1[t]/total:.1f}" for t in range(cfg.n_viewpoints))
-        if teacher is not None:
-            teacher_acc1 = 100 * teacher_correct_top1 / total
-            pbar.set_postfix_str(f"{ts} teacher={teacher_acc1:.1f}")
-        else:
-            pbar.set_postfix_str(ts)
+
+        # Sync only every N batches for pbar update
+        if batch_idx % pbar_sync_interval == 0:
+            c1 = correct_top1.tolist()
+            ts = " ".join(f"t{t}={100*c1[t]/total:.1f}" for t in range(cfg.n_viewpoints))
+            if teacher is not None:
+                teacher_acc1 = 100 * teacher_correct_top1.item() / total
+                pbar.set_postfix_str(f"{ts} teacher={teacher_acc1:.1f}")
+            else:
+                pbar.set_postfix_str(ts)
+
+    # Final sync
+    correct_top1_list = correct_top1.tolist()
+    correct_top5_list = correct_top5.tolist()
 
     log.info(f"Results by timestep ({cfg.n_viewpoints} viewpoints):")
     metrics: dict[str, float] = {"total_samples": float(total)}
     for t in range(cfg.n_viewpoints):
-        acc1 = 100 * correct_top1[t] / total
-        acc5 = 100 * correct_top5[t] / total
+        acc1 = 100 * correct_top1_list[t] / total
+        acc5 = 100 * correct_top5_list[t] / total
         log.info(f"  t{t}: top1={acc1:.2f}%, top5={acc5:.2f}%")
         metrics[f"t{t}_top1"] = acc1
         metrics[f"t{t}_top5"] = acc5
 
     if teacher is not None:
-        teacher_acc1 = 100 * teacher_correct_top1 / total
-        teacher_acc5 = 100 * teacher_correct_top5 / total
+        teacher_acc1 = 100 * teacher_correct_top1.item() / total
+        teacher_acc5 = 100 * teacher_correct_top5.item() / total
         log.info(f"Teacher baseline: top1={teacher_acc1:.2f}%, top5={teacher_acc5:.2f}%")
         metrics["teacher_top1"] = teacher_acc1
         metrics["teacher_top5"] = teacher_acc5
