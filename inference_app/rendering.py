@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from sklearn.decomposition import PCA
 
-from avp_vit.train.viz import fit_pca, pca_rgb, timestep_colors
+from avp_vit.train.viz import pca_rgb, timestep_colors
 
 from inference_app.types import Viewpoint
 

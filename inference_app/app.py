@@ -25,7 +25,7 @@ from inference_app.rendering import (
     sim_to_img,
     upsample_features,
 )
-from inference_app.types import ImageContext, SequenceState, StepResult, Viewpoint
+from inference_app.types import ImageContext, SequenceState, Viewpoint
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -220,7 +220,10 @@ def main() -> None:
             result = worker.step(vp, cfg.glimpse_grid, cfg.canvas_grid, cfg.l2_norm)
             seq.viewpoints.append(vp)
             seq.results.append(result)
-            latency.setdefault(f"Model {cfg.glimpse_grid}→{cfg.canvas_grid}", []).append(result.ms)
+            key = f"Model {cfg.glimpse_grid}→{cfg.canvas_grid}"
+            latency.setdefault(key, []).append(result.ms)
+            latency.setdefault(f"{key} fwd", []).append(result.ms_forward)
+            latency.setdefault(f"{key} post", []).append(result.ms_post)
             st.rerun()
 
         if policy and st.button("Policy →"):
@@ -228,7 +231,10 @@ def main() -> None:
             result = worker.step(vp, cfg.glimpse_grid, cfg.canvas_grid, cfg.l2_norm)
             seq.viewpoints.append(vp)
             seq.results.append(result)
-            latency.setdefault(f"Model {cfg.glimpse_grid}→{cfg.canvas_grid}", []).append(result.ms)
+            key = f"Model {cfg.glimpse_grid}→{cfg.canvas_grid}"
+            latency.setdefault(key, []).append(result.ms)
+            latency.setdefault(f"{key} fwd", []).append(result.ms_forward)
+            latency.setdefault(f"{key} post", []).append(result.ms_post)
             st.rerun()
 
     feat_data.append(("Input", None, 0))

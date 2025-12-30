@@ -13,7 +13,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from sklearn.decomposition import PCA
 from torch import Tensor
 from torchvision import transforms
 from torchvision.models.resnet import ResNet50_Weights
@@ -235,14 +234,14 @@ class GPUWorker:
             glimpse_px = glimpse_grid * self._patch_size
 
             self._sync()
-            t0 = time.perf_counter()
+            t_start = time.perf_counter()
             with torch.no_grad():
                 out = self._model.forward_step(
                     image=self._image, canvas=self._canvas, cls=self._cls,
                     viewpoint=torch_vp, glimpse_size_px=glimpse_px,
                 )
             self._sync()
-            ms = (time.perf_counter() - t0) * 1000
+            t_forward = time.perf_counter()
 
             # Update state
             self._canvas = out.canvas
@@ -255,10 +254,7 @@ class GPUWorker:
             scene = self._model.predict_teacher_scene(out.canvas)
 
             # Cosine similarities
-            tg = self.teacher_grid
             scene_cos = cls_cos = None
-            # Note: we'd need teacher features here - simplified for now
-            # In practice, caller should pass teacher features or we cache them
 
             # Classification
             cls_pred = self._model.predict_scene_teacher_cls(out.global_cls, out.canvas)
@@ -272,15 +268,26 @@ class GPUWorker:
                 policy_center = (cy, cx)
                 policy_scale = pol.scale[0].item()
 
-            self._sync()
+            # Numpy conversion (includes CPU transfer)
+            hidden_np = spatial.detach().cpu().numpy()
+            projected_np = scene[0].detach().cpu().numpy()
+            glimpse_np = imagenet_denormalize(out.glimpse[0].detach().cpu()).numpy()
+
+            t_end = time.perf_counter()
+
+            ms_forward = (t_forward - t_start) * 1000
+            ms_post = (t_end - t_forward) * 1000
+            ms_total = (t_end - t_start) * 1000
 
             return StepResult(
-                hidden=spatial.detach().cpu().numpy(),
-                projected=scene[0].detach().cpu().numpy(),
-                glimpse=imagenet_denormalize(out.glimpse[0].detach().cpu()).numpy(),
+                hidden=hidden_np,
+                projected=projected_np,
+                glimpse=glimpse_np,
                 scene_cos=scene_cos,
                 cls_cos=cls_cos,
-                ms=ms,
+                ms=ms_total,
+                ms_forward=ms_forward,
+                ms_post=ms_post,
                 top5=top5,
                 policy_center=policy_center,
                 policy_scale=policy_scale,
