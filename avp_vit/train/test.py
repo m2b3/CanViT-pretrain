@@ -156,12 +156,23 @@ class TestMakeEvalViewpoints:
     def test_default_returns_10_viewpoints(self) -> None:
         vps = make_eval_viewpoints(2, torch.device("cpu"))
         assert len(vps) == 10
-        assert vps[0].name == "full"
+        assert vps[0].centers.shape == (2, 2)
+        assert vps[0].scales.shape == (2,)
 
     def test_explicit_n_viewpoints(self) -> None:
         vps = make_eval_viewpoints(2, torch.device("cpu"), n_viewpoints=5)
         assert len(vps) == 5
-        assert vps[0].name == "full"
+
+    def test_different_ordering_per_batch_item(self) -> None:
+        vps = make_eval_viewpoints(4, torch.device("cpu"), n_viewpoints=5)
+        # Different batch items should see different viewpoints at same timestep
+        # (with high probability - not all same)
+        all_same = all(
+            torch.allclose(vps[t].centers[0], vps[t].centers[i])
+            for t in range(5)
+            for i in range(1, 4)
+        )
+        assert not all_same, "All batch items have same viewpoints (should be random)"
 
 
 class TestPixelBox:

@@ -6,7 +6,6 @@ Extends canvit.viewpoint with training-specific utilities:
 - Evaluation viewpoint sequences
 """
 
-import random
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import NamedTuple
@@ -143,46 +142,45 @@ def random_viewpoint(
 def make_eval_viewpoints(
     B: int, device: torch.device, n_viewpoints: int = 10
 ) -> list[Viewpoint]:
-    """Generate recursive quadrant viewpoints, truncated to n_viewpoints.
+    """Generate quadtree viewpoints with random ordering per batch item.
 
-    Quadtree structure:
+    Quadtree structure (deterministic):
     - Level 0: Full scene (1 viewpoint, scale=1)
     - Level 1: 4 quadrants (scale=0.5)
     - Level 2: 16 sub-quadrants (scale=0.25)
     - Level L: 4^L viewpoints (scale=0.5^L)
 
-    Shuffles within each level, then flattens and truncates.
+    Each batch item gets a different random permutation of viewpoints.
     """
     assert n_viewpoints >= 1
 
-    # Level 0: full scene (center, scale)
-    levels: list[list[tuple[float, float, float]]] = [[(0.0, 0.0, 1.0)]]
+    # Build quadtree nodes (deterministic structure)
+    all_nodes: list[tuple[float, float, float]] = [(0.0, 0.0, 1.0)]
+    while len(all_nodes) < n_viewpoints:
+        # Expand from last complete level
+        parent_scale = all_nodes[-1][2]
+        child_scale = parent_scale / 2
+        new_nodes: list[tuple[float, float, float]] = []
+        for cy, cx, s in all_nodes:
+            if s == parent_scale:
+                for qy, qx in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+                    new_cy = cy + (qy - 0.5) * s
+                    new_cx = cx + (qx - 0.5) * s
+                    new_nodes.append((new_cy, new_cx, child_scale))
+        all_nodes.extend(new_nodes)
 
-    # Build levels until we have enough viewpoints
-    while sum(len(lvl) for lvl in levels) < n_viewpoints:
-        parent_level = levels[-1]
-        child_level: list[tuple[float, float, float]] = []
+    # Tensor of all nodes: (N, 3) for (cy, cx, scale)
+    nodes = torch.tensor(all_nodes[:n_viewpoints], device=device, dtype=torch.float32)
 
-        for parent_cy, parent_cx, parent_scale in parent_level:
-            child_scale = parent_scale / 2
-            for qy, qx in [(0, 0), (0, 1), (1, 0), (1, 1)]:
-                child_cy = parent_cy + (qy - 0.5) * parent_scale
-                child_cx = parent_cx + (qx - 0.5) * parent_scale
-                child_level.append((child_cy, child_cx, child_scale))
+    # Random permutation per batch item: (B, n_viewpoints)
+    perms = torch.stack([torch.randperm(n_viewpoints, device=device) for _ in range(B)])
 
-        random.shuffle(child_level)
-        levels.append(child_level)
-
-    # Convert to Viewpoint objects and flatten
+    # Build viewpoints: at timestep t, each batch item sees a different node
     result: list[Viewpoint] = []
-    for level_idx, level in enumerate(levels):
-        for i, (cy, cx, scale) in enumerate(level):
-            if level_idx == 0:
-                name = "full"
-            else:
-                name = f"L{level_idx}_{i}"
-            centers = torch.tensor([[cy, cx]], device=device).expand(B, -1)
-            scales = torch.full((B,), scale, device=device)
-            result.append(Viewpoint(name=name, centers=centers, scales=scales))
+    for t in range(n_viewpoints):
+        indices = perms[:, t]  # (B,) - which node each batch item sees at time t
+        centers = nodes[indices, :2]  # (B, 2)
+        scales = nodes[indices, 2]  # (B,)
+        result.append(Viewpoint(name=f"t{t}", centers=centers, scales=scales))
 
-    return result[:n_viewpoints]
+    return result
