@@ -42,6 +42,7 @@ class Config:
     canvas_grid: int = 32
     glimpse_grid: int = 8
     n_viewpoints: int = 5
+    no_teacher: bool = False
 
 
 def load_teacher(ckpt_path: Path, device: torch.device) -> DINOv3Backbone:
@@ -112,8 +113,12 @@ def validate(cfg: Config) -> dict[str, float]:
     log.info(f"Probe loaded for {backbone}")
 
     cls_norm = load_cls_normalizer(cfg.checkpoint, device)
-    teacher = load_teacher(cfg.checkpoint, device)
-    log.info("Teacher loaded for baseline comparison")
+    teacher: DINOv3Backbone | None = None
+    if not cfg.no_teacher:
+        teacher = load_teacher(cfg.checkpoint, device)
+        log.info("Teacher loaded for baseline comparison")
+    else:
+        log.info("Teacher baseline disabled")
 
     transform = val_transform(img_size)
     dataset = ImageFolder(str(cfg.val_dir), transform=transform)
@@ -149,17 +154,21 @@ def validate(cfg: Config) -> dict[str, float]:
             correct_top5[t] += (top5_pred == labels.unsqueeze(1)).any(dim=1).sum().item()
 
         # Teacher baseline (raw CLS features)
-        teacher_cls = teacher.forward_norm_features(images).cls
-        teacher_logits = probe(teacher_cls)
-        _, teacher_top5 = teacher_logits.topk(5, dim=-1)
-        teacher_top1 = teacher_top5[:, 0]
-        teacher_correct_top1 += (teacher_top1 == labels).sum().item()
-        teacher_correct_top5 += (teacher_top5 == labels.unsqueeze(1)).any(dim=1).sum().item()
+        if teacher is not None:
+            teacher_cls = teacher.forward_norm_features(images).cls
+            teacher_logits = probe(teacher_cls)
+            _, teacher_top5 = teacher_logits.topk(5, dim=-1)
+            teacher_top1 = teacher_top5[:, 0]
+            teacher_correct_top1 += (teacher_top1 == labels).sum().item()
+            teacher_correct_top5 += (teacher_top5 == labels.unsqueeze(1)).any(dim=1).sum().item()
 
         total += labels.shape[0]
-        teacher_acc1 = 100 * teacher_correct_top1 / total
         ts = " ".join(f"t{t}={100*correct_top1[t]/total:.1f}" for t in range(cfg.n_viewpoints))
-        pbar.set_postfix_str(f"{ts} teacher={teacher_acc1:.1f}")
+        if teacher is not None:
+            teacher_acc1 = 100 * teacher_correct_top1 / total
+            pbar.set_postfix_str(f"{ts} teacher={teacher_acc1:.1f}")
+        else:
+            pbar.set_postfix_str(ts)
 
     log.info(f"Results by timestep ({cfg.n_viewpoints} viewpoints):")
     metrics: dict[str, float] = {"total_samples": float(total)}
@@ -170,11 +179,12 @@ def validate(cfg: Config) -> dict[str, float]:
         metrics[f"t{t}_top1"] = acc1
         metrics[f"t{t}_top5"] = acc5
 
-    teacher_acc1 = 100 * teacher_correct_top1 / total
-    teacher_acc5 = 100 * teacher_correct_top5 / total
-    log.info(f"Teacher baseline: top1={teacher_acc1:.2f}%, top5={teacher_acc5:.2f}%")
-    metrics["teacher_top1"] = teacher_acc1
-    metrics["teacher_top5"] = teacher_acc5
+    if teacher is not None:
+        teacher_acc1 = 100 * teacher_correct_top1 / total
+        teacher_acc5 = 100 * teacher_correct_top5 / total
+        log.info(f"Teacher baseline: top1={teacher_acc1:.2f}%, top5={teacher_acc5:.2f}%")
+        metrics["teacher_top1"] = teacher_acc1
+        metrics["teacher_top5"] = teacher_acc5
 
     return metrics
 
