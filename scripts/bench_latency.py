@@ -434,48 +434,49 @@ def main() -> None:
     console.print()
     console.print(table)
 
-    # Comparisons table
-    cmp_table = Table(title="Comparisons (using min latency)")
-    cmp_table.add_column("Comparison", style="bold")
-    cmp_table.add_column("Δ (ms)", justify="right")
-    cmp_table.add_column("Ratio", justify="right")
+    # Comparisons table - apples to apples
+    def make_cmp_table(title: str, baseline_glimpse: float, baseline_full: float, model_key: str) -> Table:
+        cmp = Table(title=title)
+        cmp.add_column("Comparison", style="bold")
+        cmp.add_column("Δ (ms)", justify="right")
+        cmp.add_column("Ratio", justify="right")
 
-    baseline = results["teacher_glimpse_compiled"].min_ms
+        def add_cmp(name: str, val: float, base: float) -> None:
+            delta = val - base
+            ratio = val / base
+            style = "green" if delta < 0 else "red" if ratio > 2 else ""
+            cmp.add_row(name, f"{delta:+.3f}", f"{ratio:.2f}x", style=style)
 
-    def add_cmp(name: str, key: str) -> None:
-        r = results[key]
-        delta = r.min_ms - baseline
-        ratio = r.min_ms / baseline
-        style = "green" if delta < 0 else "red" if delta > baseline else ""
-        cmp_table.add_row(name, f"{delta:+.3f}", f"{ratio:.2f}x", style=style)
+        add_cmp("Model forward vs Teacher@glimpse", results[model_key].min_ms, baseline_glimpse)
+        add_cmp("Full pipeline vs Teacher@glimpse", results["full_pipeline"].min_ms, baseline_glimpse)
 
-    add_cmp("Model forward vs Teacher@glimpse", "model_forward")
-    add_cmp("Full pipeline vs Teacher@glimpse", "full_pipeline")
+        # N-step vs N × teacher@glimpse
+        n_baseline = cfg.n_steps * baseline_glimpse
+        add_cmp(f"{cfg.n_steps}-step vs {cfg.n_steps}×Teacher@glimpse", results["trajectory"].min_ms, n_baseline)
 
-    # N-step vs N × teacher@glimpse
-    n_baseline = cfg.n_steps * baseline
-    traj_delta = results["trajectory"].min_ms - n_baseline
-    traj_ratio = results["trajectory"].min_ms / n_baseline
-    cmp_table.add_row(
-        f"{cfg.n_steps}-step vs {cfg.n_steps}×Teacher@glimpse",
-        f"{traj_delta:+.3f}",
-        f"{traj_ratio:.2f}x",
-    )
+        # N-step vs teacher@full
+        add_cmp(f"{cfg.n_steps}-step vs Teacher@full", results["trajectory"].min_ms, baseline_full)
 
-    # N-step vs teacher@full
-    full_baseline = results["teacher_full_compiled"].min_ms
-    traj_vs_full_delta = results["trajectory"].min_ms - full_baseline
-    traj_vs_full_ratio = results["trajectory"].min_ms / full_baseline
-    style = "green" if traj_vs_full_delta < 0 else ""
-    cmp_table.add_row(
-        f"{cfg.n_steps}-step vs Teacher@full",
-        f"{traj_vs_full_delta:+.3f}",
-        f"{traj_vs_full_ratio:.2f}x",
-        style=style,
-    )
+        return cmp
 
+    # Uncompiled comparisons
     console.print()
-    console.print(cmp_table)
+    console.print(make_cmp_table(
+        "Comparisons: Uncompiled (min latency)",
+        results["teacher_glimpse"].min_ms,
+        results["teacher_full"].min_ms,
+        "model_forward",
+    ))
+
+    # Compiled comparisons (if available)
+    if cfg.compile:
+        console.print()
+        console.print(make_cmp_table(
+            "Comparisons: Compiled (min latency)",
+            results["teacher_glimpse_compiled"].min_ms,
+            results["teacher_full_compiled"].min_ms,
+            "compiled_forward",
+        ))
 
     # Per-step amortized
     per_step = results["trajectory"].min_ms / cfg.n_steps
