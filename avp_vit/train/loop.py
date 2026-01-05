@@ -320,7 +320,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             scene_size, glimpse_size_px, cfg.device,
         )
 
-    log.info(f"Training: {cfg.n_branches} branches, min_glimpses={cfg.min_glimpses}, continue_prob={cfg.continue_prob}")
+    log.info(f"Training: {cfg.n_branches} branches, chunk_size={cfg.chunk_size}, continue_prob={cfg.continue_prob}")
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
@@ -446,7 +446,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
                 n_branches=cfg.n_branches,
-                min_glimpses=cfg.min_glimpses,
+                chunk_size=cfg.chunk_size,
                 continue_prob=continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 amp_ctx=amp_ctx,

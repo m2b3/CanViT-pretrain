@@ -85,20 +85,20 @@ def training_step(
     glimpse_size_px: int,
     canvas_grid_size: int,
     n_branches: int,
-    min_glimpses: int,
+    chunk_size: int,
     continue_prob: float,
     min_viewpoint_scale: float,
     amp_ctx: AbstractContextManager,
     use_checkpointing: bool,
 ) -> StepMetrics:
-    """Training with truncated BPTT (1-step lookahead).
+    """Training with truncated BPTT.
 
-    Chunks of 2 steps: backward after every 2 glimpses, gradient flows through both.
-    Trajectory length is stochastic: min_glimpses + geometric(continue_prob).
-    Memory is constant due to chunking - no max needed.
+    Chunks of `chunk_size` steps: backward after each chunk, gradient flows within.
+    Trajectory length is stochastic: chunk_size * (1 + geometric(continue_prob)).
+    Memory is O(chunk_size) due to chunking.
     """
     assert n_branches >= 2 and n_branches % 2 == 0
-    assert min_glimpses >= 2 and min_glimpses % 2 == 0
+    assert chunk_size >= 2
     assert 0.0 <= continue_prob <= 1.0
     device = images.device
     B = images.shape[0]
@@ -106,10 +106,10 @@ def training_step(
     canvas_init = model.init_canvas(batch_size=B, canvas_grid_size=canvas_grid_size)
     cls_init = model.init_cls(batch_size=B)
 
-    # Sample trajectory length in chunks of 2 (shared across branches)
-    n_glimpses = min_glimpses
+    # Sample trajectory length in chunks (shared across branches)
+    n_glimpses = chunk_size
     while random.random() < continue_prob:
-        n_glimpses += 2
+        n_glimpses += chunk_size
 
     vp_types = _assign_viewpoint_types(
         n_glimpses=n_glimpses,
@@ -233,7 +233,7 @@ def training_step(
             state.scene_pred, state.cls_pred = L.scene_pred, L.cls_pred
             state.n_steps += 1
 
-            is_chunk_end = (t % 2 == 1)
+            is_chunk_end = ((t + 1) % chunk_size == 0)
             is_last = (t == n_glimpses - 1)
 
             if is_chunk_end:
@@ -259,7 +259,7 @@ def training_step(
             else:
                 state.canvas, state.cls_tok, state.vpe = out.canvas, out.global_cls, out.vpe
 
-        # Record metrics (no trailing step needed - n_glimpses always even)
+        # Record metrics (no trailing step - n_glimpses is always a multiple of chunk_size)
         total = state.total_scene_loss + state.total_scene_cls_loss + state.total_glimpse_patches_loss + state.total_glimpse_cls_loss
         traj_losses[branch_idx] = total / state.n_steps
         scene_losses[branch_idx] = state.total_scene_loss / state.n_steps
