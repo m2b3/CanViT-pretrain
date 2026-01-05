@@ -49,7 +49,7 @@ class Config:
     )
     enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
     enable_glimpse_losses: bool = (
-        True  # Enable glimpse losses (direct backbone gradient)
+        False  # Enable glimpse losses (direct backbone gradient)
     )
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
