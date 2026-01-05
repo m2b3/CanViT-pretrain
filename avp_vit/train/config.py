@@ -42,7 +42,7 @@ class Config:
     n_branches: int = (
         2  # must be >= 2 and even; K/2 RANDOM/FULL at t0, K/2 RANDOM/POLICY at t>=1
     )
-    chunk_size: int = 2  # BPTT chunk size (glimpses per chunk, gradient flows within)
+    chunk_size: int = 3  # BPTT chunk size (glimpses per chunk, gradient flows within)
     continue_prob: float = 0.5  # peak prob of adding another chunk to trajectory
     continue_prob_warmup_steps: int = (
         100_000  # ramp 0 → continue_prob over this many steps
