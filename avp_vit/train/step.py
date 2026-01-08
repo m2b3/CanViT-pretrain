@@ -23,12 +23,13 @@ class NormalizedTargets(NamedTuple):
 
 
 class LossOutput(NamedTuple):
-    """Output from compute_loss - all 4 loss terms + predictions for metrics."""
+    """Output from compute_loss - individual losses + combined mean."""
 
     scene_loss: Tensor
     scene_cls_loss: Tensor
     glimpse_patches_loss: Tensor
     glimpse_cls_loss: Tensor
+    combined: Tensor  # mean of active losses (for gradient scaling)
     scene_pred: Tensor  # for cosine similarity metrics
     cls_pred: Tensor
 
@@ -60,14 +61,12 @@ class ChunkState:
     canvas: Tensor
     cls_tok: Tensor
     vpe: Tensor | None
-    # Scene losses (from canvas, targets = full image features)
-    chunk_scene_loss: Tensor  # with grad, for backprop
-    chunk_scene_cls_loss: Tensor
-    total_scene_loss: Tensor  # detached, for metrics
+    # Combined loss (mean of active components) - for backprop and metrics
+    chunk_combined_loss: Tensor  # with grad
+    total_combined_loss: Tensor  # detached
+    # Individual losses (for per-component metrics)
+    total_scene_loss: Tensor
     total_scene_cls_loss: Tensor
-    # Glimpse losses (from local stream, targets = glimpse features)
-    chunk_glimpse_patches_loss: Tensor
-    chunk_glimpse_cls_loss: Tensor
     total_glimpse_patches_loss: Tensor
     total_glimpse_cls_loss: Tensor
     n_steps: int
@@ -176,11 +175,18 @@ def training_step(
             glimpse_patches_loss = torch.zeros((), device=device)
             glimpse_cls_loss = torch.zeros((), device=device)
 
+        # Combined = mean of active losses (automatic normalization)
+        active = [scene_loss, scene_cls_loss]
+        if compute_glimpse_targets is not None:
+            active.extend([glimpse_patches_loss, glimpse_cls_loss])
+        combined = torch.stack(active).mean()
+
         return LossOutput(
             scene_loss=scene_loss,
             scene_cls_loss=scene_cls_loss,
             glimpse_patches_loss=glimpse_patches_loss,
             glimpse_cls_loss=glimpse_cls_loss,
+            combined=combined,
             scene_pred=scene_pred,
             cls_pred=cls_pred,
         )
@@ -199,12 +205,10 @@ def training_step(
             canvas=out_t0.canvas,
             cls_tok=out_t0.global_cls,
             vpe=out_t0.vpe,
-            chunk_scene_loss=L.scene_loss.float(),
-            chunk_scene_cls_loss=L.scene_cls_loss.float(),
+            chunk_combined_loss=L.combined.float(),
+            total_combined_loss=L.combined.detach().float(),
             total_scene_loss=L.scene_loss.detach().float(),
             total_scene_cls_loss=L.scene_cls_loss.detach().float(),
-            chunk_glimpse_patches_loss=L.glimpse_patches_loss.float(),
-            chunk_glimpse_cls_loss=L.glimpse_cls_loss.float(),
             total_glimpse_patches_loss=L.glimpse_patches_loss.detach().float(),
             total_glimpse_cls_loss=L.glimpse_cls_loss.detach().float(),
             n_steps=1,
@@ -220,12 +224,10 @@ def training_step(
                 out = forward_glimpse(canvas=state.canvas, cls=state.cls_tok, vp=vp, use_ckpt=use_ckpt)
                 L = compute_loss(out)
 
-            # Accumulate with grad (for backprop)
-            state.chunk_scene_loss = state.chunk_scene_loss + L.scene_loss.float()
-            state.chunk_scene_cls_loss = state.chunk_scene_cls_loss + L.scene_cls_loss.float()
-            state.chunk_glimpse_patches_loss = state.chunk_glimpse_patches_loss + L.glimpse_patches_loss.float()
-            state.chunk_glimpse_cls_loss = state.chunk_glimpse_cls_loss + L.glimpse_cls_loss.float()
-            # Accumulate detached (for metrics)
+            # Accumulate combined (with grad for backprop)
+            state.chunk_combined_loss = state.chunk_combined_loss + L.combined.float()
+            state.total_combined_loss = state.total_combined_loss + L.combined.detach().float()
+            # Accumulate individual losses (detached, for per-component metrics)
             state.total_scene_loss = state.total_scene_loss + L.scene_loss.detach().float()
             state.total_scene_cls_loss = state.total_scene_cls_loss + L.scene_cls_loss.detach().float()
             state.total_glimpse_patches_loss = state.total_glimpse_patches_loss + L.glimpse_patches_loss.detach().float()
@@ -237,11 +239,8 @@ def training_step(
             is_last = (t == n_glimpses - 1)
 
             if is_chunk_end:
-                # Backward chunk (all 4 losses summed, gradient flows through both steps)
-                chunk_loss = (
-                    state.chunk_scene_loss + state.chunk_scene_cls_loss +
-                    state.chunk_glimpse_patches_loss + state.chunk_glimpse_cls_loss
-                ) / n_glimpses / n_branches
+                # Backward chunk: combined already averaged over active losses
+                chunk_loss = state.chunk_combined_loss / n_glimpses / n_branches
                 retain = retain_first_chunk if t == 1 else False
                 chunk_loss.backward(retain_graph=retain)
 
@@ -250,18 +249,14 @@ def training_step(
                     state.canvas = out.canvas.detach()
                     state.cls_tok = out.global_cls.detach()
                     state.vpe = out.vpe.detach() if out.vpe is not None else None
-                    state.chunk_scene_loss = torch.zeros((), device=device)
-                    state.chunk_scene_cls_loss = torch.zeros((), device=device)
-                    state.chunk_glimpse_patches_loss = torch.zeros((), device=device)
-                    state.chunk_glimpse_cls_loss = torch.zeros((), device=device)
+                    state.chunk_combined_loss = torch.zeros((), device=device)
                 else:
                     state.canvas, state.cls_tok, state.vpe = out.canvas, out.global_cls, out.vpe
             else:
                 state.canvas, state.cls_tok, state.vpe = out.canvas, out.global_cls, out.vpe
 
         # Record metrics (no trailing step - n_glimpses is always a multiple of chunk_size)
-        total = state.total_scene_loss + state.total_scene_cls_loss + state.total_glimpse_patches_loss + state.total_glimpse_cls_loss
-        traj_losses[branch_idx] = total / state.n_steps
+        traj_losses[branch_idx] = state.total_combined_loss / state.n_steps
         scene_losses[branch_idx] = state.total_scene_loss / state.n_steps
         scene_cls_losses[branch_idx] = state.total_scene_cls_loss / state.n_steps
         glimpse_patches_losses[branch_idx] = state.total_glimpse_patches_loss / state.n_steps
