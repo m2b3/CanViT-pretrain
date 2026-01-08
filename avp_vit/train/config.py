@@ -15,7 +15,7 @@ class Config:
     teacher_model: str = "dinov3_vitb16"
     teacher_ckpt: Path = Path("dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth")
     # Student
-    student_model: str = "dinov3_vits16"
+    student_model: str = "dinov3_vitb16"
     student_ckpt: Path | None = None  # None = random init
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
@@ -42,7 +42,7 @@ class Config:
     n_branches: int = (
         2  # must be >= 2 and even; K/2 RANDOM/FULL at t0, K/2 RANDOM/POLICY at t>=1
     )
-    chunk_size: int = 3  # BPTT chunk size (glimpses per chunk, gradient flows within)
+    chunk_size: int = 2  # BPTT chunk size (glimpses per chunk, gradient flows within)
     continue_prob: float = 0.5  # peak prob of adding another chunk to trajectory
     continue_prob_warmup_steps: int = (
         100_000  # ramp 0 → continue_prob over this many steps
