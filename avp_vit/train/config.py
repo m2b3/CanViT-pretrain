@@ -39,8 +39,8 @@ class Config:
     # 1e-4 was used by the AdaGlimpse authors
     weight_decay: float = 1e-3
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
-    n_full_start_branches: int = 2  # branches starting with FULL viewpoint at t0
-    n_random_start_branches: int = 2  # branches starting with RANDOM viewpoint at t0
+    n_full_start_branches: int = 1  # branches starting with FULL viewpoint at t0
+    n_random_start_branches: int = 1  # branches starting with RANDOM viewpoint at t0
     chunk_size: int = 2  # BPTT chunk size (glimpses per chunk, gradient flows within)
     continue_prob: float = 0.5  # peak prob of adding another chunk to trajectory
     continue_prob_warmup_steps: int = (
