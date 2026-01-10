@@ -11,8 +11,8 @@
 # AVP-ViT training on IN21k
 # Usage: sbatch slurm/train.sbatch [tyro overrides...]
 # Examples:
-#   sbatch slurm/train.sbatch --batch-size 32
-#   sbatch slurm/train.sbatch --grid-sizes 16 32 64
+#   sbatch slurm/train.sbatch --batch-size 128
+#   sbatch slurm/train.sbatch --batch-size 128 --n-trials 1
 
 set -e
 
@@ -23,19 +23,17 @@ echo "Date: $(date)"
 echo "Overrides: $@"
 echo ""
 
-# Environment setup
-module load java/17.0.6
+# Environment
 export PATH=$HOME/.local/bin:$PATH
 export UV_CACHE_DIR="$SLURM_TMPDIR/.uv-cache"
-export UV_PROJECT_ENVIRONMENT="$SLURM_TMPDIR/.venv"
+export HF_HOME="$SCRATCH/.huggingface"
+export TORCH_HOME="$SCRATCH/.torch"
+export TORCH_COMPILE_CACHE_DIR="$SCRATCH/.torch_compile_cache"
 
 # Comet
 if [ -f ~/comet_api_key.txt ]; then
     export COMET_API_KEY=$(cat ~/comet_api_key.txt)
 fi
-
-# torch.compile cache
-export TORCH_COMPILE_CACHE_DIR="$SCRATCH/.torch_compile_cache"
 
 cd ~/scratch/avp-vit
 
@@ -48,6 +46,8 @@ uv run python -m avp_vit.train \
     --train-dir /datashare/imagenet/winter21_whole \
     --val-dir /datashare/imagenet/ILSVRC2012/val \
     --index-dir "$SCRATCH/avp_indices" \
+    --ckpt-dir "$SCRATCH/avp_checkpoints" \
+    --teacher-ckpt "$SCRATCH/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth" \
     "$@"
 
 echo ""
