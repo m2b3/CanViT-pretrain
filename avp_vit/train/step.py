@@ -25,7 +25,7 @@ class NormalizedTargets(NamedTuple):
 class LossOutput(NamedTuple):
     """Output from compute_loss - individual losses + combined mean."""
 
-    scene_loss: Tensor
+    scene_patches_loss: Tensor
     scene_cls_loss: Tensor
     glimpse_patches_loss: Tensor
     glimpse_cls_loss: Tensor
@@ -38,7 +38,7 @@ class BranchMetrics(NamedTuple):
     """Metrics for a branch type."""
 
     loss: Tensor
-    scene_loss: Tensor
+    scene_patches_loss: Tensor
     scene_cls_loss: Tensor
     glimpse_patches_loss: Tensor
     glimpse_cls_loss: Tensor
@@ -63,7 +63,7 @@ class ChunkState:
     vpe: Tensor | None
     chunk_combined_loss: Tensor  # with grad
     total_combined_loss: Tensor  # detached
-    total_scene_loss: Tensor
+    total_scene_patches_loss: Tensor
     total_scene_cls_loss: Tensor
     total_glimpse_patches_loss: Tensor
     total_glimpse_cls_loss: Tensor
@@ -79,6 +79,8 @@ def training_step(
     scene_target: Tensor,
     cls_target: Tensor,
     compute_glimpse_targets: Callable[[Tensor], NormalizedTargets] | None,
+    enable_scene_patches_loss: bool,
+    enable_scene_cls_loss: bool,
     enable_glimpse_patches_loss: bool,
     enable_glimpse_cls_loss: bool,
     glimpse_size_px: int,
@@ -159,11 +161,17 @@ def training_step(
     def compute_loss(out: GlimpseOutput) -> LossOutput:
         scene_pred = model.predict_teacher_scene(out.state.canvas)
         cls_pred = model.predict_scene_teacher_cls(out.state.cls, out.state.canvas)
-        scene_loss = F.mse_loss(scene_pred, scene_target)
-        scene_cls_loss = F.mse_loss(cls_pred, cls_target)
 
+        scene_patches_loss = torch.zeros((), device=device)
+        scene_cls_loss = torch.zeros((), device=device)
         glimpse_patches_loss = torch.zeros((), device=device)
         glimpse_cls_loss = torch.zeros((), device=device)
+
+        if enable_scene_patches_loss:
+            scene_patches_loss = F.mse_loss(scene_pred, scene_target)
+        if enable_scene_cls_loss:
+            scene_cls_loss = F.mse_loss(cls_pred, cls_target)
+
         if compute_glimpse_targets is not None:
             glimpse_targets = compute_glimpse_targets(out.glimpse)
             if enable_glimpse_patches_loss:
@@ -174,15 +182,20 @@ def training_step(
                 glimpse_cls_pred = model.predict_glimpse_teacher_cls(out.local_cls)
                 glimpse_cls_loss = F.mse_loss(glimpse_cls_pred, glimpse_targets.cls)
 
-        active = [scene_loss, scene_cls_loss]
+        active: list[Tensor] = []
+        if enable_scene_patches_loss:
+            active.append(scene_patches_loss)
+        if enable_scene_cls_loss:
+            active.append(scene_cls_loss)
         if enable_glimpse_patches_loss:
             active.append(glimpse_patches_loss)
         if enable_glimpse_cls_loss:
             active.append(glimpse_cls_loss)
+        assert len(active) > 0, "At least one loss must be enabled"
         combined = torch.stack(active).sum()
 
         return LossOutput(
-            scene_loss=scene_loss,
+            scene_patches_loss=scene_patches_loss,
             scene_cls_loss=scene_cls_loss,
             glimpse_patches_loss=glimpse_patches_loss,
             glimpse_cls_loss=glimpse_cls_loss,
@@ -204,7 +217,7 @@ def training_step(
             vpe=out.vpe,
             chunk_combined_loss=L.combined.float(),
             total_combined_loss=L.combined.detach().float(),
-            total_scene_loss=L.scene_loss.detach().float(),
+            total_scene_patches_loss=L.scene_patches_loss.detach().float(),
             total_scene_cls_loss=L.scene_cls_loss.detach().float(),
             total_glimpse_patches_loss=L.glimpse_patches_loss.detach().float(),
             total_glimpse_cls_loss=L.glimpse_cls_loss.detach().float(),
@@ -225,7 +238,7 @@ def training_step(
 
             chunk.chunk_combined_loss = chunk.chunk_combined_loss + L.combined.float()
             chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()
-            chunk.total_scene_loss = chunk.total_scene_loss + L.scene_loss.detach().float()
+            chunk.total_scene_patches_loss = chunk.total_scene_patches_loss + L.scene_patches_loss.detach().float()
             chunk.total_scene_cls_loss = chunk.total_scene_cls_loss + L.scene_cls_loss.detach().float()
             chunk.total_glimpse_patches_loss = chunk.total_glimpse_patches_loss + L.glimpse_patches_loss.detach().float()
             chunk.total_glimpse_cls_loss = chunk.total_glimpse_cls_loss + L.glimpse_cls_loss.detach().float()
@@ -257,7 +270,7 @@ def training_step(
         n = chunk.n_steps
         return (
             chunk.total_combined_loss / n,
-            chunk.total_scene_loss / n,
+            chunk.total_scene_patches_loss / n,
             chunk.total_scene_cls_loss / n,
             chunk.total_glimpse_patches_loss / n,
             chunk.total_glimpse_cls_loss / n,

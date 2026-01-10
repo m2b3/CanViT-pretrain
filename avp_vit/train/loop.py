@@ -444,6 +444,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 scene_target=batch.scene_target,
                 cls_target=batch.cls_target,
                 compute_glimpse_targets=compute_glimpse_targets_fn,
+                enable_scene_patches_loss=cfg.enable_scene_patches_loss,
+                enable_scene_cls_loss=cfg.enable_scene_cls_loss,
                 enable_glimpse_patches_loss=cfg.enable_glimpse_patches_loss,
                 enable_glimpse_cls_loss=cfg.enable_glimpse_cls_loss,
                 glimpse_size_px=glimpse_size_px,
@@ -471,8 +473,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 if m is None:
                     continue
                 ema.update(f"{prefix}/loss", m.loss)
-                ema.update(f"{prefix}/scene_loss", m.scene_loss)
-                ema.update(f"{prefix}/scene_cls_loss", m.scene_cls_loss)
+                if cfg.enable_scene_patches_loss:
+                    ema.update(f"{prefix}/scene_patches_loss", m.scene_patches_loss)
+                if cfg.enable_scene_cls_loss:
+                    ema.update(f"{prefix}/scene_cls_loss", m.scene_cls_loss)
                 if cfg.enable_glimpse_patches_loss:
                     ema.update(f"{prefix}/glimpse_patches_loss", m.glimpse_patches_loss)
                 if cfg.enable_glimpse_cls_loss:

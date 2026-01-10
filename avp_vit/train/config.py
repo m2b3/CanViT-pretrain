@@ -47,6 +47,8 @@ class Config:
         100_000  # ramp 0 → continue_prob over this many steps
     )
     enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
+    enable_scene_patches_loss: bool = True  # Scene (canvas) patch reconstruction loss
+    enable_scene_cls_loss: bool = True  # Scene (global) CLS reconstruction loss
     enable_glimpse_patches_loss: bool = True  # Glimpse patch reconstruction loss
     enable_glimpse_cls_loss: bool = True  # Glimpse CLS reconstruction loss
     ema_alpha: float = 0.1  # EMA smoothing for metrics
