@@ -31,37 +31,35 @@ CKPT = os.path.expanduser(os.environ.get(
     '~/projects/def-skrishna/checkpoints/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth'
 ))
 teacher = create_backbone('dinov3_vitb16', weights=CKPT).to(DEVICE).eval()
-teacher_compiled = None
+teacher_compiled: dict[str, object] = {}
 print(f"  teacher: {teacher.embed_dim}d, {teacher.n_blocks} blocks")
 
 print("Loading student...")
 backbone = create_backbone('dinov3_vitb16', pretrained=False).to(DEVICE)
 student = ActiveCanViT(backbone=backbone, cfg=ActiveCanViTConfig(teacher_dim=768)).to(DEVICE).eval()
-student_compiled = None
+student_compiled: dict[str, object] = {}
 PATCH = backbone.patch_size_px
 print(f"  student: patch={PATCH}px")
 
 
-def _get_teacher(compile: bool):
-    global teacher_compiled
-    if not compile:
+def _get_teacher(compile: str | None):
+    if compile is None:
         return teacher
-    if teacher_compiled is None:
-        print("  compiling teacher...")
-        teacher.compile()
-        teacher_compiled = teacher
-    return teacher_compiled
+    if compile not in teacher_compiled:
+        print(f"  compiling teacher (mode={compile})...")
+        teacher.compile(mode=compile)
+        teacher_compiled[compile] = teacher
+    return teacher_compiled[compile]
 
 
-def _get_student(compile: bool):
-    global student_compiled
-    if not compile:
+def _get_student(compile: str | None):
+    if compile is None:
         return student
-    if student_compiled is None:
-        print("  compiling student...")
-        student.compile()
-        student_compiled = student
-    return student_compiled
+    if compile not in student_compiled:
+        print(f"  compiling student (mode={compile})...")
+        student.compile(mode=compile)
+        student_compiled[compile] = student
+    return student_compiled[compile]
 
 
 def _bench(fn, batch, amp: bool):
@@ -85,14 +83,16 @@ def _bench(fn, batch, amp: bool):
     print(f"  → {N/elapsed:.1f} steps/s, {N*batch/elapsed:.0f} img/s")
 
 
-def bench_teacher(batch=64, size=512, amp=False, compile=False):
+def bench_teacher(batch=64, size=512, amp=False, compile=None):
+    """compile: None, 'default', 'reduce-overhead', 'max-autotune'"""
     print(f"bench_teacher(batch={batch}, size={size}, amp={amp}, compile={compile})")
     model = _get_teacher(compile)
     x = torch.randn(batch, 3, size, size, device=DEVICE)
     _bench(lambda: model.forward_norm_features(x), batch, amp)
 
 
-def bench_student(glimpse=8, canvas=32, batch=64, size=512, amp=False, compile=False):
+def bench_student(glimpse=8, canvas=32, batch=64, size=512, amp=False, compile=None):
+    """compile: None, 'default', 'reduce-overhead', 'max-autotune'"""
     print(f"bench_student(glimpse={glimpse}, canvas={canvas}, batch={batch}, amp={amp}, compile={compile})")
     model = _get_student(compile)
     x = torch.randn(batch, 3, size, size, device=DEVICE)
@@ -105,5 +105,6 @@ def bench_student(glimpse=8, canvas=32, batch=64, size=512, amp=False, compile=F
 
 
 print(f"\nReady. CUDA: {torch.cuda.get_device_name()}")
-print("  bench_teacher(batch=64, size=512, amp=False, compile=False)")
-print("  bench_student(glimpse=8, canvas=32, batch=64, amp=False, compile=False)")
+print("  bench_teacher(batch, size, amp, compile)")
+print("  bench_student(glimpse, canvas, batch, size, amp, compile)")
+print("  compile: None, 'default', 'reduce-overhead', 'max-autotune'")
