@@ -151,8 +151,9 @@ class ImageDataset(Dataset):
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
-                img = Image.open(path).convert("RGB")
-                img.load()
+                with Image.open(path) as f:
+                    img = f.convert("RGB")
+                    img.load()
             # Hash decoded pixels (before transform) for integrity verification
             img_hash = xxhash.xxh64(img.tobytes()).hexdigest()
             tensor = self.transform(img)
