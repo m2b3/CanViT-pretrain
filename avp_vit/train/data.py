@@ -50,6 +50,11 @@ def val_transform(size: int) -> transforms.Compose:
     ])
 
 
+# IN21k contains some corrupt images that cause DataLoader workers to fail.
+# Skip failed batches up to this limit before raising.
+MAX_CONSECUTIVE_FAILURES = 10
+
+
 class InfiniteLoader:
     """Infinite iterator over a DataLoader, yields images only."""
 
@@ -60,14 +65,28 @@ class InfiniteLoader:
         while True:
             yield from loader
 
+    def _next_with_retry(self) -> ImageBatch:
+        failures = 0
+        while True:
+            try:
+                batch = next(self._gen)
+                return batch
+            except StopIteration:
+                raise
+            except Exception as e:
+                failures += 1
+                log.warning(f"Batch failed ({failures}/{MAX_CONSECUTIVE_FAILURES}): {e}")
+                if failures >= MAX_CONSECUTIVE_FAILURES:
+                    raise RuntimeError(f"{MAX_CONSECUTIVE_FAILURES} consecutive batch failures") from e
+
     def next_batch(self) -> Tensor:
         """Get next batch of images (discards labels)."""
-        imgs, _ = next(self._gen)
+        imgs, _ = self._next_with_retry()
         return imgs
 
     def next_batch_with_labels(self) -> tuple[Tensor, Tensor]:
         """Get next batch of (images, labels)."""
-        return next(self._gen)
+        return self._next_with_retry()
 
 
 class Loaders(NamedTuple):
