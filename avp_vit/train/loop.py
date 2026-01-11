@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import traceback
+from datetime import datetime, timezone
 from collections.abc import Callable
 from contextlib import nullcontext
 from typing import NamedTuple
@@ -259,6 +260,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             else:
                 log.warning("Checkpoint has no optimizer/scheduler state, using fresh init")
 
+    # Build training config history (tracks config across resumes)
+    training_config_history: dict[str, dict] = {}
+    if ckpt_data is not None:
+        training_config_history = ckpt_data.get("training_config_history") or {}
+    training_config_history[datetime.now(timezone.utc).isoformat()] = flatten_dict(asdict(cfg))
+
     ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
 
     def compute_raw_targets(images: Tensor, sz: int) -> NormFeatures:
@@ -434,6 +441,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 glimpse_cls_norm_state=glimpse_cls_norm.state_dict() if glimpse_cls_norm else None,
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
+                training_config_history=training_config_history,
             )
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
@@ -543,6 +551,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             glimpse_cls_norm_state=glimpse_cls_norm.state_dict() if glimpse_cls_norm else None,
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
+            training_config_history=training_config_history,
         )
 
     ema_loss = ema.get("total_loss")

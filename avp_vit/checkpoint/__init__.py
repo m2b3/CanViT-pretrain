@@ -39,6 +39,8 @@ class CheckpointData(TypedDict):
     # Optimizer/scheduler state for resuming training
     optimizer_state: dict | None
     scheduler_state: dict | None
+    # Training config history: {timestamp: config_dict} - tracks config across resumes
+    training_config_history: dict[str, dict] | None
 
 
 def _git_info() -> tuple[str | None, bool]:
@@ -80,6 +82,7 @@ def save(
     glimpse_cls_norm_state: dict[str, Tensor] | None = None,
     optimizer_state: dict | None = None,
     scheduler_state: dict | None = None,
+    training_config_history: dict[str, dict] | None = None,
 ) -> None:
     """Save checkpoint with all info needed to reconstruct model."""
     from canvit.policy import PolicyHead
@@ -111,6 +114,7 @@ def save(
         "policy_config": policy_config,
         "optimizer_state": optimizer_state,
         "scheduler_state": scheduler_state,
+        "training_config_history": training_config_history,
     }
 
     torch.save(data, path)
@@ -148,6 +152,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "policy_config": raw.get("policy_config"),
         "optimizer_state": raw.get("optimizer_state"),
         "scheduler_state": raw.get("scheduler_state"),
+        "training_config_history": raw.get("training_config_history"),
     }
 
     has_policy = data["policy_config"] is not None
