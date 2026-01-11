@@ -84,7 +84,7 @@ def _bench(fn, batch, amp: bool):
     print(f"  → {N/elapsed:.1f} steps/s, {N*batch/elapsed:.0f} img/s")
 
 
-def bench_teacher(batch=64, size=512, amp=False, compile=None):
+def bench_teacher(batch=64, size=512, amp=True, compile=None):
     """compile: None, 'default', 'reduce-overhead', 'max-autotune'"""
     print(f"bench_teacher(batch={batch}, size={size}, amp={amp}, compile={compile})")
     model = _get_teacher(compile)
@@ -92,7 +92,7 @@ def bench_teacher(batch=64, size=512, amp=False, compile=None):
     _bench(lambda: model.forward_norm_features(x), batch, amp)
 
 
-def bench_student(glimpse=8, canvas=32, batch=64, size=512, amp=False, compile=None):
+def bench_student(glimpse=8, canvas=32, batch=64, size=512, amp=True, compile=None):
     """compile: None, 'default', 'reduce-overhead', 'max-autotune'"""
     print(f"bench_student(glimpse={glimpse}, canvas={canvas}, batch={batch}, amp={amp}, compile={compile})")
     model = _get_student(compile)
