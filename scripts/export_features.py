@@ -71,6 +71,8 @@ class ExportConfig:
     num_workers: int = 8
     image_size: int = 512
     compile: bool = False
+    verify_existing: bool = False
+    """Verify existing shards (slow on network storage). If False, just check file exists."""
 
 
 # =============================================================================
@@ -478,17 +480,22 @@ def main(cfg: ExportConfig) -> None:
         shard_path = shards_dir / f"{shard_id:05d}.pt"
 
         if shard_path.exists():
-            if verify_existing_shard(
-                shard_path,
-                expected_hash=parquet_sha256,
-                max_size=cfg.shard_size,
-                teacher_model=cfg.teacher_model,
-                image_size=cfg.image_size,
-            ):
-                log.info(f"Shard {shard_id}: valid, skipping")
+            if cfg.verify_existing:
+                if verify_existing_shard(
+                    shard_path,
+                    expected_hash=parquet_sha256,
+                    max_size=cfg.shard_size,
+                    teacher_model=cfg.teacher_model,
+                    image_size=cfg.image_size,
+                ):
+                    log.info(f"Shard {shard_id}: valid, skipping")
+                    skipped += 1
+                    continue
+                shard_path.unlink()
+            else:
+                log.info(f"Shard {shard_id}: exists, skipping")
                 skipped += 1
                 continue
-            shard_path.unlink()
 
         start_idx = shard_id * cfg.shard_size
         end_idx = min(start_idx + cfg.shard_size, n_images)
