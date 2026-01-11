@@ -16,6 +16,7 @@ import time
 import torch
 from tqdm import trange
 
+torch.set_float32_matmul_precision('high')
 DEVICE = torch.device("cuda")
 N = 100
 WARMUP = 5
