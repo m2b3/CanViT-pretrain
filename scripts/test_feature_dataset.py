@@ -14,6 +14,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from avp_vit.train.data import IMAGENET_MEAN, IMAGENET_STD
 from avp_vit.train.feature_dataset import FeatureDataset
 
 
@@ -27,10 +28,18 @@ def pca_rgb(patches: torch.Tensor) -> torch.Tensor:
     return torch.from_numpy(rgb)
 
 
+def denormalize(img: torch.Tensor) -> torch.Tensor:
+    """Undo ImageNet normalization. [3, H, W] -> [H, W, 3] in [0, 1]."""
+    mean = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
+    std = torch.tensor(IMAGENET_STD).view(3, 1, 1)
+    img = img * std + mean
+    return img.permute(1, 2, 0).clamp(0, 1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--shards-dir", type=Path, required=True)
-    parser.add_argument("--image-root", type=Path, default=None)
+    parser.add_argument("--image-root", type=Path, required=True)
     parser.add_argument("--shard-size", type=int, default=4096)
     parser.add_argument("--viz-idx", type=int, default=0, help="Index to visualize")
     parser.add_argument("--num-workers", type=int, default=0)
@@ -39,7 +48,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading from: {args.shards_dir}")
-    ds = FeatureDataset(args.shards_dir, expected_shard_size=args.shard_size)
+    ds = FeatureDataset(args.shards_dir, args.image_root, expected_shard_size=args.shard_size)
 
     print("\n=== Metadata ===")
     meta = ds.get_metadata()
@@ -53,7 +62,7 @@ def main():
     print("\n=== Sample access ===")
     for idx in [0, 1, len(ds) // 2, len(ds) - 1]:
         sample = ds[idx]
-        print(f"  idx={idx}: patches={sample.patches.shape}, cls={sample.cls.shape}, class={sample.class_idx}")
+        print(f"  idx={idx}: image={sample.image.shape}, patches={sample.patches.shape}, cls={sample.cls.shape}, class={sample.class_idx}")
 
     print("\n=== Random access benchmark ===")
     indices = torch.randint(0, len(ds), (1000,)).tolist()
@@ -71,8 +80,8 @@ def main():
     for i, batch in enumerate(loader):
         if i >= 5:
             break
-        patches, cls, class_idx = batch
-        print(f"  Batch {i}: patches={patches.shape}, cls={cls.shape}")
+        images, patches, cls, class_idx = batch
+        print(f"  Batch {i}: images={images.shape}, patches={patches.shape}, cls={cls.shape}")
 
     print(f"\n=== Throughput test ({args.throughput_batches} batches) ===")
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
@@ -88,33 +97,30 @@ def main():
     print(f"  Throughput: {throughput:,.0f} images/sec")
 
     # PCA visualization
-    if args.image_root:
-        import matplotlib.pyplot as plt
-        from PIL import Image
+    import matplotlib.pyplot as plt
 
-        print(f"\n=== PCA Visualization (idx={args.viz_idx}) ===")
-        sample = ds[args.viz_idx]
-        rel_path = ds.get_path(args.viz_idx)
-        img_path = args.image_root / rel_path
+    print(f"\n=== PCA Visualization (idx={args.viz_idx}) ===")
+    sample = ds[args.viz_idx]
+    rel_path = ds.get_path(args.viz_idx)
 
-        grid_size = int(ds.n_patches ** 0.5)
-        pca_features = pca_rgb(sample.patches).reshape(grid_size, grid_size, 3)
+    grid_size = int(ds.n_patches ** 0.5)
+    pca_features = pca_rgb(sample.patches).reshape(grid_size, grid_size, 3)
 
-        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 
-        img = Image.open(img_path).convert("RGB")
-        axes[0].imshow(img)
-        axes[0].set_title(f"Original: {rel_path}")
-        axes[0].axis("off")
+    # Use transformed image from dataset (matches features spatially)
+    axes[0].imshow(denormalize(sample.image))
+    axes[0].set_title(f"Transformed: {rel_path}")
+    axes[0].axis("off")
 
-        axes[1].imshow(pca_features)
-        axes[1].set_title(f"PCA of patches ({grid_size}x{grid_size})")
-        axes[1].axis("off")
+    axes[1].imshow(pca_features)
+    axes[1].set_title(f"PCA of patches ({grid_size}x{grid_size})")
+    axes[1].axis("off")
 
-        plt.tight_layout()
-        out_path = Path("feature_dataset_test.png")
-        plt.savefig(out_path, dpi=150)
-        print(f"  Saved: {out_path}")
+    plt.tight_layout()
+    out_path = Path("feature_dataset_test.png")
+    plt.savefig(out_path, dpi=150)
+    print(f"  Saved: {out_path}")
 
     print("\n✓ Smoke test passed")
 

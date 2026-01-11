@@ -10,8 +10,12 @@ from pathlib import Path
 from typing import NamedTuple
 
 import torch
+from PIL import Image
 from torch import Tensor
 from torch.utils.data import Dataset
+from torchvision import transforms
+
+from .data import imagenet_normalize
 
 log = logging.getLogger(__name__)
 
@@ -21,21 +25,24 @@ MAX_OPEN_SHARDS = 64
 
 class FeatureSample(NamedTuple):
     """Single sample from feature dataset."""
+    image: Tensor    # [3, H, W] normalized
     patches: Tensor  # [n_patches, embed_dim]
     cls: Tensor      # [embed_dim]
     class_idx: int
 
 
 class FeatureDataset(Dataset[FeatureSample]):
-    """Dataset for precomputed teacher features.
+    """Dataset for precomputed teacher features + corresponding images.
 
     Args:
         shards_dir: Directory containing shard .pt files (00000.pt, 00001.pt, ...)
+        image_root: Root directory for images (paths in shards are relative to this)
         expected_shard_size: Expected images per shard (for index math). Must match export.
     """
 
-    def __init__(self, shards_dir: Path, expected_shard_size: int = 4096):
+    def __init__(self, shards_dir: Path, image_root: Path, expected_shard_size: int = 4096):
         self.shards_dir = Path(shards_dir)
+        self.image_root = Path(image_root)
         self.shard_size = expected_shard_size
 
         # Discover shards (handles gaps in numbering)
@@ -54,6 +61,15 @@ class FeatureDataset(Dataset[FeatureSample]):
         self.embed_dim = first_shard["embed_dim"]
         self.n_patches = first_shard["n_patches"]
         self.dtype = first_shard["dtype"]
+        self.image_size = first_shard["image_size"]
+
+        # Transform must match export: resize + center crop + normalize
+        self.transform = transforms.Compose([
+            transforms.Resize(self.image_size),
+            transforms.CenterCrop(self.image_size),
+            transforms.ToTensor(),
+            imagenet_normalize(),
+        ])
 
         # Calculate total images across all available shards
         self.n_images = 0
@@ -96,7 +112,14 @@ class FeatureDataset(Dataset[FeatureSample]):
         logical_shard_idx, local_idx = self._find_shard(idx)
         shard = self._load_shard_by_idx(logical_shard_idx)
 
+        # Load and transform image
+        rel_path = shard["paths"][local_idx]
+        img = Image.open(self.image_root / rel_path).convert("RGB")
+        img_tensor = self.transform(img)
+        assert isinstance(img_tensor, Tensor)
+
         return FeatureSample(
+            image=img_tensor,
             patches=shard["patches"][local_idx],
             cls=shard["cls"][local_idx],
             class_idx=shard["class_idxs"][local_idx].item(),
