@@ -20,7 +20,7 @@ DESIGN DECISIONS:
     - Resume-friendly: existing shards are skipped automatically
     - GPU buffers preallocated: no per-batch .cpu() calls, no memory fragmentation
 
-SHARD SCHEMA (v1):
+SHARD SCHEMA:
     # Data
     patches: [N, n_patches, embed_dim] STORAGE_DTYPE  - patch features (L2-normalized by teacher)
     cls: [N, embed_dim] STORAGE_DTYPE                 - CLS token (L2-normalized by teacher)
@@ -46,7 +46,7 @@ SHARD SCHEMA (v1):
 
     # Provenance
     created_at: str                                   - ISO 8601 UTC timestamp
-    schema_version: int                               - 1 (bump if schema changes)
+    git_commit: str                                   - commit hash of export script
 
 VERIFYING SHARD COMPATIBILITY:
     Two shards are compatible if these fields match:
@@ -68,6 +68,7 @@ THROUGHPUT:
 import gc
 import hashlib
 import logging
+import subprocess
 import time
 import warnings
 from dataclasses import dataclass
@@ -93,8 +94,6 @@ from tqdm import tqdm
 STORAGE_DTYPE = torch.bfloat16
 # Derived: bytes per element. Used for size estimation. Adapts if STORAGE_DTYPE changes.
 STORAGE_BYTES = torch.tensor([], dtype=STORAGE_DTYPE).element_size()
-# Bump this if shard schema changes in incompatible ways.
-SCHEMA_VERSION = 1
 
 # Reject truncated images rather than silently loading garbage.
 ImageFile.LOAD_TRUNCATED_IMAGES = False
@@ -190,6 +189,16 @@ def estimate_bytes(n_images: int, n_patches: int, embed_dim: int) -> int:
 def log_gpu(label: str) -> None:
     """Log current GPU memory allocation. Useful for detecting leaks."""
     log.info(f"GPU [{label}]: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
+
+
+def get_git_commit() -> str:
+    """Get current git commit hash. Returns 'unknown' if not in a git repo."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+        ).strip()
+    except Exception:
+        return "unknown"
 
 
 def sha256_file(path: Path) -> str:
@@ -350,7 +359,7 @@ def export_shard(
             "n_patches": n_patches,
             # Provenance
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "schema_version": SCHEMA_VERSION,
+            "git_commit": get_git_commit(),
         },
         tmp,
     )
