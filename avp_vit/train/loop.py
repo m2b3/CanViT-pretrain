@@ -177,7 +177,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Grid size: {G}, scene size: {scene_size}px")
 
     train_loader, val_loader = create_loaders(cfg)
-    has_features = cfg.feature_shards_dir is not None
+    has_features = cfg.feature_base_dir is not None
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)

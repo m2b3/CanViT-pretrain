@@ -63,8 +63,11 @@ class Config:
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     train_index_dir: Path | None = None  # Required for raw image training
     val_index_dir: Path | None = None  # Required for validation
-    feature_shards_dir: Path | None = None  # If set, use precomputed features
-    feature_image_root: Path | None = None  # Required with feature_shards_dir
+    # Precomputed features (skips teacher inference on train images)
+    # If feature_base_dir is set, shards path is auto-constructed:
+    #   {feature_base_dir}/{teacher_model}/{image_resolution}/shards/
+    feature_base_dir: Path | None = None
+    feature_image_root: Path | None = None  # Required with feature_base_dir
     ckpt_dir: Path = Path("checkpoints")
     resume_ckpt: Path | None = None
     reset_policy: bool = False  # Reinitialize policy weights when resuming

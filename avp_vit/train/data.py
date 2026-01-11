@@ -115,7 +115,7 @@ def scene_size_px(grid_size: int, patch_size: int) -> int:
 def create_loaders(cfg: "Config") -> Loaders:
     """Create train and validation data loaders.
 
-    If cfg.feature_shards_dir is set, train loader uses precomputed features.
+    If cfg.feature_base_dir is set, train loader uses precomputed features.
     Val loader always uses raw images.
     """
     from .config import Config
@@ -128,13 +128,19 @@ def create_loaders(cfg: "Config") -> Loaders:
     persistent = cfg.num_workers > 0
 
     # Train loader: features or raw images
-    if cfg.feature_shards_dir is not None:
+    if cfg.feature_base_dir is not None:
         log.info("Train: using PRECOMPUTED FEATURES")
-        assert cfg.feature_image_root is not None, "feature_image_root required with feature_shards_dir"
-        from .feature_dataset import FeatureIterableDataset
-        train_ds = FeatureIterableDataset(cfg.feature_shards_dir, cfg.feature_image_root)
-        log.info(f"  shards_dir: {cfg.feature_shards_dir}")
+        assert cfg.feature_image_root is not None, "feature_image_root required with feature_base_dir"
+        # Construct shards path from config: {base}/{teacher_model}/{resolution}/shards/
+        shards_dir = cfg.feature_base_dir / cfg.teacher_model / str(sz) / "shards"
+        log.info(f"  feature_base_dir: {cfg.feature_base_dir}")
+        log.info(f"  teacher_model: {cfg.teacher_model}")
+        log.info(f"  resolution: {sz}")
+        log.info(f"  → shards_dir: {shards_dir}")
         log.info(f"  image_root: {cfg.feature_image_root}")
+        assert shards_dir.is_dir(), f"shards_dir not found: {shards_dir}"
+        from .feature_dataset import FeatureIterableDataset
+        train_ds = FeatureIterableDataset(shards_dir, cfg.feature_image_root)
         log.info(f"  {len(train_ds.shard_files)} shards")
         train_loader = InfiniteLoader(DataLoader(
             train_ds, batch_size=cfg.batch_size, num_workers=cfg.num_workers,
