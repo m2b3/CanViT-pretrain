@@ -36,6 +36,14 @@
 set -euo pipefail
 
 # ==============================================================================
+# SETUP - source env.sh FIRST (defines paths)
+# ==============================================================================
+
+cd ~/scratch/avp-vit
+source slurm/env.sh
+mkdir -p logs
+
+# ==============================================================================
 # CONFIG
 # ==============================================================================
 
@@ -50,14 +58,6 @@ SHARDS_PER_JOB=36
 PARQUET="$INDEX_DIR/in21k.parquet"
 IMAGE_ROOT="$IN21K_DIR"
 OUT_DIR="$FEATURES_DIR/${TEACHER_MODEL}/${IMAGE_SIZE}"
-
-# ==============================================================================
-# SETUP
-# ==============================================================================
-
-cd ~/scratch/avp-vit
-source slurm/env.sh
-mkdir -p logs
 
 JOB_ID=${SLURM_ARRAY_TASK_ID:?Must run as array job}
 START_SHARD=$((JOB_ID * SHARDS_PER_JOB))
