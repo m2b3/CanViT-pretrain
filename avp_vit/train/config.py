@@ -49,8 +49,8 @@ class Config:
     enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
     enable_scene_patches_loss: bool = True  # Scene (canvas) patch reconstruction loss
     enable_scene_cls_loss: bool = True  # Scene (global) CLS reconstruction loss
-    enable_glimpse_patches_loss: bool = True  # Glimpse patch reconstruction loss
-    enable_glimpse_cls_loss: bool = True  # Glimpse CLS reconstruction loss
+    enable_glimpse_patches_loss: bool = False  # Glimpse patch reconstruction loss
+    enable_glimpse_cls_loss: bool = False  # Glimpse CLS reconstruction loss
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
