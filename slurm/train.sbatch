@@ -24,20 +24,8 @@ echo "Overrides: $@"
 echo ""
 
 # Environment
-export PATH=$HOME/.local/bin:$PATH
-module load java/17.0.6
-export UV_CACHE_DIR="$SLURM_TMPDIR/.uv-cache"
-export UV_PROJECT_ENVIRONMENT="$SLURM_TMPDIR/.venv"
-export HF_HOME="$SCRATCH/.huggingface"
-export TORCH_HOME="$SCRATCH/.torch"
-export TORCH_COMPILE_CACHE_DIR="$SCRATCH/.torch_compile_cache"
-
-# Comet
-if [ -f ~/comet_api_key.txt ]; then
-    export COMET_API_KEY=$(cat ~/comet_api_key.txt)
-fi
-
 cd ~/scratch/avp-vit
+source slurm/env.sh
 
 echo "=== Installing dependencies ==="
 uv sync

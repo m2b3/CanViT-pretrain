@@ -18,15 +18,8 @@ run_checks() {
     echo ""
 
     # Env setup
-    export PATH=$HOME/.local/bin:$PATH
-    module load java/17.0.6 2>/dev/null || true
-    export HF_HOME="$SCRATCH/.huggingface"
-    export TORCH_HOME="$SCRATCH/.torch"
-    if [ -n "$SLURM_TMPDIR" ]; then
-        export UV_CACHE_DIR="$SLURM_TMPDIR/.uv-cache"
-        export UV_PROJECT_ENVIRONMENT="$SLURM_TMPDIR/.venv"
-    fi
     cd ~/scratch/avp-vit
+    source slurm/env.sh
 
     echo "--- Environment ---"
     echo "  SLURM_TMPDIR:           $SLURM_TMPDIR"
