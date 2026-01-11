@@ -198,18 +198,25 @@ def export_shard(
     tmp = shard_path.with_suffix(".tmp")
     torch.save(
         {
+            # Data
             "patches": patches,
             "cls": cls,
             "paths": paths,
             "class_idxs": torch.tensor(class_idxs, dtype=torch.int32),
+            "failed_indices": failed,
+            # Position
             "shard_id": shard_id,
             "start_idx": start_idx,
             "end_idx": start_idx + n,
-            "failed_indices": failed,
+            # Compatibility (must match across shards)
             "parquet_sha256": parquet_hash,
             "teacher_model": cfg.teacher_model,
             "image_size": cfg.image_size,
+            "shard_size": cfg.shard_size,
             "dtype": str(STORAGE_DTYPE),
+            "embed_dim": embed_dim,
+            "n_patches": n_patches,
+            "schema_version": 1,
         },
         tmp,
     )
