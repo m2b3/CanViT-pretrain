@@ -1,6 +1,7 @@
 """Main training loop."""
 
 import logging
+import os
 import signal
 import traceback
 from collections.abc import Callable
@@ -143,6 +144,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     exp.log_parameters(flatten_dict(asdict(cfg)))
     exp.log_parameters({"trial_number": trial.number})
+    if slurm_job_id := os.environ.get("SLURM_JOB_ID"):
+        exp.log_parameters({"slurm_job_id": slurm_job_id})
 
     teacher = load_teacher(cfg)
     log.info(f"Teacher params: {count_parameters(teacher):,}")
