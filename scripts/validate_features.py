@@ -76,7 +76,8 @@ def main():
         # bfloat16 autocast (what export uses)
         with torch.autocast(device.type, dtype=torch.bfloat16):
             feats_bf16 = teacher.forward_norm_features(img_tensor)
-            patches_bf16_autocast = feats_bf16.patches[0].cpu()  # still float32 from autocast
+            patches_bf16_raw = feats_bf16.patches[0].cpu()  # f32 from autocast
+            patches_bf16_stored = patches_bf16_raw.to(torch.bfloat16)  # matches export path
 
         print("\n=== Precision comparison ===")
 
@@ -89,12 +90,14 @@ def main():
         compare("f32 → f16 ", patches_f32, patches_to_f16.float())
 
         print("\nAutocast vs f32 (same run):")
-        compare("bf16 autocast vs f32", patches_f32, patches_bf16_autocast)
+        compare("bf16 autocast raw vs f32", patches_f32, patches_bf16_raw)
+        compare("bf16 autocast→bf16 vs f32", patches_f32, patches_bf16_stored)
 
         print("\nStored (bf16) vs fresh:")
-        compare("stored vs f32         ", stored_patches, patches_f32)
-        compare("stored vs f32→bf16    ", stored_patches, patches_to_bf16)
-        compare("stored vs bf16 autocast", stored_patches, patches_bf16_autocast)
+        compare("stored vs f32              ", stored_patches, patches_f32)
+        compare("stored vs f32→bf16         ", stored_patches, patches_to_bf16)
+        compare("stored vs autocast raw     ", stored_patches, patches_bf16_raw)
+        compare("stored vs autocast→bf16   ", stored_patches, patches_bf16_stored)  # exact export path
 
         # Run autocast twice to check determinism
         print("\n=== Determinism check ===")
