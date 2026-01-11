@@ -48,6 +48,7 @@ mkdir -p logs
 # ==============================================================================
 
 # Experiment-specific
+DATASET=in21k
 TEACHER_MODEL=dinov3_vitb16
 TEACHER_CKPT="$DINOV3_VITB16_CKPT"
 IMAGE_SIZE=512
@@ -55,9 +56,9 @@ SHARD_SIZE=4096
 SHARDS_PER_JOB=36
 
 # Derived from env.sh
-PARQUET="$INDEX_DIR/in21k.parquet"
+PARQUET="$INDEX_DIR/${DATASET}-shuffled.parquet"
 IMAGE_ROOT="$IN21K_DIR"
-OUT_DIR="$FEATURES_DIR/${TEACHER_MODEL}/${IMAGE_SIZE}"
+OUT_DIR="$FEATURES_DIR/${DATASET}/${TEACHER_MODEL}/${IMAGE_SIZE}"
 
 JOB_ID=${SLURM_ARRAY_TASK_ID:?Must run as array job}
 START_SHARD=$((JOB_ID * SHARDS_PER_JOB))

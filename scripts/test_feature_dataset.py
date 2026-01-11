@@ -40,7 +40,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--shards-dir", type=Path, required=True)
     parser.add_argument("--image-root", type=Path, required=True)
-    parser.add_argument("--shard-size", type=int, default=4096)
     parser.add_argument("--viz-idx", type=int, default=0, help="Index to visualize")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -48,7 +47,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading from: {args.shards_dir}")
-    ds = FeatureDataset(args.shards_dir, args.image_root, expected_shard_size=args.shard_size)
+    ds = FeatureDataset(args.shards_dir, args.image_root)
 
     print("\n=== Metadata ===")
     meta = ds.get_metadata()
