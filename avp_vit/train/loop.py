@@ -105,7 +105,7 @@ def warmup_normalizer(
     images_seen = 0
     pbar = tqdm(total=warmup_images, desc="Warmup normalizers", unit="img", leave=False)
     while images_seen < warmup_images:
-        batch = train_loader.next_batch().to(device)
+        batch = train_loader.next_batch().to(device, non_blocking=True)
         with torch.no_grad():
             # Scene normalizers (full image at scene size)
             feats = compute_raw_targets(batch, scene_size)
@@ -339,15 +339,19 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     def load_train_batch() -> TrainBatch:
         """Load training batch and compute/load normalized scene targets."""
+        # non_blocking=True: CPU returns immediately, GPU ops serialize on same stream
+        # Safe because we don't mutate source tensors after transfer
         if has_features:
             images, raw_patches, raw_cls, labels = train_loader.next()
-            images, labels = images.to(cfg.device), labels.to(cfg.device)
+            images = images.to(cfg.device, non_blocking=True)
+            labels = labels.to(cfg.device, non_blocking=True)
             # .float() for consistency - stored features may be fp16
-            raw_patches = raw_patches.to(device=cfg.device, dtype=torch.float32)
-            raw_cls = raw_cls.to(device=cfg.device, dtype=torch.float32)
+            raw_patches = raw_patches.to(device=cfg.device, dtype=torch.float32, non_blocking=True)
+            raw_cls = raw_cls.to(device=cfg.device, dtype=torch.float32, non_blocking=True)
         else:
             images, labels = train_loader.next_batch_with_labels()
-            images, labels = images.to(cfg.device), labels.to(cfg.device)
+            images = images.to(cfg.device, non_blocking=True)
+            labels = labels.to(cfg.device, non_blocking=True)
             raw = compute_raw_targets(images, scene_size)
             raw_patches, raw_cls = raw.patches, raw.cls
         norm_patches = scene_norm(raw_patches)
@@ -381,8 +385,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             # Validation on val batch (always at val_every)
             val_images, val_labels = val_loader.next_batch_with_labels()
-            val_images = val_images.to(cfg.device)
-            val_labels = val_labels.to(cfg.device) if probe is not None else None
+            val_images = val_images.to(cfg.device, non_blocking=True)
+            val_labels = val_labels.to(cfg.device, non_blocking=True) if probe is not None else None
             try:
                 with amp_ctx:
                     validate(
