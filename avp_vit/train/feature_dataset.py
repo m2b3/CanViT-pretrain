@@ -89,6 +89,7 @@ class FeatureIterableDataset(IterableDataset):
                      f"({shard_path.name}, {n_samples} samples, loaded in {load_time:.2f}s)")
 
             # Sequential iteration - shards are pre-shuffled
+            # .clone() required: mmap'd tensor views serialize poorly across DataLoader workers
             for i in range(n_samples):
                 rel_path = shard["paths"][i]
                 img = Image.open(self.image_root / rel_path).convert("RGB")
@@ -97,7 +98,7 @@ class FeatureIterableDataset(IterableDataset):
 
                 yield (
                     img_tensor,
-                    shard["patches"][i],
-                    shard["cls"][i],
+                    shard["patches"][i].clone(),
+                    shard["cls"][i].clone(),
                     int(shard["class_idxs"][i]),
                 )
