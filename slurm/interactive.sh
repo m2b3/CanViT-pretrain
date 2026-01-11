@@ -6,7 +6,7 @@
 
 TIME="${1:-1:00:00}"
 
-exec srun --account=rrg-skrishna_gpu --gres=gpu:h100:1 --mem=32G --cpus-per-task=8 --time="$TIME" --pty bash -c "
+exec srun --account=rrg-skrishna_gpu --gres=gpu:h100:1 --mem=64G --cpus-per-task=16 --time="$TIME" --pty bash -c "
 cd ~/scratch/avp-vit
 source slurm/env.sh
 uv sync
