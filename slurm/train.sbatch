@@ -25,7 +25,9 @@ echo ""
 
 # Environment
 export PATH=$HOME/.local/bin:$PATH
+module load java/17.0.6
 export UV_CACHE_DIR="$SLURM_TMPDIR/.uv-cache"
+export UV_PROJECT_ENVIRONMENT="$SLURM_TMPDIR/.venv"
 export HF_HOME="$SCRATCH/.huggingface"
 export TORCH_HOME="$SCRATCH/.torch"
 export TORCH_COMPILE_CACHE_DIR="$SCRATCH/.torch_compile_cache"
@@ -45,9 +47,9 @@ echo "=== Starting training ==="
 uv run python -m avp_vit.train \
     --train-dir /datashare/imagenet/winter21_whole \
     --val-dir /datashare/imagenet/ILSVRC2012/val \
-    --index-dir "$SCRATCH/avp_indices" \
+    --index-dir "$SCRATCH/in21k_index" \
     --ckpt-dir "$SCRATCH/avp_checkpoints" \
-    --teacher-ckpt "$SCRATCH/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth" \
+    --teacher-ckpt ~/projects/def-skrishna/checkpoints/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth \
     "$@"
 
 echo ""
