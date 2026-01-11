@@ -7,6 +7,7 @@ Usage:
     uv run python scripts/export_features.py --start-shard 0 --end-shard 5
 """
 
+import gc
 import hashlib
 import json
 import logging
@@ -17,9 +18,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import ceil
 from pathlib import Path
-from queue import Queue
-from threading import Thread
-from typing import NamedTuple
 
 import pyarrow.parquet as pq
 import torch
@@ -42,12 +40,11 @@ log = logging.getLogger(__name__)
 # Constants
 # =============================================================================
 
-# Refuse to load truncated images - fail loud, not silent garbage
 ImageFile.LOAD_TRUNCATED_IMAGES = False
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
-FILE_READ_CHUNK = 64 * 1024  # 64KB
+FILE_READ_CHUNK = 64 * 1024
 
 
 # =============================================================================
@@ -59,58 +56,21 @@ FILE_READ_CHUNK = 64 * 1024  # 64KB
 class ExportConfig:
     """Feature export configuration."""
 
-    # Shard selection (mutually exclusive)
     shard: int | None = None
-    """Single shard to export."""
     start_shard: int | None = None
-    """Start shard (inclusive)."""
     end_shard: int | None = None
-    """End shard (exclusive)."""
 
-    # Paths (defaults from env vars)
     parquet: Path | None = None
-    """Parquet index. Default: $AVP_INDEX_DIR/{image_root.name}.parquet"""
     image_root: Path | None = None
-    """Image root. Default: $AVP_TRAIN_DIR"""
     out_dir: Path | None = None
-    """Output directory. Default: $AVP_FEATURES_DIR"""
     teacher_ckpt: Path | None = None
-    """Teacher checkpoint. Default: $AVP_TEACHER_CKPT"""
 
-    # Model
     teacher_model: str = "dinov3_vitb16"
-    """Teacher model name."""
-
-    # Export
     shard_size: int = 4096
-    """Images per shard."""
     batch_size: int = 64
-    """Inference batch size."""
     num_workers: int = 8
-    """DataLoader workers."""
     image_size: int = 512
-    """Image resolution."""
-
-    # Runtime
     compile: bool = False
-    """torch.compile the teacher."""
-
-
-# =============================================================================
-# Types
-# =============================================================================
-
-
-class ShardData(NamedTuple):
-    """Data for one shard, ready to be written."""
-
-    patches: Tensor  # [N, n_patches, embed_dim] bfloat16
-    cls: Tensor  # [N, embed_dim] bfloat16
-    paths: list[str]
-    class_idxs: list[int]
-    shard_id: int
-    start_idx: int
-    failed_indices: list[int]  # Indices with NaN features (bad images)
 
 
 # =============================================================================
@@ -119,7 +79,6 @@ class ShardData(NamedTuple):
 
 
 def log_gpu_memory(label: str) -> None:
-    """Log GPU memory stats."""
     allocated = torch.cuda.memory_allocated() / 1e9
     reserved = torch.cuda.memory_reserved() / 1e9
     peak = torch.cuda.max_memory_allocated() / 1e9
@@ -127,7 +86,6 @@ def log_gpu_memory(label: str) -> None:
 
 
 def sha256_file(path: Path) -> str:
-    """Return first 16 chars of SHA256 hash of file."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(FILE_READ_CHUNK), b""):
@@ -136,7 +94,6 @@ def sha256_file(path: Path) -> str:
 
 
 def val_transform(size: int) -> transforms.Compose:
-    """Validation transform: resize, center crop, normalize."""
     return transforms.Compose([
         transforms.Resize(size),
         transforms.CenterCrop(size),
@@ -146,7 +103,6 @@ def val_transform(size: int) -> transforms.Compose:
 
 
 def load_teacher(model: str, ckpt: Path, device: torch.device):
-    """Load frozen teacher backbone."""
     backbone = create_backbone(model, weights=str(ckpt))
     backbone.vit.eval()
     for p in backbone.parameters():
@@ -155,23 +111,18 @@ def load_teacher(model: str, ckpt: Path, device: torch.device):
 
 
 def resolve_paths(cfg: ExportConfig) -> tuple[Path, Path, Path, Path]:
-    """Resolve paths from config + env vars."""
     image_root = cfg.image_root or Path(os.environ["AVP_TRAIN_DIR"])
-
     if cfg.parquet is not None:
         parquet = cfg.parquet
     else:
         index_dir = Path(os.environ["AVP_INDEX_DIR"])
         parquet = index_dir / f"{image_root.name}.parquet"
-
     out_dir = cfg.out_dir or Path(os.environ["AVP_FEATURES_DIR"])
     teacher_ckpt = cfg.teacher_ckpt or Path(os.path.expanduser(os.environ["AVP_TEACHER_CKPT"]))
-
     return parquet, image_root, out_dir, teacher_ckpt
 
 
 def resolve_shard_range(cfg: ExportConfig, n_shards: int) -> tuple[int, int]:
-    """Return (start, end) shard range from config."""
     if cfg.shard is not None:
         return cfg.shard, cfg.shard + 1
     if cfg.start_shard is not None and cfg.end_shard is not None:
@@ -196,14 +147,6 @@ def verify_or_create_meta(
     image_root: Path,
     teacher_ckpt: Path,
 ) -> None:
-    """Verify meta.json matches config, or create it.
-
-    Verified fields (must match for shard compatibility):
-        schema_version, shard_size, n_images, parquet_sha256, teacher_model, image_size
-
-    Provenance fields (logged but not verified - paths may differ across nodes):
-        parquet_path, image_root, teacher_ckpt, created_at, n_shards
-    """
     verified = {
         "schema_version": 1,
         "shard_size": shard_size,
@@ -221,7 +164,7 @@ def verify_or_create_meta(
             if actual != expected:
                 raise ValueError(
                     f"meta.json mismatch: {key}={actual!r}, expected {expected!r}. "
-                    "Config changed? Delete output dir to restart fresh."
+                    "Delete output dir to restart fresh."
                 )
         log.info("Verified meta.json")
     else:
@@ -254,24 +197,19 @@ def verify_existing_shard(
     assert "paths" in data, f"{path.name}: missing paths"
 
     if data["parquet_sha256"] != expected_hash:
-        log.warning(f"{path.name}: hash mismatch, will re-export")
+        log.warning(f"{path.name}: hash mismatch")
         return False
-
     if len(data["paths"]) > max_size:
-        log.warning(f"{path.name}: size {len(data['paths'])} > {max_size}, will re-export")
+        log.warning(f"{path.name}: size mismatch")
         return False
-
-    # Verify critical fields match
     if data.get("teacher_model") != teacher_model:
-        log.warning(f"{path.name}: teacher_model mismatch ({data.get('teacher_model')} != {teacher_model}), will re-export")
+        log.warning(f"{path.name}: teacher_model mismatch")
         return False
-
     if data.get("image_size") != image_size:
-        log.warning(f"{path.name}: image_size mismatch ({data.get('image_size')} != {image_size}), will re-export")
+        log.warning(f"{path.name}: image_size mismatch")
         return False
-
     if data.get("dtype") != "torch.bfloat16":
-        log.warning(f"{path.name}: dtype mismatch ({data.get('dtype')} != torch.bfloat16), will re-export")
+        log.warning(f"{path.name}: dtype mismatch")
         return False
 
     return True
@@ -283,8 +221,6 @@ def verify_existing_shard(
 
 
 class ImagePathDataset(Dataset):
-    """Dataset that loads images by path, returns (tensor, idx, success)."""
-
     def __init__(self, root: Path, paths: list[str], transform, image_size: int):
         self.root = root
         self.paths = paths
@@ -297,66 +233,14 @@ class ImagePathDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[Tensor, int, bool]:
         path = self.root / self.paths[idx]
         try:
-            # Make PIL warnings (e.g., "Truncated File Read") raise exceptions
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
                 img = Image.open(path).convert("RGB")
-                # Force full decode (open() is lazy, load() forces read)
                 img.load()
             return self.transform(img), idx, True
         except Exception as e:
             log.warning(f"Bad image {path}: {e}")
-            # NaN tensor - will propagate and explode if accidentally used
             return torch.full((3, self.image_size, self.image_size), float("nan")), idx, False
-
-
-# =============================================================================
-# Writer
-# =============================================================================
-
-
-def writer_thread(
-    queue: Queue,
-    shards_dir: Path,
-    parquet_sha256: str,
-    teacher_model: str,
-    image_size: int,
-) -> None:
-    """Async writer. Receives ShardData from queue, writes atomically (.tmp → .pt)."""
-    while True:
-        item = queue.get()
-        if item is None:
-            break
-
-        shard: ShardData = item
-        final_path = shards_dir / f"{shard.shard_id:05d}.pt"
-        tmp_path = final_path.with_suffix(".tmp")
-
-        # Write to .tmp first
-        torch.save(
-            {
-                "patches": shard.patches,
-                "cls": shard.cls,
-                "paths": shard.paths,
-                "class_idxs": torch.tensor(shard.class_idxs, dtype=torch.int32),
-                "shard_id": shard.shard_id,
-                "start_idx": shard.start_idx,
-                "end_idx": shard.start_idx + len(shard.paths),
-                "failed_indices": shard.failed_indices,
-                "parquet_sha256": parquet_sha256,
-                "teacher_model": teacher_model,
-                "image_size": image_size,
-                "dtype": str(shard.patches.dtype),
-                "exported_at": datetime.now(timezone.utc).isoformat(),
-            },
-            tmp_path,
-        )
-
-        # Atomic rename
-        tmp_path.rename(final_path)
-
-        size_mb = final_path.stat().st_size / 1e6
-        log.info(f"Wrote {final_path.name}: {len(shard.paths)} images, {size_mb:.1f} MB, dtype={shard.patches.dtype}")
 
 
 # =============================================================================
@@ -364,25 +248,30 @@ def writer_thread(
 # =============================================================================
 
 
-def export_shard(
+def export_and_save_shard(
     *,
     shard_id: int,
     paths: list[str],
     class_idxs: list[int],
     start_idx: int,
     image_root: Path,
+    shards_dir: Path,
     teacher,
     device: torch.device,
     cfg: ExportConfig,
     embed_dim: int,
     n_patches: int,
-) -> ShardData:
-    """Run teacher inference on images, return ShardData."""
+    parquet_sha256: str,
+) -> None:
+    """Run teacher inference and save shard. No async, no queues."""
     n_images = len(paths)
 
-    # Preallocate output buffers on GPU - fill in-place, single CPU transfer at end
+    # Preallocate on GPU
     patches = torch.empty(n_images, n_patches, embed_dim, dtype=torch.bfloat16, device=device)
     cls = torch.empty(n_images, embed_dim, dtype=torch.bfloat16, device=device)
+    # Also keep fp32 for error analysis
+    patches_fp32 = torch.empty(n_images, n_patches, embed_dim, dtype=torch.float32, device=device)
+    cls_fp32 = torch.empty(n_images, embed_dim, dtype=torch.float32, device=device)
     failed_indices: list[int] = []
 
     transform = val_transform(cfg.image_size)
@@ -395,8 +284,7 @@ def export_shard(
         shuffle=False,
     )
 
-    # Throughput tracking
-    bytes_per_img = (n_patches + 1) * embed_dim * 2  # bfloat16 = 2 bytes
+    bytes_per_img = (n_patches + 1) * embed_dim * 2
     t0 = time.perf_counter()
     write_idx = 0
 
@@ -404,26 +292,22 @@ def export_shard(
 
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         for images, indices, success in pbar:
-            # Track failed images
             for idx, ok in zip(indices.tolist(), success.tolist()):
                 if not ok:
                     failed_indices.append(idx)
 
-            # Synchronous transfer - safe
             images = images.to(device)
             feats = teacher.forward_norm_features(images)
 
-            # Cast to bfloat16 (autocast affects compute, not necessarily output)
-            feats_patches = feats.patches.to(torch.bfloat16)
-            feats_cls = feats.cls.to(torch.bfloat16)
-
-            # Write in-place to preallocated buffers
             batch_size = images.shape[0]
-            patches[write_idx : write_idx + batch_size] = feats_patches
-            cls[write_idx : write_idx + batch_size] = feats_cls
+            # Store fp32 original
+            patches_fp32[write_idx : write_idx + batch_size] = feats.patches.float()
+            cls_fp32[write_idx : write_idx + batch_size] = feats.cls.float()
+            # Store bfloat16
+            patches[write_idx : write_idx + batch_size] = feats.patches.to(torch.bfloat16)
+            cls[write_idx : write_idx + batch_size] = feats.cls.to(torch.bfloat16)
             write_idx += batch_size
 
-            # Update progress
             elapsed = time.perf_counter() - t0
             pbar.set_postfix({
                 "img/s": f"{write_idx / elapsed:.0f}",
@@ -432,31 +316,81 @@ def export_shard(
 
     assert write_idx == n_images, f"Wrote {write_idx}, expected {n_images}"
 
-    # Stats (cheap reductions on GPU)
-    log.info(
-        f"  patches: min={patches.min().item():.3f} max={patches.max().item():.3f} "
-        f"mean={patches.mean().item():.3f} std={patches.std().item():.3f}"
-    )
-    log.info(
-        f"  cls:     min={cls.min().item():.3f} max={cls.max().item():.3f} "
-        f"mean={cls.mean().item():.3f} std={cls.std().item():.3f}"
-    )
-    log_gpu_memory(f"shard {shard_id} done")
+    # Compute conversion errors (only on valid images)
+    valid_mask = torch.ones(n_images, dtype=torch.bool, device=device)
+    for idx in failed_indices:
+        valid_mask[idx] = False
+
+    if valid_mask.any():
+        p_valid = patches_fp32[valid_mask]
+        c_valid = cls_fp32[valid_mask]
+
+        # bfloat16 error
+        p_bf16 = patches[valid_mask].float()
+        c_bf16 = cls[valid_mask].float()
+        bf16_patches_err = (p_valid - p_bf16).norm() / p_valid.norm()
+        bf16_cls_err = (c_valid - c_bf16).norm() / c_valid.norm()
+
+        # float16 error (for comparison)
+        p_fp16 = p_valid.half().float()
+        c_fp16 = c_valid.half().float()
+        fp16_patches_err = (p_valid - p_fp16).norm() / p_valid.norm()
+        fp16_cls_err = (c_valid - c_fp16).norm() / c_valid.norm()
+
+        log.info(f"  bf16 rel err: patches={bf16_patches_err:.2e} cls={bf16_cls_err:.2e}")
+        log.info(f"  fp16 rel err: patches={fp16_patches_err:.2e} cls={fp16_cls_err:.2e}")
+
+    # Stats on bfloat16 (skip NaN)
+    if valid_mask.any():
+        p_valid_bf16 = patches[valid_mask]
+        c_valid_bf16 = cls[valid_mask]
+        log.info(
+            f"  patches: min={p_valid_bf16.min().item():.3f} max={p_valid_bf16.max().item():.3f} "
+            f"mean={p_valid_bf16.mean().item():.3f} std={p_valid_bf16.std().item():.3f}"
+        )
+        log.info(
+            f"  cls:     min={c_valid_bf16.min().item():.3f} max={c_valid_bf16.max().item():.3f} "
+            f"mean={c_valid_bf16.mean().item():.3f} std={c_valid_bf16.std().item():.3f}"
+        )
+
+    log_gpu_memory(f"shard {shard_id} before save")
 
     if failed_indices:
         log.warning(f"Shard {shard_id}: {len(failed_indices)} failed: {failed_indices}")
 
-    # Transfer to CPU now - frees GPU memory before next shard allocation
-    # (writer thread holds reference while saving, blocking next shard's GPU alloc)
-    return ShardData(
-        patches=patches.cpu(),
-        cls=cls.cpu(),
-        paths=paths,
-        class_idxs=class_idxs,
-        shard_id=shard_id,
-        start_idx=start_idx,
-        failed_indices=failed_indices,
+    # Save directly from GPU - torch.save handles it
+    final_path = shards_dir / f"{shard_id:05d}.pt"
+    tmp_path = final_path.with_suffix(".tmp")
+
+    torch.save(
+        {
+            "patches": patches,
+            "cls": cls,
+            "paths": paths,
+            "class_idxs": torch.tensor(class_idxs, dtype=torch.int32),
+            "shard_id": shard_id,
+            "start_idx": start_idx,
+            "end_idx": start_idx + len(paths),
+            "failed_indices": failed_indices,
+            "parquet_sha256": parquet_sha256,
+            "teacher_model": cfg.teacher_model,
+            "image_size": cfg.image_size,
+            "dtype": str(patches.dtype),
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+        },
+        tmp_path,
     )
+    tmp_path.rename(final_path)
+
+    size_mb = final_path.stat().st_size / 1e6
+    log.info(f"  Wrote {final_path.name}: {size_mb:.1f} MB")
+
+    # Explicit cleanup
+    del patches, cls, patches_fp32, cls_fp32
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    log_gpu_memory(f"shard {shard_id} after cleanup")
 
 
 # =============================================================================
@@ -472,7 +406,6 @@ def main(cfg: ExportConfig) -> None:
     log.info("EXPORT FEATURES")
     log.info("=" * 60)
 
-    # Resolve paths
     parquet_path, image_root, out_dir, teacher_ckpt = resolve_paths(cfg)
     shards_dir = out_dir / "shards"
     shards_dir.mkdir(parents=True, exist_ok=True)
@@ -483,11 +416,9 @@ def main(cfg: ExportConfig) -> None:
     log.info(f"teacher:       {cfg.teacher_model} @ {teacher_ckpt.name}")
     log.info(f"shard_size:    {cfg.shard_size}")
     log.info(f"batch_size:    {cfg.batch_size}")
-    log.info(f"num_workers:   {cfg.num_workers}")
     log.info(f"image_size:    {cfg.image_size}")
-    log.info(f"compile:       {cfg.compile}")
 
-    # Load parquet index
+    # Load parquet
     log.info("-" * 60)
     t0 = time.perf_counter()
     table = pq.read_table(parquet_path)
@@ -496,11 +427,9 @@ def main(cfg: ExportConfig) -> None:
     parquet_sha256 = sha256_file(parquet_path)
     log.info(f"Parquet: {n_images:,} images, {n_shards} shards, hash={parquet_sha256} ({time.perf_counter()-t0:.1f}s)")
 
-    # Shard range
     start_shard, end_shard = resolve_shard_range(cfg, n_shards)
-    log.info(f"Shard range: [{start_shard}, {end_shard}) = {end_shard - start_shard} shards")
+    log.info(f"Shard range: [{start_shard}, {end_shard})")
 
-    # Verify/create meta.json
     verify_or_create_meta(
         out_dir / "meta.json",
         shard_size=cfg.shard_size,
@@ -521,7 +450,7 @@ def main(cfg: ExportConfig) -> None:
     embed_dim = teacher.embed_dim
     grid_size = cfg.image_size // patch_size
     n_patches = grid_size * grid_size
-    assert cfg.image_size % patch_size == 0, f"{cfg.image_size} not divisible by {patch_size}"
+    assert cfg.image_size % patch_size == 0
     log.info(f"Teacher: {embed_dim}d, patch={patch_size}px, grid={grid_size}x{grid_size} ({time.perf_counter()-t0:.1f}s)")
     log_gpu_memory("after teacher load")
 
@@ -532,21 +461,11 @@ def main(cfg: ExportConfig) -> None:
 
     # Warmup
     log.info("-" * 60)
-    t0 = time.perf_counter()
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         teacher.forward_norm_features(torch.randn(1, 3, cfg.image_size, cfg.image_size, device=device))
     torch.cuda.synchronize()
-    log.info(f"Warmup ({time.perf_counter()-t0:.1f}s)")
+    log.info("Warmup done")
     log_gpu_memory("after warmup")
-
-    # Start writer thread
-    write_queue: Queue = Queue(maxsize=1)
-    writer = Thread(
-        target=writer_thread,
-        args=(write_queue, shards_dir, parquet_sha256, cfg.teacher_model, cfg.image_size),
-        daemon=True,
-    )
-    writer.start()
 
     # Export loop
     log.info("-" * 60)
@@ -558,7 +477,6 @@ def main(cfg: ExportConfig) -> None:
     for shard_id in range(start_shard, end_shard):
         shard_path = shards_dir / f"{shard_id:05d}.pt"
 
-        # Skip if valid shard exists
         if shard_path.exists():
             if verify_existing_shard(
                 shard_path,
@@ -570,9 +488,8 @@ def main(cfg: ExportConfig) -> None:
                 log.info(f"Shard {shard_id}: valid, skipping")
                 skipped += 1
                 continue
-            shard_path.unlink()  # Remove invalid
+            shard_path.unlink()
 
-        # Get paths and labels for this shard
         start_idx = shard_id * cfg.shard_size
         end_idx = min(start_idx + cfg.shard_size, n_images)
         n = end_idx - start_idx
@@ -582,32 +499,25 @@ def main(cfg: ExportConfig) -> None:
 
         log.info(f"Shard {shard_id}: [{start_idx}, {end_idx}) = {n} images")
 
-        # Export
         t0 = time.perf_counter()
-        shard_data = export_shard(
+        export_and_save_shard(
             shard_id=shard_id,
             paths=paths,
             class_idxs=class_idxs,
             start_idx=start_idx,
             image_root=image_root,
+            shards_dir=shards_dir,
             teacher=teacher,
             device=device,
             cfg=cfg,
             embed_dim=embed_dim,
             n_patches=n_patches,
+            parquet_sha256=parquet_sha256,
         )
         elapsed = time.perf_counter() - t0
         total_images += n
         total_time += elapsed
         log.info(f"  -> {elapsed:.1f}s, {n / elapsed:.0f} img/s")
-
-        # Queue for async write
-        write_queue.put(shard_data)
-        del shard_data
-
-    # Wait for writer
-    write_queue.put(None)
-    writer.join()
 
     # Summary
     log.info("=" * 60)
