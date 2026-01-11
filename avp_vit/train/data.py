@@ -51,8 +51,9 @@ def val_transform(size: int) -> transforms.Compose:
     ])
 
 
-# IN21k contains some corrupt images that cause DataLoader workers to fail.
-# Skip failed batches up to this limit before raising.
+# IN21k contains corrupt images that cause DataLoader workers to fail.
+# Observed PIL errors: "Corrupt EXIF data", "Truncated File Read", UnidentifiedImageError.
+# See bad_images.txt for the full list. Skip failed batches up to this limit.
 MAX_CONSECUTIVE_FAILURES = 10
 
 
