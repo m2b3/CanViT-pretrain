@@ -14,7 +14,7 @@
 #   sbatch slurm/train.sbatch --batch-size 128
 #   sbatch slurm/train.sbatch --n-trials 1
 
-set -e
+set -eu
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 timed() { local start=$SECONDS; "$@"; log "  ↳ $((SECONDS - start))s"; }
@@ -24,11 +24,6 @@ log "Job: $SLURM_JOB_ID on $(hostname)"
 log "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo 'N/A')"
 log "Args: $*"
 
-# Fail fast on missing SLURM env
-[ -z "$SLURM_TMPDIR" ] && log "FATAL: SLURM_TMPDIR not set" && exit 1
-[ -z "$SCRATCH" ] && log "FATAL: SCRATCH not set" && exit 1
-
-# Environment (sets AVP_* paths, check_critical function)
 cd ~/scratch/avp-vit
 source slurm/env.sh
 
@@ -39,6 +34,7 @@ timed uv sync
 # Training
 log "Starting training..."
 exec uv run python -m avp_vit.train \
-    --index-dir "$AVP_INDEX_DIR" \
-    --ckpt-dir "$AVP_CKPT_DIR" \
+    --index-dir "$INDEX_DIR" \
+    --ckpt-dir "$CHECKPOINTS_DIR" \
+    --teacher-ckpt "$DINOV3_VITB16_CKPT" \
     "$@"
