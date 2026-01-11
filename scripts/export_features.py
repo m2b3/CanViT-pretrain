@@ -6,13 +6,11 @@ Each shard: {patches: [N, n_patches, D], cls: [N, D], paths, class_idxs, metadat
 
 import gc
 import hashlib
-import json
 import logging
 import os
 import time
 import warnings
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from math import ceil
 from pathlib import Path
 
@@ -36,13 +34,16 @@ ImageFile.LOAD_TRUNCATED_IMAGES = False
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S"
+)
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class Config:
     """Feature export configuration."""
+
     # Shard selection (mutually exclusive)
     shard: int | None = None
     start_shard: int | None = None
@@ -89,42 +90,14 @@ def get_shard_range(cfg: Config, n_shards: int) -> tuple[int, int]:
 
 def resolve_paths(cfg: Config) -> tuple[Path, Path, Path, Path]:
     image_root = cfg.image_root or Path(os.environ["AVP_TRAIN_DIR"])
-    parquet = cfg.parquet or Path(os.environ["AVP_INDEX_DIR"]) / f"{image_root.name}.parquet"
+    parquet = (
+        cfg.parquet or Path(os.environ["AVP_INDEX_DIR"]) / f"{image_root.name}.parquet"
+    )
     out_dir = cfg.out_dir or Path(os.environ["AVP_FEATURES_DIR"])
-    teacher_ckpt = cfg.teacher_ckpt or Path(os.path.expanduser(os.environ["AVP_TEACHER_CKPT"]))
+    teacher_ckpt = cfg.teacher_ckpt or Path(
+        os.path.expanduser(os.environ["AVP_TEACHER_CKPT"])
+    )
     return parquet, image_root, out_dir, teacher_ckpt
-
-
-# -----------------------------------------------------------------------------
-# Metadata
-# -----------------------------------------------------------------------------
-
-
-def make_meta_dict(cfg: Config, n_images: int, parquet_hash: str) -> dict:
-    """Fields that define shard compatibility. If any differ, shards are incompatible."""
-    return {
-        "schema_version": 1,
-        "shard_size": cfg.shard_size,
-        "n_images": n_images,
-        "parquet_sha256": parquet_hash,
-        "teacher_model": cfg.teacher_model,
-        "image_size": cfg.image_size,
-        "dtype": str(STORAGE_DTYPE),
-    }
-
-
-def verify_or_create_meta(meta_path: Path, expected: dict) -> None:
-    if meta_path.exists():
-        with open(meta_path) as f:
-            existing = json.load(f)
-        for k, v in expected.items():
-            actual = existing.get(k)
-            assert actual == v, f"meta.json mismatch: {k}={actual!r}, expected {v!r}"
-        log.info("Verified meta.json")
-    else:
-        with open(meta_path, "w") as f:
-            json.dump({**expected, "created_at": datetime.now(timezone.utc).isoformat()}, f, indent=2)
-        log.info("Created meta.json")
 
 
 # -----------------------------------------------------------------------------
@@ -137,12 +110,14 @@ class ImageDataset(Dataset):
         self.root = root
         self.paths = paths
         self.size = size
-        self.transform = transforms.Compose([
-            transforms.Resize(size),
-            transforms.CenterCrop(size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ])
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize(size),
+                transforms.CenterCrop(size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]
+        )
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -275,25 +250,27 @@ def main(cfg: Config) -> None:
     start, end = get_shard_range(cfg, n_shards)
     log.info(f"Shards: [{start}, {end})")
 
-    # Meta
-    meta = make_meta_dict(cfg, n_images, parquet_hash)
-    verify_or_create_meta(out_dir / "meta.json", meta)
-
     # Teacher
-    teacher = create_backbone(cfg.teacher_model, weights=str(teacher_ckpt)).to(device).eval()
+    teacher = (
+        create_backbone(cfg.teacher_model, weights=str(teacher_ckpt)).to(device).eval()
+    )
     for p in teacher.parameters():
         p.requires_grad = False
 
     patch_size = teacher.patch_size_px
     embed_dim = teacher.embed_dim
     n_patches = (cfg.image_size // patch_size) ** 2
-    assert cfg.image_size % patch_size == 0, f"{cfg.image_size} not divisible by {patch_size}"
+    assert cfg.image_size % patch_size == 0, (
+        f"{cfg.image_size} not divisible by {patch_size}"
+    )
     log.info(f"Teacher: {cfg.teacher_model}, {embed_dim}d, {n_patches} patches")
     log_gpu("after teacher")
 
     # Warmup
     with torch.no_grad(), torch.autocast("cuda", dtype=STORAGE_DTYPE):
-        teacher.forward_norm_features(torch.randn(1, 3, cfg.image_size, cfg.image_size, device=device))
+        teacher.forward_norm_features(
+            torch.randn(1, 3, cfg.image_size, cfg.image_size, device=device)
+        )
     torch.cuda.synchronize()
     log_gpu("after warmup")
 
