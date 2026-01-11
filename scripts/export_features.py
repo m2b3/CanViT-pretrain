@@ -431,8 +431,6 @@ def export_shard(
             })
 
     assert write_idx == n_images, f"Wrote {write_idx}, expected {n_images}"
-    assert patches.device.type == "cuda", f"patches on {patches.device}"
-    assert cls.device.type == "cuda", f"cls on {cls.device}"
 
     # Stats (cheap reductions on GPU)
     log.info(
@@ -448,10 +446,11 @@ def export_shard(
     if failed_indices:
         log.warning(f"Shard {shard_id}: {len(failed_indices)} failed: {failed_indices}")
 
-    # Return GPU tensors - torch.save handles transfer
+    # Transfer to CPU now - frees GPU memory before next shard allocation
+    # (writer thread holds reference while saving, blocking next shard's GPU alloc)
     return ShardData(
-        patches=patches,
-        cls=cls,
+        patches=patches.cpu(),
+        cls=cls.cpu(),
         paths=paths,
         class_idxs=class_idxs,
         shard_id=shard_id,
