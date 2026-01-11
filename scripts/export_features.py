@@ -160,8 +160,19 @@ def resolve_shard_range(cfg: ExportConfig, n_shards: int) -> tuple[int, int]:
     raise ValueError("Specify --shard or --start-shard/--end-shard")
 
 
-def verify_meta(meta_path: Path, shard_size: int, n_images: int, parquet_hash: str) -> None:
+def verify_meta(
+    meta_path: Path,
+    shard_size: int,
+    n_images: int,
+    parquet_hash: str,
+    parquet_path: Path,
+    image_root: Path,
+    teacher_model: str,
+    teacher_ckpt: Path,
+    image_size: int,
+) -> None:
     """Verify meta.json matches current config, or create it."""
+    # Fields that MUST match for shards to be compatible
     expected = {
         "schema_version": 1,
         "shard_size": shard_size,
@@ -183,6 +194,12 @@ def verify_meta(meta_path: Path, shard_size: int, n_images: int, parquet_hash: s
         full_meta = {
             **expected,
             "n_shards": ceil(n_images / shard_size),
+            # Debug/provenance info (not verified, just for reference)
+            "parquet_path": str(parquet_path),
+            "image_root": str(image_root),
+            "teacher_model": teacher_model,
+            "teacher_ckpt": str(teacher_ckpt),
+            "image_size": image_size,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         with open(meta_path, "w") as f:
@@ -381,7 +398,17 @@ def main(cfg: ExportConfig) -> None:
     start_shard, end_shard = resolve_shard_range(cfg, n_shards)
     log.info(f"Shard range: [{start_shard}, {end_shard}) = {end_shard - start_shard} shards")
 
-    verify_meta(out_dir / "meta.json", cfg.shard_size, n_images, parquet_hash)
+    verify_meta(
+        meta_path=out_dir / "meta.json",
+        shard_size=cfg.shard_size,
+        n_images=n_images,
+        parquet_hash=parquet_hash,
+        parquet_path=parquet_path,
+        image_root=image_root,
+        teacher_model=cfg.teacher_model,
+        teacher_ckpt=teacher_ckpt,
+        image_size=cfg.image_size,
+    )
 
     # Load teacher
     log.info("-" * 60)
