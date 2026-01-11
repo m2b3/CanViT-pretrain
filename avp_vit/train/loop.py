@@ -105,7 +105,7 @@ def warmup_normalizer(
     images_seen = 0
     pbar = tqdm(total=warmup_images, desc="Warmup normalizers", unit="img", leave=False)
     while images_seen < warmup_images:
-        batch = train_loader.next_batch().to(device)
+        batch = train_loader.next_batch().to(device, non_blocking=True)
         with torch.no_grad():
             # Scene normalizers (full image at scene size)
             feats = compute_raw_targets(batch, scene_size)
@@ -177,6 +177,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Grid size: {G}, scene size: {scene_size}px")
 
     train_loader, val_loader = create_loaders(cfg)
+    has_features = cfg.feature_base_dir is not None
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
@@ -337,12 +338,25 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         return NormalizedTargets(patches=patches, cls=cls)
 
     def load_train_batch() -> TrainBatch:
-        """Load training batch and compute normalized scene targets."""
-        images, labels = train_loader.next_batch_with_labels()
-        images = images.to(cfg.device)
-        labels = labels.to(cfg.device)
-        targets = compute_normalized_targets(images, scene_size, scene_norm, cls_norm)
-        return TrainBatch(images=images, labels=labels, scene_target=targets.patches, cls_target=targets.cls)
+        """Load training batch and compute/load normalized scene targets."""
+        # non_blocking=True: CPU returns immediately, GPU ops serialize on same stream
+        # Safe because we don't mutate source tensors after transfer
+        if has_features:
+            images, raw_patches, raw_cls, labels = train_loader.next()
+            images = images.to(cfg.device, non_blocking=True)
+            labels = labels.to(cfg.device, non_blocking=True)
+            # .float() for consistency - stored features may be fp16
+            raw_patches = raw_patches.to(device=cfg.device, dtype=torch.float32, non_blocking=True)
+            raw_cls = raw_cls.to(device=cfg.device, dtype=torch.float32, non_blocking=True)
+        else:
+            images, labels = train_loader.next_batch_with_labels()
+            images = images.to(cfg.device, non_blocking=True)
+            labels = labels.to(cfg.device, non_blocking=True)
+            raw = compute_raw_targets(images, scene_size)
+            raw_patches, raw_cls = raw.patches, raw.cls
+        norm_patches = scene_norm(raw_patches)
+        norm_cls = cls_norm(raw_cls.unsqueeze(1)).squeeze(1)
+        return TrainBatch(images, labels, norm_patches, norm_cls)
 
     # Glimpse targets callable (only if any glimpse loss enabled)
     if any_glimpse_loss:
@@ -371,8 +385,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             # Validation on val batch (always at val_every)
             val_images, val_labels = val_loader.next_batch_with_labels()
-            val_images = val_images.to(cfg.device)
-            val_labels = val_labels.to(cfg.device) if probe is not None else None
+            val_images = val_images.to(cfg.device, non_blocking=True)
+            val_labels = val_labels.to(cfg.device, non_blocking=True) if probe is not None else None
             try:
                 with amp_ctx:
                     validate(

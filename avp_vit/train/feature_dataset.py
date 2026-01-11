@@ -19,9 +19,8 @@ import torch
 from PIL import Image
 from torch import Tensor
 from torch.utils.data import IterableDataset, get_worker_info
-from torchvision import transforms
 
-from .data import imagenet_normalize
+from .data import val_transform
 
 log = logging.getLogger(__name__)
 
@@ -50,21 +49,13 @@ class FeatureIterableDataset(IterableDataset):
         assert self.shard_files, f"No shards found in {shards_dir}"
 
         # Transform built lazily in __iter__ (needs image_size from shard metadata)
-        self._transform: transforms.Compose | None = None
+        self._transform = None
 
         log.info(f"FeatureIterableDataset init: {time.perf_counter() - t0:.2f}s")
 
     def set_epoch(self, epoch: int) -> None:
         """Set epoch for deterministic shard order shuffling."""
         self.epoch = epoch
-
-    def _build_transform(self, image_size: int) -> transforms.Compose:
-        return transforms.Compose([
-            transforms.Resize(image_size),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-            imagenet_normalize(),
-        ])
 
     def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor, int]]:
         worker_info = get_worker_info()
@@ -90,7 +81,7 @@ class FeatureIterableDataset(IterableDataset):
             # Build transform lazily from first shard's metadata
             if self._transform is None:
                 image_size = shard["image_size"]
-                self._transform = self._build_transform(image_size)
+                self._transform = val_transform(image_size)
                 log.debug(f"Worker {worker_id}: built transform for {image_size}px")
 
             n_samples = len(shard["paths"])
@@ -98,6 +89,7 @@ class FeatureIterableDataset(IterableDataset):
                      f"({shard_path.name}, {n_samples} samples, loaded in {load_time:.2f}s)")
 
             # Sequential iteration - shards are pre-shuffled
+            # .clone() required: mmap'd tensor views serialize poorly across DataLoader workers
             for i in range(n_samples):
                 rel_path = shard["paths"][i]
                 img = Image.open(self.image_root / rel_path).convert("RGB")
@@ -106,7 +98,7 @@ class FeatureIterableDataset(IterableDataset):
 
                 yield (
                     img_tensor,
-                    shard["patches"][i],
-                    shard["cls"][i],
+                    shard["patches"][i].clone(),
+                    shard["cls"][i].clone(),
                     int(shard["class_idxs"][i]),
                 )

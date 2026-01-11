@@ -7,7 +7,7 @@ Entry point: python -m avp_vit.train
 from avp_vit.train.data import (
     IMAGENET_MEAN,
     IMAGENET_STD,
-    ImageBatch,
+    Batch,
     InfiniteLoader,
     Loaders,
     create_loaders,
@@ -53,7 +53,7 @@ __all__ = [
     # Data
     "IMAGENET_MEAN",
     "IMAGENET_STD",
-    "ImageBatch",
+    "Batch",
     "InfiniteLoader",
     "Loaders",
     "create_loaders",

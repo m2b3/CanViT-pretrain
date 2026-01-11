@@ -8,6 +8,8 @@ from torchvision import transforms
 from avp_vit.train.data import (
     IMAGENET_MEAN,
     IMAGENET_STD,
+    MAX_CONSECUTIVE_FAILURES,
+    InfiniteLoader,
     imagenet_normalize,
     train_transform,
     val_transform,
@@ -67,6 +69,88 @@ class TestValTransform:
         out2 = t(img)
         assert isinstance(out1, Tensor) and isinstance(out2, Tensor)
         assert torch.allclose(out1, out2)
+
+
+class _MockLoader:
+    """Mock DataLoader that yields batches, optionally with errors."""
+
+    def __init__(self, batches: list, error_at: int | None = None, error_type: type = ValueError):
+        self._batches = batches
+        self._error_at = error_at
+        self._error_type = error_type
+
+    def __iter__(self) -> "_MockLoaderIter":
+        return _MockLoaderIter(self._batches, self._error_at, self._error_type)
+
+
+class _MockLoaderIter:
+    def __init__(self, batches: list, error_at: int | None, error_type: type):
+        self._batches = batches
+        self._error_at = error_at
+        self._error_type = error_type
+        self._idx = 0
+
+    def __iter__(self) -> "_MockLoaderIter":
+        return self
+
+    def __next__(self) -> tuple[Tensor, Tensor]:
+        if self._error_at is not None and self._idx == self._error_at:
+            self._idx += 1
+            raise self._error_type("simulated worker error")
+        if self._idx >= len(self._batches):
+            raise StopIteration
+        batch = self._batches[self._idx]
+        self._idx += 1
+        return batch
+
+
+class TestInfiniteLoader:
+    def test_yields_batches(self) -> None:
+        batches = [(torch.tensor([i]), torch.tensor([i])) for i in range(3)]
+        loader = InfiniteLoader(_MockLoader(batches))  # type: ignore[arg-type]
+        for i in range(3):
+            imgs, labels = loader.next_batch_with_labels()
+            assert imgs.item() == i
+            assert labels.item() == i
+
+    def test_wraps_around_on_epoch_end(self) -> None:
+        batches = [(torch.tensor([i]), torch.tensor([i])) for i in range(2)]
+        loader = InfiniteLoader(_MockLoader(batches))  # type: ignore[arg-type]
+        # Get 5 batches - should wrap around
+        results = [loader.next_batch_with_labels()[0].item() for _ in range(5)]
+        assert results == [0, 1, 0, 1, 0]
+
+    def test_recovers_from_single_error(self) -> None:
+        batches = [(torch.tensor([i]), torch.tensor([i])) for i in range(3)]
+        loader = InfiniteLoader(_MockLoader(batches, error_at=1))  # type: ignore[arg-type]
+        # First batch OK
+        assert loader.next_batch_with_labels()[0].item() == 0
+        # Second batch errors, should retry and get batch from new epoch
+        imgs, _ = loader.next_batch_with_labels()
+        assert imgs.item() == 0  # New epoch starts from 0
+
+    def test_raises_after_max_consecutive_failures(self) -> None:
+        class AlwaysFailLoader:
+            def __iter__(self) -> "AlwaysFailIter":
+                return AlwaysFailIter()
+
+        class AlwaysFailIter:
+            def __iter__(self) -> "AlwaysFailIter":
+                return self
+
+            def __next__(self) -> tuple[Tensor, Tensor]:
+                raise ValueError("always fails")
+
+        loader = InfiniteLoader(AlwaysFailLoader())  # type: ignore[arg-type]
+        import pytest
+        with pytest.raises(RuntimeError, match=f"{MAX_CONSECUTIVE_FAILURES} consecutive"):
+            loader.next_batch_with_labels()
+
+    def test_next_batch_discards_labels(self) -> None:
+        batches = [(torch.tensor([1, 2]), torch.tensor([99]))]
+        loader = InfiniteLoader(_MockLoader(batches))  # type: ignore[arg-type]
+        imgs = loader.next_batch()
+        assert torch.equal(imgs, torch.tensor([1, 2]))
 
 
 # === Norm Tests ===

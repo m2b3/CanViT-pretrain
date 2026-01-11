@@ -55,8 +55,9 @@ from canvit.hub import create_backbone
 from PIL import Image, ImageFile
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
 from tqdm import tqdm
+
+from avp_vit.train.data import val_transform
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -66,8 +67,6 @@ STORAGE_DTYPE = torch.float16
 STORAGE_BYTES = torch.tensor([], dtype=STORAGE_DTYPE).element_size()
 
 ImageFile.LOAD_TRUNCATED_IMAGES = False
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S"
@@ -142,12 +141,7 @@ class ImageDataset(Dataset):
         self.root = root
         self.paths = paths
         self.size = size
-        self.transform = transforms.Compose([
-            transforms.Resize(size),
-            transforms.CenterCrop(size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ])
+        self.transform = val_transform(size)
 
     def __len__(self) -> int:
         return len(self.paths)
