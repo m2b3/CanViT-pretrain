@@ -445,13 +445,6 @@ def main(cfg: Config) -> None:
     log.info(f"Teacher: {cfg.teacher_model}, {embed_dim}d, {n_patches} patches")
     log_gpu("after teacher")
 
-    # --- Warmup (JIT compilation, CUDA lazy init) ---
-    with torch.no_grad(), torch.autocast("cuda", dtype=STORAGE_DTYPE):
-        teacher.forward_norm_features(
-            torch.randn(1, 3, cfg.image_size, cfg.image_size, device=device)
-        )
-    log_gpu("after warmup")
-
     # --- Determine shards to process (skip existing) ---
     shards_todo = []
     images_todo = 0
