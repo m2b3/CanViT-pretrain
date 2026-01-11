@@ -5,6 +5,7 @@ Subsequent: loads from parquet (~8s for 13M files).
 """
 
 import logging
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ from torchvision.datasets.folder import default_loader
 from torchvision.transforms import Compose
 
 log = logging.getLogger(__name__)
+
+MAX_RETRIES = 10
 
 SCHEMA_VERSION = 2
 
@@ -57,11 +60,17 @@ class IndexedImageFolder(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> tuple:
-        path, target = self.samples[idx]
-        img = self.loader(path)
-        if self.transform is not None:
-            img = self.transform(img)
-        return img, target
+        for _ in range(MAX_RETRIES):
+            path, target = self.samples[idx]
+            try:
+                img = self.loader(path)
+                if self.transform is not None:
+                    img = self.transform(img)
+                return img, target
+            except Exception as e:
+                log.warning(f"Bad image {path}: {e}")
+                idx = random.randint(0, len(self) - 1)
+        raise RuntimeError(f"Failed to load image after {MAX_RETRIES} retries")
 
     def _load_index(self, index_path: Path) -> None:
         import pyarrow.parquet as pq
