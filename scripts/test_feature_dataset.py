@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from avp_vit.train.data import IMAGENET_MEAN, IMAGENET_STD
-from avp_vit.train.feature_dataset import FeatureDataset
+from avp_vit.train.feature_dataset import FeatureDataset, ShardSampler
 
 
 def pca_rgb(patches: torch.Tensor) -> torch.Tensor:
@@ -71,9 +71,10 @@ def main():
     elapsed = time.perf_counter() - t0
     print(f"  1000 random accesses: {elapsed:.2f}s ({elapsed*1000:.1f}ms total, {elapsed:.4f}ms/access)")
 
-    print("\n=== DataLoader test ===")
+    print("\n=== DataLoader test (ShardSampler) ===")
     print(f"  batch_size={args.batch_size}, num_workers={args.num_workers}")
-    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    sampler = ShardSampler(ds)
+    loader = DataLoader(ds, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers)
 
     # Quick sanity check (first 5 batches)
     for i, batch in enumerate(loader):
@@ -83,7 +84,8 @@ def main():
         print(f"  Batch {i}: images={images.shape}, patches={patches.shape}, cls={cls.shape}")
 
     print(f"\n=== Throughput test ({args.throughput_batches} batches) ===")
-    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    sampler = ShardSampler(ds)
+    loader = DataLoader(ds, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers)
     n_images = 0
     t0 = time.perf_counter()
     for i, batch in enumerate(loader):
