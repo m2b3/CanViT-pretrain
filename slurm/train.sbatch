@@ -31,7 +31,6 @@ log "Args: $*"
 # Environment (sets AVP_* paths, check_critical function)
 cd ~/scratch/avp-vit
 source slurm/env.sh
-check_critical || exit 1
 
 # Dependencies
 log "Installing dependencies..."
