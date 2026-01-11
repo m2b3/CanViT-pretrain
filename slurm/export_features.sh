@@ -4,6 +4,7 @@
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=1:00:00
+#SBATCH --array=0-89%20
 #SBATCH --output=logs/export_%A_%a.out
 #SBATCH --error=logs/export_%A_%a.err
 
