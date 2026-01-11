@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
-ImageBatch: TypeAlias = tuple[Tensor, Tensor]  # (images, labels) batched
+Batch: TypeAlias = tuple[Tensor, ...]  # Generic batch (images, labels, ...)
 
 
 def imagenet_normalize() -> transforms.Normalize:
@@ -63,11 +63,11 @@ class InfiniteLoader:
     finalized (gi_frame=None) and subsequent next() calls raise StopIteration.
     """
 
-    def __init__(self, loader: DataLoader[ImageBatch]) -> None:
+    def __init__(self, loader: DataLoader) -> None:
         self._loader = loader
-        self._iter: Iterator[ImageBatch] | None = None
+        self._iter: Iterator[Batch] | None = None
 
-    def _next_with_retry(self) -> ImageBatch:
+    def _next_with_retry(self) -> Batch:
         failures = 0
         while True:
             if self._iter is None:
@@ -85,14 +85,19 @@ class InfiniteLoader:
                 # Worker error corrupts iterator state - reset it
                 self._iter = None
 
+    def next(self) -> Batch:
+        """Get next batch (raw tuple from DataLoader)."""
+        return self._next_with_retry()
+
     def next_batch(self) -> Tensor:
-        """Get next batch of images (discards labels)."""
-        imgs, _ = self._next_with_retry()
-        return imgs
+        """Get images only (first element of batch)."""
+        images, *_ = self._next_with_retry()
+        return images
 
     def next_batch_with_labels(self) -> tuple[Tensor, Tensor]:
-        """Get next batch of (images, labels)."""
-        return self._next_with_retry()
+        """Get (images, labels) - for raw image loaders."""
+        batch = self._next_with_retry()
+        return batch[0], batch[1]
 
 
 class Loaders(NamedTuple):
@@ -107,41 +112,53 @@ def scene_size_px(grid_size: int, patch_size: int) -> int:
 
 
 def create_loaders(cfg: "Config") -> Loaders:
-    """Create train and validation data loaders."""
+    """Create train and validation data loaders.
+
+    If cfg.feature_shards_dir is set, train loader uses precomputed features.
+    Val loader always uses raw images.
+    """
     from .config import Config
     assert isinstance(cfg, Config)
 
-    train_dir, val_dir, index_dir = cfg.train_dir, cfg.val_dir, cfg.index_dir
-    assert train_dir.is_dir(), f"train_dir not found: {train_dir}"
+    val_dir = cfg.val_dir
     assert val_dir.is_dir(), f"val_dir not found: {val_dir}"
 
-    use_indexed = index_dir is not None
-    if use_indexed:
-        log.info(f"Using IndexedImageFolder for train (index_dir={index_dir})")
-
     sz = cfg.image_resolution
-    train_tf = train_transform(sz, (cfg.crop_scale_min, 1.0))
-    val_tf = val_transform(sz)
-    log.info(f"Image resolution: {sz}px")
-
-    if use_indexed:
-        assert index_dir is not None
-        train_ds: Dataset[tuple] = IndexedImageFolder(train_dir, index_dir, train_tf)
-    else:
-        train_ds = ImageFolder(str(train_dir), train_tf)
-    val_ds: Dataset[tuple] = ImageFolder(str(val_dir), val_tf)
-
-    assert len(train_ds) > 0, "train dataset empty"
-    assert len(val_ds) > 0, "val dataset empty"
-    log.info(f"Datasets: train={len(train_ds):,}, val={len(val_ds):,}")
-
     persistent = cfg.num_workers > 0
-    train_loader = InfiniteLoader(DataLoader(
-        train_ds, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
-    ))
-    # CRITICAL: shuffle=True required for validation! Without it, batches are sequential
-    # (all tench, then all goldfish, etc.) which gives misleading metrics due to class bias.
+
+    # Train loader: features or raw images
+    if cfg.feature_shards_dir is not None:
+        assert cfg.feature_image_root is not None, "feature_image_root required"
+        from .feature_dataset import FeatureIterableDataset
+        train_ds = FeatureIterableDataset(cfg.feature_shards_dir, cfg.feature_image_root)
+        log.info(f"Feature dataset: {len(train_ds.shard_files)} shards from {cfg.feature_shards_dir}")
+        train_loader = InfiniteLoader(DataLoader(
+            train_ds, batch_size=cfg.batch_size, num_workers=cfg.num_workers,
+            pin_memory=True, drop_last=True, persistent_workers=persistent,
+        ))
+    else:
+        train_dir, index_dir = cfg.train_dir, cfg.index_dir
+        assert train_dir.is_dir(), f"train_dir not found: {train_dir}"
+        train_tf = train_transform(sz, (cfg.crop_scale_min, 1.0))
+        if index_dir is not None:
+            log.info(f"Using IndexedImageFolder for train (index_dir={index_dir})")
+            train_ds_img: Dataset[tuple] = IndexedImageFolder(train_dir, index_dir, train_tf)
+        else:
+            train_ds_img = ImageFolder(str(train_dir), train_tf)
+        assert len(train_ds_img) > 0, "train dataset empty"
+        log.info(f"Train dataset: {len(train_ds_img):,} images")
+        train_loader = InfiniteLoader(DataLoader(
+            train_ds_img, batch_size=cfg.batch_size, shuffle=True,
+            num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,
+        ))
+
+    # Val loader: always raw images
+    val_tf = val_transform(sz)
+    val_ds: Dataset[tuple] = ImageFolder(str(val_dir), val_tf)
+    assert len(val_ds) > 0, "val dataset empty"
+    log.info(f"Val dataset: {len(val_ds):,} images, resolution: {sz}px")
+    # CRITICAL: shuffle=True required! Without it, batches are sequential
+    # (all tench, then all goldfish, etc.) which gives misleading metrics.
     val_loader = InfiniteLoader(DataLoader(
         val_ds, batch_size=cfg.batch_size, shuffle=True,
         num_workers=cfg.num_workers, pin_memory=True, drop_last=True, persistent_workers=persistent,

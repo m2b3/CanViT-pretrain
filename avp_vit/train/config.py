@@ -62,6 +62,8 @@ class Config:
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
     index_dir: Path | None = None
+    feature_shards_dir: Path | None = None  # If set, use precomputed features
+    feature_image_root: Path | None = None  # Required with feature_shards_dir
     ckpt_dir: Path = Path("checkpoints")
     resume_ckpt: Path | None = None
     reset_policy: bool = False  # Reinitialize policy weights when resuming
