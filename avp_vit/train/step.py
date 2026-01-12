@@ -2,9 +2,10 @@
 
 import random
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, NamedTuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -14,6 +15,8 @@ from avp_vit import ActiveCanViT, GlimpseOutput, RecurrentState
 from canvit import Viewpoint
 
 from .viewpoint import Viewpoint as NamedViewpoint, ViewpointType
+from .viz.sample import VizSampleData, extract_sample0_viz
+from .viz.image import imagenet_denormalize
 
 
 class TeacherTargets(NamedTuple):
@@ -48,6 +51,18 @@ class BranchMetrics(NamedTuple):
     cls_cos_norm: Tensor
 
 
+@dataclass
+class TrainVizData:
+    """Viz data collected during one training branch (sample 0 only)."""
+
+    image: np.ndarray  # [H, W, 3] denormalized input
+    teacher_features: np.ndarray  # [G², D] normalized teacher features (target)
+    viewpoints: list[NamedViewpoint]  # viewpoints used at each timestep
+    viz_samples: list[VizSampleData] = field(default_factory=list)  # per-timestep
+    initial_scene: np.ndarray | None = None  # [G², D] initial scene prediction
+    initial_canvas_spatial: np.ndarray | None = None  # [G², C] initial canvas
+
+
 class StepMetrics(NamedTuple):
     """Output from training_step."""
 
@@ -55,6 +70,7 @@ class StepMetrics(NamedTuple):
     full_start: BranchMetrics | None  # None if n_full_start_branches=0
     random_start: BranchMetrics | None  # None if n_random_start_branches=0
     n_glimpses: int  # trajectory length this step
+    viz_data: TrainVizData | None = None  # optional viz from first branch
 
 
 @dataclass
@@ -98,6 +114,7 @@ def training_step(
     min_viewpoint_scale: float,
     amp_ctx: AbstractContextManager,
     use_checkpointing: bool,
+    collect_viz: bool = False,
 ) -> StepMetrics:
     """Training with truncated BPTT and independent branches.
 
@@ -133,16 +150,21 @@ def training_step(
     full_metrics: list[BranchMetrics] = []
     random_metrics: list[BranchMetrics] = []
 
-    def make_vp(vp_type: ViewpointType, vpe: Tensor | None) -> Viewpoint:
+    # Viz collection for first branch only (when enabled)
+    viz_data: TrainVizData | None = None
+
+    def make_named_vp(vp_type: ViewpointType, vpe: Tensor | None) -> NamedViewpoint:
+        """Create a NamedViewpoint (has .name for viz, convertible to canvit Viewpoint)."""
         if vp_type == ViewpointType.RANDOM:
-            v = NamedViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
-            return Viewpoint(centers=v.centers, scales=v.scales)
+            return NamedViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
         if vp_type == ViewpointType.FULL:
-            v = NamedViewpoint.full_scene(batch_size=B, device=device)
-            return Viewpoint(centers=v.centers, scales=v.scales)
+            return NamedViewpoint.full_scene(batch_size=B, device=device)
         assert model.policy is not None and vpe is not None
         p = model.policy(vpe)
-        return Viewpoint(centers=p.position, scales=p.scale)
+        return NamedViewpoint(name="policy", centers=p.position, scales=p.scale)
+
+    def to_canvit_vp(vp: NamedViewpoint) -> Viewpoint:
+        return Viewpoint(centers=vp.centers, scales=vp.scales)
 
     def forward_glimpse(*, state: RecurrentState, vp: Viewpoint, use_ckpt: bool) -> GlimpseOutput:
         if use_ckpt:
@@ -211,11 +233,33 @@ def training_step(
         )
 
     def run_branch(t0_type: ViewpointType, branch_idx: int) -> BranchMetrics:
+        nonlocal viz_data
+        do_viz = collect_viz and branch_idx == 0
+
+        # Capture initial state for viz (before any glimpses)
+        if do_viz:
+            init_scene = model.predict_teacher_scene(state_init.canvas)
+            init_spatial = model.get_spatial(state_init.canvas[0:1])[0]
+            viz_data = TrainVizData(
+                image=imagenet_denormalize(images[0].cpu()).numpy(),
+                teacher_features=scene_target[0].cpu().float().numpy(),
+                viewpoints=[],
+                viz_samples=[],
+                initial_scene=init_scene[0].detach().cpu().float().numpy(),
+                initial_canvas_spatial=init_spatial.detach().cpu().float().numpy(),
+            )
+
         # t0 forward
         with amp_ctx:
-            vp0 = make_vp(t0_type, None)
+            vp0_named = make_named_vp(t0_type, None)
+            vp0 = to_canvit_vp(vp0_named)
             out = forward_glimpse(state=state_init, vp=vp0, use_ckpt=False)
             L = compute_loss(out)
+
+        if do_viz:
+            assert viz_data is not None
+            viz_data.viewpoints.append(vp0_named)
+            viz_data.viz_samples.append(extract_sample0_viz(out, L.scene_pred, model))
 
         chunk = ChunkState(
             state=out.state,
@@ -234,12 +278,18 @@ def training_step(
         for t in range(1, n_glimpses):
             # t>=1: use pre-computed schedule (half RANDOM, half POLICY, shuffled)
             vp_type = t1_schedule[t - 1][branch_idx]
-            vp = make_vp(vp_type, chunk.vpe)
+            vp_named = make_named_vp(vp_type, chunk.vpe)
+            vp = to_canvit_vp(vp_named)
 
             with amp_ctx:
                 use_ckpt = use_checkpointing and (t % 2 == 1)
                 out = forward_glimpse(state=chunk.state, vp=vp, use_ckpt=use_ckpt)
                 L = compute_loss(out)
+
+            if do_viz:
+                assert viz_data is not None
+                viz_data.viewpoints.append(vp_named)
+                viz_data.viz_samples.append(extract_sample0_viz(out, L.scene_pred, model))
 
             chunk.chunk_combined_loss = chunk.chunk_combined_loss + L.combined.float()
             chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()
@@ -322,4 +372,5 @@ def training_step(
         full_start=full_start,
         random_start=random_start,
         n_glimpses=n_glimpses,
+        viz_data=viz_data,
     )
