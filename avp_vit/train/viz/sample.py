@@ -33,20 +33,20 @@ def extract_sample0_viz(
     model: ActiveCanViT,
 ) -> VizSampleData:
     """Extract viz data for sample 0, move to CPU as numpy."""
-    glimpse_cpu = out.glimpse[0].cpu()
+    glimpse_cpu = out.glimpse[0].detach().cpu()
     glimpse_np = imagenet_denormalize(glimpse_cpu).numpy()
 
-    scene_cpu = predicted_scene[0].cpu().float()
+    scene_cpu = predicted_scene[0].detach().cpu().float()
     scene_np = scene_cpu.numpy()
 
-    canvas_single = out.state.canvas[0:1]
+    canvas_single = out.state.canvas[0:1].detach()
     spatial = model.get_spatial(canvas_single)[0]
     spatial_np = spatial.cpu().float().numpy()
 
     # Extract local stream patches if available
     local_np: np.ndarray | None = None
     if out.local_patches is not None:
-        local_np = out.local_patches[0].cpu().float().numpy()
+        local_np = out.local_patches[0].detach().cpu().float().numpy()
 
     return VizSampleData(
         glimpse=glimpse_np,
