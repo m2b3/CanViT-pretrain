@@ -25,7 +25,7 @@ from avp_vit.train.probe import load_probe
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
-NOISE_LEVELS = [0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
+NOISE_LEVELS = [0.0, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
 
 
 @dataclass
