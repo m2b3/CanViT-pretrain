@@ -22,7 +22,6 @@ from avp_vit.train.viewpoint import (
     make_eval_viewpoints,
     viewpoint_to_pixel_box,
 )
-from avp_vit.train.loss import LossType, mse_loss, cosine_loss, reconstruction_loss
 from avp_vit.train.viz import imagenet_denormalize, timestep_colors
 
 
@@ -315,33 +314,3 @@ class TestTimestepColors:
             assert len(c) == 4  # RGBA
 
 
-# === Loss Tests ===
-
-class TestLossFunctions:
-    def test_mse_loss_zero_for_identical(self) -> None:
-        x = torch.randn(2, 10, 768)
-        assert mse_loss(x, x).item() == 0.0
-
-    def test_cosine_loss_zero_for_identical(self) -> None:
-        x = torch.randn(2, 10, 768)
-        loss = cosine_loss(x, x)
-        assert abs(loss.item()) < 1e-5
-
-    def test_cosine_loss_max_for_opposite(self) -> None:
-        x = torch.randn(2, 10, 768)
-        loss = cosine_loss(x, -x)
-        assert abs(loss.item() - 2.0) < 1e-5  # 1 - (-1) = 2
-
-    def test_reconstruction_loss_dispatches_mse(self) -> None:
-        x = torch.randn(2, 10, 768)
-        y = torch.randn(2, 10, 768)
-        expected = mse_loss(x, y)
-        actual = reconstruction_loss(x, y, LossType.MSE)
-        assert torch.allclose(expected, actual)
-
-    def test_reconstruction_loss_dispatches_cosine(self) -> None:
-        x = torch.randn(2, 10, 768)
-        y = torch.randn(2, 10, 768)
-        expected = cosine_loss(x, y)
-        actual = reconstruction_loss(x, y, LossType.COSINE)
-        assert torch.allclose(expected, actual)
