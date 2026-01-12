@@ -87,6 +87,7 @@ class Config:
     # Compilation and precision
     compile: bool = True
     amp: bool = True
+    non_blocking_transfer: bool = True  # Ablation: async CPU→GPU transfers
     # Optuna
     n_trials: int = 100
     # Runtime

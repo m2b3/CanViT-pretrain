@@ -193,6 +193,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         if cfg.amp else nullcontext()
     )
     log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
+    log.info(f"Non-blocking transfers: {'enabled' if cfg.non_blocking_transfer else 'DISABLED (sync)'}")
 
     ckpt_data: CheckpointData | None = None
     if cfg.resume_ckpt is not None:
@@ -294,21 +295,23 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
 
+    nb = cfg.non_blocking_transfer  # Ablation flag for async transfers
+
     def load_train_batch() -> TrainBatch:
         """Load training batch and compute/load normalized scene targets."""
         # non_blocking=True: CPU returns immediately, GPU ops serialize on same stream
         # Safe because we don't mutate source tensors after transfer
         if has_features:
             images, raw_patches, raw_cls, labels = train_loader.next()
-            images = images.to(cfg.device, non_blocking=True)
-            labels = labels.to(cfg.device, non_blocking=True)
+            images = images.to(cfg.device, non_blocking=nb)
+            labels = labels.to(cfg.device, non_blocking=nb)
             # .float() for consistency - stored features may be fp16
-            raw_patches = raw_patches.to(device=cfg.device, dtype=torch.float32, non_blocking=True)
-            raw_cls = raw_cls.to(device=cfg.device, dtype=torch.float32, non_blocking=True)
+            raw_patches = raw_patches.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
+            raw_cls = raw_cls.to(device=cfg.device, dtype=torch.float32, non_blocking=nb)
         else:
             images, labels = train_loader.next_batch_with_labels()
-            images = images.to(cfg.device, non_blocking=True)
-            labels = labels.to(cfg.device, non_blocking=True)
+            images = images.to(cfg.device, non_blocking=nb)
+            labels = labels.to(cfg.device, non_blocking=nb)
             raw = compute_raw_targets(images, scene_size)
             raw_patches, raw_cls = raw.patches, raw.cls
         norm_patches = scene_norm(raw_patches)
@@ -342,8 +345,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
             # Validation on val batch (always at val_every)
             val_images, val_labels = val_loader.next_batch_with_labels()
-            val_images = val_images.to(cfg.device, non_blocking=True)
-            val_labels = val_labels.to(cfg.device, non_blocking=True) if probe is not None else None
+            val_images = val_images.to(cfg.device, non_blocking=nb)
+            val_labels = val_labels.to(cfg.device, non_blocking=nb) if probe is not None else None
             try:
                 with amp_ctx:
                     validate(
