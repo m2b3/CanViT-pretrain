@@ -47,7 +47,7 @@ from .norm import PositionAwareNorm  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_cosine_scheduler  # noqa: E402
 from .step import TeacherTargets, training_step  # noqa: E402
-from .viz import validate  # noqa: E402
+from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -338,11 +338,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     for step in pbar:
         batch: TrainBatch | None = None
+        do_pca = step in viz_steps  # Used by both validation and training viz
 
         # === VALIDATION/VIZ PHASE (state after `step` gradient updates) ===
         if step % cfg.val_every == 0:
             do_curves = step in curve_steps
-            do_pca = step in viz_steps
 
             # Validation on val batch (always at val_every)
             val_images, val_labels = val_loader.next_batch_with_labels()
@@ -432,6 +432,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 amp_ctx=amp_ctx,
                 use_checkpointing=cfg.use_checkpointing,
+                collect_viz=do_pca,
             )
 
             # Clip policy grads first (if present), then whole model
@@ -489,6 +490,32 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 if trial.should_prune():
                     exp.end()
                     raise optuna.TrialPruned()
+
+            # Training batch PCA visualization (same data as training, no recomputation)
+            if step_metrics.viz_data is not None:
+                vd = step_metrics.viz_data
+                assert vd.image.ndim == 3 and vd.image.shape[2] == 3, f"Expected [H,W,3], got {vd.image.shape}"
+                H, W = vd.image.shape[:2]
+                boxes = [vp.to_pixel_box(0, H, W) for vp in vd.viewpoints]
+                names = [vp.name for vp in vd.viewpoints]
+                scenes = [vs.predicted_scene for vs in vd.viz_samples]
+                glimpses = [vs.glimpse for vs in vd.viz_samples]
+                canvas_spatials = [vs.canvas_spatial for vs in vd.viz_samples]
+                assert vd.initial_scene is not None
+                fig = plot_multistep_pca(
+                    full_img=vd.image,
+                    teacher=vd.teacher_features,
+                    scenes=scenes,
+                    glimpses=glimpses,
+                    boxes=boxes,
+                    names=names,
+                    scene_grid_size=G,
+                    glimpse_grid_size=cfg.glimpse_grid_size,
+                    initial_scene=vd.initial_scene,
+                    hidden_spatials=canvas_spatials if canvas_spatials[0] is not None else None,
+                    initial_hidden_spatial=vd.initial_canvas_spatial,
+                )
+                log_figure(exp, fig, "train/pca", step)
 
     # Final checkpoint (if not already saved at step=n_steps)
     if cfg.n_steps % cfg.ckpt_every != 0:
