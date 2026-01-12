@@ -291,6 +291,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device)
 
     log.info(f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches, chunk_size={cfg.chunk_size}, continue_prob={cfg.continue_prob}")
+    log.info(f"Scene loss type: {cfg.scene_loss_type.value}")
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
@@ -421,6 +422,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 enable_scene_cls_loss=cfg.enable_scene_cls_loss,
                 enable_glimpse_patches_loss=cfg.enable_glimpse_patches_loss,
                 enable_glimpse_cls_loss=cfg.enable_glimpse_cls_loss,
+                scene_loss_type=cfg.scene_loss_type,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
                 n_full_start_branches=cfg.n_full_start_branches,

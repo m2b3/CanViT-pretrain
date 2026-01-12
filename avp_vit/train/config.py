@@ -7,6 +7,7 @@ import torch
 from ytch.device import get_sensible_device
 
 from avp_vit import ActiveCanViTConfig
+from .loss import LossType
 
 
 @dataclass
@@ -51,6 +52,7 @@ class Config:
     enable_scene_cls_loss: bool = True  # Scene (global) CLS reconstruction loss
     enable_glimpse_patches_loss: bool = False  # Glimpse patch reconstruction loss
     enable_glimpse_cls_loss: bool = False  # Glimpse CLS reconstruction loss
+    scene_loss_type: LossType = LossType.MSE  # MSE or COSINE for scene losses
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
