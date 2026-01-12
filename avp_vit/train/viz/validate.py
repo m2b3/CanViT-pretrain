@@ -46,8 +46,10 @@ class ValAccumulator:
     - PCA viz: sample 0 only -> O(T) not O(B×T)
     """
 
-    scene_cos_sims: list[float] = field(default_factory=list)
-    cls_cos_sims: list[float] = field(default_factory=list)
+    scene_cos_raw: list[float] = field(default_factory=list)
+    scene_cos_norm: list[float] = field(default_factory=list)
+    cls_cos_raw: list[float] = field(default_factory=list)
+    cls_cos_norm: list[float] = field(default_factory=list)
     in1k_accs: list[float] = field(default_factory=list)
     pca_predictions: list[TimestepPredictions] = field(default_factory=list)
     viz_samples: list[VizSampleData] = field(default_factory=list)
@@ -126,21 +128,23 @@ def _log_pca(
         )
 
     if log_curves:
-        log_curve(
-            exp,
-            f"{prefix}/scene_cos_sim_vs_timestep",
-            x=list(range(len(acc.scene_cos_sims))),
-            y=acc.scene_cos_sims,
-            step=step,
-        )
-        if acc.cls_cos_sims:
+        for suffix, data in [("raw", acc.scene_cos_raw), ("norm", acc.scene_cos_norm)]:
             log_curve(
                 exp,
-                f"{prefix}/cls_cos_sim_vs_timestep",
-                x=list(range(len(acc.cls_cos_sims))),
-                y=acc.cls_cos_sims,
+                f"{prefix}/scene_cos_{suffix}_vs_timestep",
+                x=list(range(len(data))),
+                y=data,
                 step=step,
             )
+        if acc.cls_cos_raw:
+            for suffix, data in [("raw", acc.cls_cos_raw), ("norm", acc.cls_cos_norm)]:
+                log_curve(
+                    exp,
+                    f"{prefix}/cls_cos_{suffix}_vs_timestep",
+                    x=list(range(len(data))),
+                    y=data,
+                    step=step,
+                )
 
 
 def _log_policy_viz(
@@ -355,8 +359,9 @@ def validate(
     try:
         with torch.inference_mode():
             raw_feats = compute_raw_targets(images, scene_size_px)
-            # Normalized target only used for PCA visualization
+            # Normalized targets for normalized cosine similarity and PCA
             target = scene_normalizer(raw_feats.patches)
+            cls_target = cls_normalizer(raw_feats.cls.unsqueeze(1)).squeeze(1) if has_cls else None
             target_sample0 = target[0].cpu().float().numpy() if log_pca else None
 
             gt_idx = int(labels[0].item()) if has_probe and labels is not None else 0
@@ -395,15 +400,16 @@ def validate(
                     model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas) if has_cls else None
                 )
 
-                # Cosine similarity on RAW features (denormalize predictions, compare to raw targets)
+                # Cosine similarity: both raw (stable across runs) and normalized
                 scene_pred_raw = scene_normalizer.denormalize(predicted_scene)
-                scene_cos = F.cosine_similarity(scene_pred_raw, raw_feats.patches, dim=-1).mean().item()
-                acc.scene_cos_sims.append(scene_cos)
+                acc.scene_cos_raw.append(F.cosine_similarity(scene_pred_raw, raw_feats.patches, dim=-1).mean().item())
+                acc.scene_cos_norm.append(F.cosine_similarity(predicted_scene, target, dim=-1).mean().item())
 
                 if has_cls and predicted_cls is not None:
+                    assert cls_target is not None
                     cls_pred_raw = cls_normalizer.denormalize(predicted_cls.unsqueeze(1)).squeeze(1)
-                    cls_cos = F.cosine_similarity(cls_pred_raw, raw_feats.cls, dim=-1).mean().item()
-                    acc.cls_cos_sims.append(cls_cos)
+                    acc.cls_cos_raw.append(F.cosine_similarity(cls_pred_raw, raw_feats.cls, dim=-1).mean().item())
+                    acc.cls_cos_norm.append(F.cosine_similarity(predicted_cls, cls_target, dim=-1).mean().item())
 
                     if has_probe:
                         assert probe is not None and labels is not None
@@ -432,16 +438,19 @@ def validate(
                 step_fn=step_fn,
             )
 
-            final_cos_sim = acc.scene_cos_sims[-1]
-            exp.log_metric(f"{prefix}/scene_cos_sim", final_cos_sim, step=step)
-
-            for t, sc in enumerate(acc.scene_cos_sims):
-                exp.log_metric(f"{prefix}/scene_cos_sim_t{t}", sc, step=step)
+            # Log both raw and normalized cosine similarities
+            exp.log_metric(f"{prefix}/scene_cos_raw", acc.scene_cos_raw[-1], step=step)
+            exp.log_metric(f"{prefix}/scene_cos_norm", acc.scene_cos_norm[-1], step=step)
+            for t, (raw, norm) in enumerate(zip(acc.scene_cos_raw, acc.scene_cos_norm)):
+                exp.log_metric(f"{prefix}/scene_cos_raw_t{t}", raw, step=step)
+                exp.log_metric(f"{prefix}/scene_cos_norm_t{t}", norm, step=step)
 
             if has_cls:
-                exp.log_metric(f"{prefix}/cls_cos_sim", acc.cls_cos_sims[-1], step=step)
-                for t, cc in enumerate(acc.cls_cos_sims):
-                    exp.log_metric(f"{prefix}/cls_cos_sim_t{t}", cc, step=step)
+                exp.log_metric(f"{prefix}/cls_cos_raw", acc.cls_cos_raw[-1], step=step)
+                exp.log_metric(f"{prefix}/cls_cos_norm", acc.cls_cos_norm[-1], step=step)
+                for t, (raw, norm) in enumerate(zip(acc.cls_cos_raw, acc.cls_cos_norm)):
+                    exp.log_metric(f"{prefix}/cls_cos_raw_t{t}", raw, step=step)
+                    exp.log_metric(f"{prefix}/cls_cos_norm_t{t}", norm, step=step)
 
             if has_probe:
                 for t, ia in enumerate(acc.in1k_accs):
@@ -531,7 +540,7 @@ def validate(
                             W=W,
                         )
 
-            return final_cos_sim
+            return acc.scene_cos_raw[-1]
     finally:
         if model_was_training:
             model.train()

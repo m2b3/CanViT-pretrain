@@ -42,8 +42,10 @@ class BranchMetrics(NamedTuple):
     scene_cls_loss: Tensor
     glimpse_patches_loss: Tensor
     glimpse_cls_loss: Tensor
-    scene_cos: Tensor
-    cls_cos: Tensor
+    scene_cos_raw: Tensor
+    scene_cos_norm: Tensor
+    cls_cos_raw: Tensor
+    cls_cos_norm: Tensor
 
 
 class StepMetrics(NamedTuple):
@@ -128,9 +130,8 @@ def training_step(
         random.shuffle(types)
         t1_schedule.append(types)
 
-    # Metrics accumulators
-    full_metrics: list[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]] = []
-    random_metrics: list[tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]] = []
+    full_metrics: list[BranchMetrics] = []
+    random_metrics: list[BranchMetrics] = []
 
     def make_vp(vp_type: ViewpointType, vpe: Tensor | None) -> Viewpoint:
         if vp_type == ViewpointType.RANDOM:
@@ -209,8 +210,7 @@ def training_step(
             cls_pred=cls_pred,
         )
 
-    def run_branch(t0_type: ViewpointType, branch_idx: int) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """Run one independent branch. Returns metrics tuple."""
+    def run_branch(t0_type: ViewpointType, branch_idx: int) -> BranchMetrics:
         # t0 forward
         with amp_ctx:
             vp0 = make_vp(t0_type, None)
@@ -271,18 +271,19 @@ def training_step(
                 chunk.state = out.state
                 chunk.vpe = out.vpe
 
-        # Return metrics (cosine similarity on RAW features for stability across runs)
         n = chunk.n_steps
         scene_pred_raw = scene_denorm(chunk.scene_pred)
         cls_pred_raw = cls_denorm(chunk.cls_pred.unsqueeze(1)).squeeze(1)
-        return (
-            chunk.total_combined_loss / n,
-            chunk.total_scene_patches_loss / n,
-            chunk.total_scene_cls_loss / n,
-            chunk.total_glimpse_patches_loss / n,
-            chunk.total_glimpse_cls_loss / n,
-            F.cosine_similarity(scene_pred_raw, raw_scene_target, dim=-1).mean(),
-            F.cosine_similarity(cls_pred_raw, raw_cls_target, dim=-1).mean(),
+        return BranchMetrics(
+            loss=chunk.total_combined_loss / n,
+            scene_patches_loss=chunk.total_scene_patches_loss / n,
+            scene_cls_loss=chunk.total_scene_cls_loss / n,
+            glimpse_patches_loss=chunk.total_glimpse_patches_loss / n,
+            glimpse_cls_loss=chunk.total_glimpse_cls_loss / n,
+            scene_cos_raw=F.cosine_similarity(scene_pred_raw, raw_scene_target, dim=-1).mean(),
+            scene_cos_norm=F.cosine_similarity(chunk.scene_pred, scene_target, dim=-1).mean(),
+            cls_cos_raw=F.cosine_similarity(cls_pred_raw, raw_cls_target, dim=-1).mean(),
+            cls_cos_norm=F.cosine_similarity(chunk.cls_pred, cls_target, dim=-1).mean(),
         )
 
     # Run all branches (full-start first, then random-start)
@@ -295,18 +296,25 @@ def training_step(
         random_metrics.append(run_branch(ViewpointType.RANDOM, branch_idx))
         branch_idx += 1
 
-    # Aggregate metrics
-    def aggregate(metrics: list[tuple[Tensor, ...]]) -> BranchMetrics | None:
+    def aggregate(metrics: list[BranchMetrics]) -> BranchMetrics | None:
         if not metrics:
             return None
-        stacked = [torch.stack([m[i] for m in metrics]).mean() for i in range(7)]
-        return BranchMetrics(*stacked)
+        return BranchMetrics(
+            loss=torch.stack([m.loss for m in metrics]).mean(),
+            scene_patches_loss=torch.stack([m.scene_patches_loss for m in metrics]).mean(),
+            scene_cls_loss=torch.stack([m.scene_cls_loss for m in metrics]).mean(),
+            glimpse_patches_loss=torch.stack([m.glimpse_patches_loss for m in metrics]).mean(),
+            glimpse_cls_loss=torch.stack([m.glimpse_cls_loss for m in metrics]).mean(),
+            scene_cos_raw=torch.stack([m.scene_cos_raw for m in metrics]).mean(),
+            scene_cos_norm=torch.stack([m.scene_cos_norm for m in metrics]).mean(),
+            cls_cos_raw=torch.stack([m.cls_cos_raw for m in metrics]).mean(),
+            cls_cos_norm=torch.stack([m.cls_cos_norm for m in metrics]).mean(),
+        )
 
     full_start = aggregate(full_metrics)
     random_start = aggregate(random_metrics)
 
-    # Total loss
-    all_losses = [m[0] for m in full_metrics] + [m[0] for m in random_metrics]
+    all_losses = [m.loss for m in full_metrics] + [m.loss for m in random_metrics]
     total_loss = torch.stack(all_losses).mean()
 
     return StepMetrics(

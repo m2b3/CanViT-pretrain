@@ -451,8 +451,10 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                     ema.update(f"{prefix}/glimpse_patches_loss", m.glimpse_patches_loss)
                 if cfg.enable_glimpse_cls_loss:
                     ema.update(f"{prefix}/glimpse_cls_loss", m.glimpse_cls_loss)
-                ema.update(f"{prefix}/scene_cos", m.scene_cos)
-                ema.update(f"{prefix}/cls_cos", m.cls_cos)
+                ema.update(f"{prefix}/scene_cos_raw", m.scene_cos_raw)
+                ema.update(f"{prefix}/scene_cos_norm", m.scene_cos_norm)
+                ema.update(f"{prefix}/cls_cos_raw", m.cls_cos_raw)
+                ema.update(f"{prefix}/cls_cos_norm", m.cls_cos_norm)
 
             if step % cfg.log_every == 0:
                 grad_norm = grad_norm_t.item()
