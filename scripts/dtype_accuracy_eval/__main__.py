@@ -20,14 +20,30 @@ from avp_vit.train.probe import load_probe
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# Dtypes to compare (order matters for display)
-DTYPE_NAMES = ["fp32", "fp16", "bf16", "fp8"]
-DTYPES: dict[str, torch.dtype] = {
+# Native dtypes
+NATIVE_DTYPES: dict[str, torch.dtype] = {
     "fp32": torch.float32,
     "fp16": torch.float16,
     "bf16": torch.bfloat16,
     "fp8": torch.float8_e4m3fn,
 }
+
+# Low-bit quantization (uniform per-tensor)
+QUANT_BITS = [4, 2, 1]
+
+# All formats to test (order for display)
+ALL_FORMATS = ["fp32", "fp16", "bf16", "fp8", "int4", "int2", "int1"]
+
+
+def quantize_uniform(x: Tensor, bits: int) -> Tensor:
+    """Simulate uniform per-tensor quantization to N bits, return dequantized."""
+    levels = 2**bits
+    x_min, x_max = x.min(), x.max()
+    if x_max == x_min:
+        return x  # Constant tensor, no quantization needed
+    scale = (x_max - x_min) / (levels - 1)
+    x_q = torch.round((x - x_min) / scale).clamp(0, levels - 1)
+    return x_q * scale + x_min
 
 
 @dataclass
@@ -93,7 +109,7 @@ def main(cfg: Config) -> None:
 
     # Accumulators on GPU (no sync until needed)
     correct: dict[str, Tensor] = {
-        name: torch.zeros(1, device=device, dtype=torch.long) for name in DTYPE_NAMES
+        name: torch.zeros(1, device=device, dtype=torch.long) for name in ALL_FORMATS
     }
     total = 0
 
@@ -110,20 +126,24 @@ def main(cfg: Config) -> None:
         # Ensure fp32 baseline
         cls_fp32 = cls_fp32.float()
 
-        # Test each dtype: cast to dtype, cast back to fp32, run probe
-        for name in DTYPE_NAMES:
-            dtype = DTYPES[name]
+        # Test native dtypes
+        for name, dtype in NATIVE_DTYPES.items():
             cls_test = cls_fp32 if dtype == torch.float32 else cls_fp32.to(dtype).float()
             logits = probe(cls_test)
-            preds = logits.argmax(dim=-1)
-            correct[name] += (preds == labels).sum()
+            correct[name] += (logits.argmax(dim=-1) == labels).sum()
+
+        # Test low-bit quantization (uniform per-tensor)
+        for bits in QUANT_BITS:
+            cls_test = quantize_uniform(cls_fp32, bits)
+            logits = probe(cls_test)
+            correct[f"int{bits}"] += (logits.argmax(dim=-1) == labels).sum()
 
         total += labels.shape[0]
 
         # Update pbar periodically (avoid sync every batch)
         if batch_idx % 10 == 0:
-            accs = {n: 100.0 * correct[n].item() / total for n in DTYPE_NAMES}
-            pbar.set_postfix_str(" ".join(f"{n}={accs[n]:.1f}" for n in DTYPE_NAMES))
+            accs = {n: 100.0 * correct[n].item() / total for n in ALL_FORMATS}
+            pbar.set_postfix_str(" ".join(f"{n}={accs[n]:.1f}" for n in ALL_FORMATS))
 
     # Final results
     log.info("")
@@ -131,10 +151,10 @@ def main(cfg: Config) -> None:
     log.info(f"Results ({total} images)")
     log.info("=" * 60)
 
-    accs = {n: 100.0 * correct[n].item() / total for n in DTYPE_NAMES}
+    accs = {n: 100.0 * correct[n].item() / total for n in ALL_FORMATS}
     fp32_acc = accs["fp32"]
 
-    for name in DTYPE_NAMES:
+    for name in ALL_FORMATS:
         acc = accs[name]
         delta = acc - fp32_acc
         log.info(f"  {name:5s}: {acc:.3f}%  (Δ = {delta:+.3f}%)")
