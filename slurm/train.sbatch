@@ -44,9 +44,6 @@ exec uv run python -m avp_vit.train \
     --ckpt-dir "$CHECKPOINTS_DIR" \
     --teacher-ckpt "$DINOV3_VITB16_CKPT" \
     --n-trials 1 \
-    --n-steps 1000000 \
-    --no-enable-glimpse-patches-loss \
-    --no-enable-glimpse-cls-loss \
     --val-every 1000 \
     --no-use-checkpointing \
     "$@"
