@@ -254,7 +254,7 @@ class GPUWorker:
             scene_cos = cls_cos = None
 
             # Classification
-            cls_pred = self._model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas)
+            cls_pred = self._model.predict_scene_teacher_cls(out.state.recurrent_cls)
             top5 = self._top5(self._cls_norm.denormalize(cls_pred)) if self._probe and self._cls_norm else []
 
             # Policy
