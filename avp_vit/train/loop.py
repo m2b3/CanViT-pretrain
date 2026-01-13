@@ -45,7 +45,7 @@ from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .norm import PositionAwareNorm  # noqa: E402
 from .probe import load_probe  # noqa: E402
-from .scheduler import warmup_cosine_scheduler  # noqa: E402
+from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noqa: E402
 from .step import TeacherTargets, training_step  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
@@ -172,13 +172,20 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     exp.log_parameters({"trainable_params": n_trainable, "total_params": n_total})
 
     optimizer = torch.optim.AdamW(trainable, lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
-    scheduler = warmup_cosine_scheduler(
-        optimizer, cfg.n_steps, cfg.warmup_steps, cfg.peak_lr,
-        start_lr=cfg.start_lr, end_lr=cfg.end_lr,
-    )
     start_lr = cfg.start_lr if cfg.start_lr is not None else cfg.peak_lr / cfg.warmup_steps
-    end_lr = cfg.end_lr if cfg.end_lr is not None else 0.0
-    log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e}→{end_lr:.2e}, wd={cfg.weight_decay:.2e}")
+    if cfg.cosine_decay:
+        scheduler = warmup_cosine_scheduler(
+            optimizer, cfg.n_steps, cfg.warmup_steps, cfg.peak_lr,
+            start_lr=cfg.start_lr, end_lr=cfg.end_lr,
+        )
+        end_lr = cfg.end_lr if cfg.end_lr is not None else 0.0
+        log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e}→{end_lr:.2e} (cosine), wd={cfg.weight_decay:.2e}")
+    else:
+        scheduler = warmup_constant_scheduler(
+            optimizer, cfg.warmup_steps, cfg.peak_lr,
+            start_lr=cfg.start_lr,
+        )
+        log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e} (constant), wd={cfg.weight_decay:.2e}")
 
     # Generate viz/curve steps as multiples of val_every (so they actually trigger!)
     n_val_steps = cfg.n_steps // cfg.val_every

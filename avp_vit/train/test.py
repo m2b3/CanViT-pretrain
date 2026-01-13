@@ -15,7 +15,7 @@ from avp_vit.train.data import (
     val_transform,
 )
 from avp_vit.train.norm import PositionAwareNorm
-from avp_vit.train.scheduler import warmup_cosine_scheduler
+from avp_vit.train.scheduler import warmup_constant_scheduler, warmup_cosine_scheduler
 from avp_vit.train.viewpoint import (
     PixelBox,
     random_viewpoint,
@@ -221,6 +221,33 @@ class TestWarmupCosineScheduler:
         for _ in range(90):
             scheduler.step()
         assert scheduler.get_last_lr()[0] < 1e-6
+
+
+class TestWarmupConstantScheduler:
+    def test_warmup_then_constant(self) -> None:
+        peak_lr = 1e-3
+        start_lr = 1e-5
+        optimizer = torch.optim.Adam([torch.zeros(1, requires_grad=True)], lr=peak_lr)
+        scheduler = warmup_constant_scheduler(
+            optimizer, warmup_steps=10, peak_lr=peak_lr, start_lr=start_lr,
+        )
+        assert abs(scheduler.get_last_lr()[0] - start_lr) < 1e-8
+        for _ in range(10):
+            scheduler.step()
+        assert abs(scheduler.get_last_lr()[0] - peak_lr) < 1e-8
+        # Stays constant after warmup
+        for _ in range(50):
+            scheduler.step()
+        assert abs(scheduler.get_last_lr()[0] - peak_lr) < 1e-8
+
+    def test_no_warmup(self) -> None:
+        peak_lr = 1e-3
+        optimizer = torch.optim.Adam([torch.zeros(1, requires_grad=True)], lr=peak_lr)
+        scheduler = warmup_constant_scheduler(optimizer, warmup_steps=0, peak_lr=peak_lr)
+        assert abs(scheduler.get_last_lr()[0] - peak_lr) < 1e-8
+        for _ in range(20):
+            scheduler.step()
+        assert abs(scheduler.get_last_lr()[0] - peak_lr) < 1e-8
 
 
 # === Viewpoint Tests ===
