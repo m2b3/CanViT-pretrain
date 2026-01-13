@@ -401,6 +401,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         log.error("!!! CHECKPOINT LOADED BUT start_step=0 - optimizer/scheduler state was not restored !!!")
     log.info(f"Starting training loop: steps {start_step} → {end_step}")
     model.train()  # Explicit: validate() restores, but be clear about initial state
+    # NOTE: tqdm shows job-local progress (e.g. "199/5001"), but `step` is global
     pbar = tqdm(range(start_step, end_step + 1), desc="Training", unit="step")
 
     for step in pbar:
