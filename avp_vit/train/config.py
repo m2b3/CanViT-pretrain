@@ -83,7 +83,7 @@ class Config:
     log_every: int = 20
     val_every: int = 250
     n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
-    viz_every_n_vals: int = 10  # Log viz every N validation runs
+    viz_every_n_vals: int = 5  # Log viz every N validation runs
     curve_every_n_vals: int = 5  # Log curves every N validation runs
     ckpt_every: int = 5_000
     log_spatial_stats: bool = True
