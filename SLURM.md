@@ -10,11 +10,10 @@
 
 ## Paths
 
-| Resource | Path |
-|----------|------|
-| DINOv3 checkpoints | `~/projects/def-skrishna/checkpoints/dinov3/` |
-| ImageNet train (IN21k) | `/datashare/imagenet/winter21_whole` |
-| ImageNet val (IN1k) | `/datashare/imagenet/ILSVRC2012/val` |
+All paths defined in `slurm/env.sh` - source it first. Key exports:
+- `IN21K_DIR`, `IN1K_VAL_DIR` - datasets
+- `CHECKPOINTS_DIR`, `FEATURES_DIR` - storage
+- `DINOV3_VITB16_CKPT` - teacher checkpoint
 
 ## Accounts
 

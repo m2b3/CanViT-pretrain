@@ -1,6 +1,16 @@
 # AVP-ViT Development Guide
 
-See @README.md for core principles and architecture split.
+## Context
+
+Research project, started September 2024. Mostly one person. High cognitive load.
+
+This repo (`avp-vit`) is experimental - training, viz, monitoring code that evolves rapidly. We accept the mess, gradually clean/extract/modularize.
+
+`canvit` (separate repo, in venv) is the core architecture - stabler, cleaner API, geared for future public release. **Will not merge back.** The split is intentional: core arch evolves slower than experiment code.
+
+Everything can change. Be ready.
+
+See @README.md for structure, entry points, and implementation details.
 
 ## Session Startup
 

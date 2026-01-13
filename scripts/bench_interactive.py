@@ -27,10 +27,7 @@ from canvit.hub import create_backbone  # noqa: E402
 from canvit.viewpoint import Viewpoint  # noqa: E402
 from avp_vit import ActiveCanViT, ActiveCanViTConfig  # noqa: E402
 
-CKPT = os.path.expanduser(os.environ.get(
-    'AVP_TEACHER_CKPT',
-    '~/projects/def-skrishna/checkpoints/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth'
-))
+CKPT = os.path.expanduser(os.environ['DINOV3_VITB16_CKPT'])
 teacher = create_backbone('dinov3_vitb16', weights=CKPT).to(DEVICE).eval()
 teacher_compiled: dict[str, object] = {}
 print(f"  teacher: {teacher.embed_dim}d, {teacher.n_blocks} blocks")

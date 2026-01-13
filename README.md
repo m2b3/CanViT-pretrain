@@ -2,115 +2,114 @@
 
 Active Vision Pretraining with Vision Transformers.
 
-## Context
-
-Research project, started September 2024. Mostly one person. High cognitive load.
-
-This repo (`avp-vit`) is experimental - training, viz, monitoring code that evolves rapidly. We accept the mess, gradually clean/extract/modularize.
-
-`canvit` (separate repo, in venv) is the core architecture - stabler, cleaner API, geared for future public release. **Will not merge back.** The split is intentional: core arch evolves slower than experiment code.
-
-Everything can change. Be ready.
-
-## Vision
-
-**Goal**: Active Vision Foundation Models. Scalable, general-purpose, task-agnostic active vision pretraining - done right. Fast training, fast inference, clean gradient signal, smart design.
-
-**Three pillars:**
-- **Seeing**: Single-step behavior. Given a glimpse, can you make sense of it?
-- **Integration**: Spatiotemporal filling-in from partial views across time. Recurrence, not pooling - enables top-down feedback.
-- **Deciding where to look**: Policy. Use what you've seen to inform what to look at next.
-
-## Design Choices
-
-**Sequential glimpses**: Each glimpse is a crop at (center, scale). Canvas and CLS persist across steps - recurrence enables top-down feedback, not just bottom-up aggregation.
-
-**Fixed canvas size**: Bounds memory. Glimpse positions vary, canvas dimensions don't grow.
-
-**Efficiency**: Small glimpse = cheap per step. Canvas cross-attention cheaper than full self-attention. See `scripts/flops.py`.
-
-**Distillation**: Student reconstructs frozen teacher (DINOv3) features. Clean gradient signal.
-
-## Training Philosophy
-
-**Generality**: Model should work with ANY viewpoint sequence - random, fixed, learned, whatever. Training uses diverse viewpoint types to ensure this.
-
-**Exploration via structure**: Multiple branches with different viewpoint types. Policy can be deterministic (no noise injection) because other branches provide diversity. Backbone trains on all branches, stays robust.
-
-**Maximize teacher signal**: Teacher inference is expensive. Don't waste it. Full-view branches ensure we extract maximum value from each image.
-
-**Difficulty gradient**: Partial views from the start (not just after seeing full image) forces real filling-in. The hard case, not the easy case.
-
-**Policy is opportunistic**: Cheap to train alongside everything else - just another branch. Even if policy isn't good yet, it:
-- Shapes representations for task-specific policy finetuning later
-- Keeps VPE token policy-relevant during pretraining
-- Gives something to monitor during iteration
-
-**How to evaluate policy**: full→policy should beat full→random and full→full. "You've seen everything once, now where should you look to do even better?" If it can't beat random second look, policy isn't helping yet.
-
-**Current state (Jan 2026)**: Policy learning is experimental. Might take long pretraining to start mattering. The branching structure may evolve.
-
 ## Repository Structure
 
 ```
-avp_vit/                    # Main package
-  train/                    # Training infrastructure
-    config.py               # ← THE training config (dataclass with all hyperparams)
-    loop.py                 # Main training loop, resume logic
-    step.py                 # Single training step (forward, loss, backward)
-    data.py                 # Data loading (raw images or precomputed features)
-    feature_dataset.py      # IterableDataset for precomputed teacher features
-    norm.py                 # Position-aware normalization (required for inference)
-    viz/                    # Visualization (PCA, metrics, Comet logging)
-  checkpoint/               # Checkpoint save/load (TypedDict schema in __init__.py)
+avp_vit/
+  train/
+    __main__.py           # Entry: tyro CLI → Optuna study → train()
+    config.py             # Config dataclass (ALL hyperparameters live here)
+    loop.py               # train() and training_loop(): setup, resume, main loop
+    step.py               # training_step(): TBPTT chunks, branches, losses
+    data.py               # Loaders (raw images or precomputed features)
+    feature_dataset.py    # IterableDataset for precomputed shards
+    norm.py               # PositionAwareNorm: fixed per-position stats
+    model.py              # Model creation, compilation
+    scheduler.py          # Warmup → constant LR
+    viz/                  # Validation, PCA, Comet logging
+  checkpoint/
+    __init__.py           # CheckpointData TypedDict, save/load functions
 
-inference_app/              # Streamlit demo for interactive inference
+inference_app/            # Streamlit demo
+  gpu_worker.py           # ← Reference implementation for checkpoint loading
+  app.py                  # UI (no torch)
+  rendering.py            # Viz helpers (numpy/PIL only)
 
-scripts/                    # One-off utilities
-  flops.py                  # FLOP analysis
-  export_features.py        # Precompute teacher features (for fast training)
-  bench_*.py                # Benchmarks (latency, throughput, loaders)
-  validate_in1k/            # ImageNet-1k evaluation
-  train_ade20k_probe.py     # Segmentation probe training
+scripts/                  # Analysis and utilities
+  export_features.py      # Precompute teacher features to shards
+  flops.py                # FLOP analysis
+  bench_*.py              # Benchmarks
+  validate_in1k/          # ImageNet evaluation
 
-slurm/                      # HPC infrastructure
-  env.sh                    # ← Environment setup (paths, caches) - source this first
-  train.sbatch              # Production training (job arrays)
-  export_features.sh        # Feature precomputation jobs
+slurm/
+  env.sh                  # ← Environment setup (paths). Source first.
+  train.sbatch            # Production training (job arrays)
 
-canvit                      # Model architecture (SEPARATE REPO)
-                            # Source: ~/code/CanViT or https://github.com/m2b3/CanViT/
-                            # Installed as SSH dep (deploy keys, see SLURM.md)
-                            # Key modules: hub.py, viewpoint/, coords/
+canvit                    # Model architecture (SEPARATE REPO)
+                          # Source: .venv/.../site-packages/canvit/
+                          # Or: ~/code/CanViT, github.com/m2b3/CanViT
+                          # Check uv.lock for commit, pyproject.toml for branch
 ```
+
+## Key Implementation Details
+
+**Training step architecture** (`step.py`):
+- Truncated BPTT with configurable `chunk_size` (default 2)
+- Independent branches (FULL-start vs RANDOM-start) - no `retain_graph`
+- Memory is O(chunk_size), not O(trajectory_length)
+- t=0: FULL or RANDOM viewpoint based on branch type
+- t≥1: RANDOM or POLICY (half each, shuffled, if policy enabled)
+- Optional gradient checkpointing on odd timesteps
+
+**Normalization** (`norm.py`):
+- `PositionAwareNorm`: fixed per-position per-dimension stats [n_tokens, embed_dim]
+- Computed once from first feature shard, then frozen
+- No train/eval difference - always uses fixed stats
+- Required for inference (model outputs normalized features)
+
+**Feature shards** (`feature_dataset.py`):
+- IterableDataset - each worker loads own shards, no fork issues
+- Workers interleave: worker i gets shards i, i+nw, i+2*nw...
+- `failed_indices` field: samples with NaN features (auto-skipped)
+- `.clone()` required when yielding mmap'd tensors
+
+**Job array resume** (`loop.py`):
+- `run_name` derived from SLURM_ARRAY_JOB_ID → consistent across array
+- Auto-finds `latest.pt` symlink in run_dir
+- Comet experiment continuation via `comet_id` in checkpoint
+- FAILED marker prevents infinite crash loops → `scancel` on crash
+- `training_config_history`: tracks config changes across resumes
+
+**Forced FlashAttention** (`loop.py`):
+- Only FlashAttention enabled (mem_efficient and math backends disabled)
+
+## Deployment Strategy
+
+| Environment | Use for | Hardware |
+|-------------|---------|----------|
+| **Local** (macOS) | Development, code review, quick non-GPU tests | M4 Pro |
+| **crockett** | Quick CUDA tests, interactive debugging | RTX 4090 (not always online) |
+| **Nibi cluster** | All serious training, evaluation, feature export | H100 (via SLURM) |
+
+**Workflow**: Develop locally → quick CUDA test on crockett if needed → submit to Nibi.
+
+**Cluster paths**: Single source of truth is `slurm/env.sh`. See `SLURM.md` for setup (deploy keys, accounts).
 
 ## Documentation
 
 | File | Content |
 |------|---------|
 | `CLAUDE.md` | Development guidelines, session startup |
-| `SLURM.md` | Distributed training on HPC clusters |
-| `POLICY.md` | Policy learning design notes |
-| `avp_vit/train/config.py` | All training hyperparameters (dataclass) |
-| `avp_vit/checkpoint/__init__.py` | Checkpoint schema (`CheckpointData` TypedDict) |
+| `SLURM.md` | HPC setup, deploy keys, job management |
+| `docs/philosophy.md` | Vision, design choices, training philosophy |
 
 ## Commands
 
 ```bash
-# Setup (on cluster)
+# Cluster setup
 source slurm/env.sh
 
 # Training
-sbatch slurm/train.sbatch              # Production (SLURM job arrays)
-uv run -m avp_vit.train --help         # Local / see all options
+sbatch slurm/train.sbatch                    # Production
+uv run -m avp_vit.train --help               # All options
 
-# Inference demo (reference implementation for checkpoint loading + model usage)
+# Inference (reference implementation for loading + using checkpoints)
 uv run streamlit run inference_app/__main__.py
 ```
 
 ## Pitfalls
 
-- **DINOv3 exists and is not DINOv2** - not a typo, not the same. Don't assume.
-- **Coordinate conventions vary** - internal vs external APIs vs PyTorch grid_sample. Check canvit: `viewpoint/`, `coords/`.
-- **GPU syncs kill performance** - `.item()`, `.cpu()`, logging inside hot loops. Keep logging outside.
-- **Read canvit source before assuming model behavior** - it's not in this repo.
+- **DINOv3 ≠ DINOv2** - different model, not a typo.
+- **Coordinate conventions vary** - check canvit `viewpoint/`, `coords/`.
+- **GPU syncs kill throughput** - `.item()`, `.cpu()`, logging in hot loops.
+- **Read canvit source** - model lives there, not here.
