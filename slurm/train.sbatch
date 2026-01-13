@@ -7,6 +7,8 @@
 #SBATCH --mem=64G
 #SBATCH --output=logs/train-%A_%a.out
 #SBATCH --error=logs/train-%A_%a.err
+#SBATCH --mail-user=me@yberreby.com
+#SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
 
 # AVP-ViT training on IN21k with precomputed features
 #
