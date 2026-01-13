@@ -163,6 +163,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         if latest is not None:
             ckpt_path_to_load = latest
             log.info(f"Auto-resume from latest: {ckpt_path_to_load}")
+        else:
+            log.info("No checkpoint found - starting fresh")
 
     # Load checkpoint BEFORE creating Comet experiment
     ckpt_data: CheckpointData | None = None
@@ -170,6 +172,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     if ckpt_path_to_load is not None:
         ckpt_data = load_checkpoint(ckpt_path_to_load, cfg.device)
         prev_comet_id = ckpt_data.get("comet_id")
+        if prev_comet_id is None:
+            log.warning("Checkpoint has no comet_id - will create NEW experiment")
 
     # === COMET EXPERIMENT ===
     comet_cfg = comet_ml.ExperimentConfig(auto_metric_logging=False)
@@ -183,6 +187,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     else:
         if cfg.force_new_experiment and prev_comet_id:
             log.info(f"Forcing new experiment (prev was {prev_comet_id})")
+        else:
+            log.info("Creating NEW Comet experiment")
         exp = comet_ml.start(
             project_name=cfg.comet_project,
             experiment_config=comet_cfg,
@@ -280,10 +286,12 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             log.warning(f"Checkpoint missing keys (freshly initialized): {incompat.missing_keys}")
         if incompat.unexpected_keys:
             log.warning(f"Checkpoint has unexpected keys (ignored): {incompat.unexpected_keys}")
+        if not incompat.missing_keys and not incompat.unexpected_keys:
+            log.info("Model state loaded successfully (all keys matched)")
 
         # Load optimizer + scheduler state (tied together)
         if cfg.reset_opt_and_sched:
-            log.info("Reset optimizer+scheduler: using fresh state")
+            log.info("Reset optimizer+scheduler: using fresh state (step will be 0)")
         else:
             opt_state = ckpt_data.get("optimizer_state")
             sched_state = ckpt_data.get("scheduler_state")
@@ -292,9 +300,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 scheduler.load_state_dict(sched_state)
                 log.info(f"Loaded optimizer+scheduler from checkpoint (step={sched_state.get('last_epoch', '?')})")
             elif opt_state is not None or sched_state is not None:
-                log.warning("Checkpoint has only one of optimizer/scheduler - using fresh init for both")
+                log.error("!!! Checkpoint has only one of optimizer/scheduler - using fresh init (STEP WILL BE 0) !!!")
             else:
-                log.warning("Checkpoint has no optimizer/scheduler state, using fresh init")
+                log.error("!!! Checkpoint has no optimizer/scheduler state - using fresh init (STEP WILL BE 0) !!!")
 
     # Build training config history (tracks config across resumes)
     training_config_history: dict[str, dict] = {}
@@ -389,6 +397,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     # Scheduler last_epoch tracks gradient updates done so far
     start_step = scheduler.last_epoch
     end_step = start_step + cfg.steps_per_job
+    if ckpt_data is not None and start_step == 0:
+        log.error("!!! CHECKPOINT LOADED BUT start_step=0 - optimizer/scheduler state was not restored !!!")
     log.info(f"Starting training loop: steps {start_step} → {end_step}")
     model.train()  # Explicit: validate() restores, but be clear about initial state
     pbar = tqdm(range(start_step, end_step + 1), desc="Training", unit="step")
