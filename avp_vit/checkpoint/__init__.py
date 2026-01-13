@@ -103,7 +103,7 @@ def atomic_torch_save(data: CheckpointData, path: Path) -> None:
 
 def update_symlink(symlink_path: Path, target: Path) -> None:
     """Atomically update symlink to point to target."""
-    log.debug(f"Updating symlink {symlink_path} -> {target.name}")
+    log.info(f"Updating symlink {symlink_path} -> {target.name}")
     tmp_link = symlink_path.parent / f".{symlink_path.name}.tmp.{os.getpid()}"
     if tmp_link.is_symlink() or tmp_link.exists():
         tmp_link.unlink()
