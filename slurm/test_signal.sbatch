@@ -1,23 +1,27 @@
 #!/bin/bash
 #SBATCH --job-name=signal-test
 #SBATCH --time=0:03:00
-#SBATCH --signal=TERM@60
+#SBATCH --signal=USR1@60
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=1G
 #SBATCH --output=signal_test_%j.out
 
-# 3-minute job, SIGTERM 60 seconds before walltime
-# At 0.1s/step, we do ~10 steps/sec = ~1200 steps in 2 min before SIGTERM
-# Target is 1000 steps, should complete in one job (or test signal if it doesn't)
+# 3-minute job, SIGUSR1 60 seconds before walltime
+#
+# SLURM signal delivery quirk:
+# - Default: signals go to "job steps" (srun), NOT batch shell
+# - B: prefix sends to batch shell only
+# - Without srun, there are no job steps to signal!
+#
+# Solution: use srun so Python becomes a job step and receives signal directly
 
-set -euo pipefail
+set -uo pipefail
 
 echo "=== Job $SLURM_JOB_ID starting at $(date) ==="
 echo "Working directory: $(pwd)"
 
-# Run the test
-python3 slurm/test_signal.py
-
+# srun makes Python a "job step" that receives SLURM signals
+srun python3 slurm/test_signal.py
 EXIT_CODE=$?
 echo "Python exited with code $EXIT_CODE"
 
