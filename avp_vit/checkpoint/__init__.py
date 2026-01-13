@@ -1,7 +1,11 @@
 """Checkpoint serialization for ActiveCanViT models."""
 
 import logging
+import os
+import socket
 import subprocess
+import sys
+import tempfile
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +43,11 @@ class CheckpointData(TypedDict):
     scheduler_state: dict | None
     # Training config history: {timestamp: config_dict} - tracks config across resumes
     training_config_history: dict[str, dict] | None
+    # Environment metadata for debugging
+    hostname: str | None
+    slurm_job_id: str | None
+    slurm_array_task_id: str | None
+    cmdline: list[str] | None
 
 
 def _git_info() -> tuple[str | None, bool]:
@@ -50,6 +59,67 @@ def _git_info() -> tuple[str | None, bool]:
         return commit, dirty
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None, False
+
+
+def get_env_metadata() -> tuple[str | None, str | None, str | None, list[str] | None]:
+    """Collect (hostname, slurm_job_id, slurm_array_task_id, cmdline). Best-effort."""
+    hostname: str | None = None
+    cmdline: list[str] | None = None
+    try:
+        hostname = socket.gethostname()
+    except Exception as e:
+        log.warning(f"Failed to get hostname: {e}")
+    try:
+        cmdline = sys.argv.copy()
+    except Exception as e:
+        log.warning(f"Failed to get cmdline: {e}")
+    return (
+        hostname,
+        os.environ.get("SLURM_JOB_ID"),
+        os.environ.get("SLURM_ARRAY_TASK_ID"),
+        cmdline,
+    )
+
+
+def atomic_torch_save(data: CheckpointData, path: Path) -> None:
+    """Save data to path atomically using tmp file + rename."""
+    log.info(f"Saving checkpoint to {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path_str = tempfile.mkstemp(
+        suffix=".pt.tmp", prefix=path.stem, dir=path.parent
+    )
+    tmp_path = Path(tmp_path_str)
+    log.debug(f"Writing to tmp file: {tmp_path}")
+    try:
+        os.close(fd)
+        torch.save(data, tmp_path)
+        tmp_path.rename(path)
+    except Exception:
+        log.exception(f"Failed to save checkpoint to {path}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
+def update_symlink(symlink_path: Path, target: Path) -> None:
+    """Atomically update symlink to point to target."""
+    log.debug(f"Updating symlink {symlink_path} -> {target.name}")
+    tmp_link = symlink_path.parent / f".{symlink_path.name}.tmp.{os.getpid()}"
+    if tmp_link.is_symlink() or tmp_link.exists():
+        tmp_link.unlink()
+    tmp_link.symlink_to(target.name)
+    tmp_link.rename(symlink_path)
+
+
+def find_latest(run_dir: Path) -> Path | None:
+    """Find latest.pt symlink in run_dir, return resolved path or None."""
+    latest = run_dir / "latest.pt"
+    if latest.is_symlink():
+        resolved = latest.resolve()
+        if resolved.exists():
+            return resolved
+        log.warning(f"latest.pt symlink broken: {latest} -> {resolved}")
+    return None
 
 
 def _strip_orig_mod(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -80,12 +150,15 @@ def save(
     scheduler_state: dict | None = None,
     training_config_history: dict[str, dict] | None = None,
 ) -> None:
-    """Save checkpoint with all info needed to reconstruct model."""
+    """Save checkpoint with all info needed to reconstruct model.
+
+    Uses atomic write (tmp file + rename) to prevent corruption.
+    """
     from canvit.policy import PolicyHead
 
     assert isinstance(model.cfg, ActiveCanViTConfig)
-    path.parent.mkdir(parents=True, exist_ok=True)
     git_commit, git_dirty = _git_info()
+    hostname, slurm_job_id, slurm_array_task_id, cmdline = get_env_metadata()
 
     # Save policy config if model has policy
     policy_config: dict | None = None
@@ -109,9 +182,13 @@ def save(
         "optimizer_state": optimizer_state,
         "scheduler_state": scheduler_state,
         "training_config_history": training_config_history,
+        "hostname": hostname,
+        "slurm_job_id": slurm_job_id,
+        "slurm_array_task_id": slurm_array_task_id,
+        "cmdline": cmdline,
     }
 
-    torch.save(data, path)
+    atomic_torch_save(data, path)
     size_mb = path.stat().st_size / (1024 * 1024)
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
@@ -145,6 +222,10 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "optimizer_state": raw.get("optimizer_state"),
         "scheduler_state": raw.get("scheduler_state"),
         "training_config_history": raw.get("training_config_history"),
+        "hostname": raw.get("hostname"),
+        "slurm_job_id": raw.get("slurm_job_id"),
+        "slurm_array_task_id": raw.get("slurm_array_task_id"),
+        "cmdline": raw.get("cmdline"),
     }
 
     has_policy = data["policy_config"] is not None
@@ -155,6 +236,8 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         log.info(f"  git={data['git_commit'][:8]}{'*' if data['git_dirty'] else ''}")
     if data["comet_id"]:
         log.info(f"  comet={data['comet_id']}")
+    if data["hostname"]:
+        log.info(f"  host={data['hostname']}")
 
     return data
 

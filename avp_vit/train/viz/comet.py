@@ -15,7 +15,7 @@ _curve_count = 0
 _CURVE_BUDGET = 900
 
 
-def log_curve(exp: comet_ml.Experiment, name: str, **kwargs) -> None:
+def log_curve(exp: comet_ml.CometExperiment, name: str, **kwargs) -> None:
     """Log curve with budget enforcement. Skips silently once exhausted."""
     global _curve_count
     if _curve_count >= _CURVE_BUDGET:
@@ -27,7 +27,7 @@ def log_curve(exp: comet_ml.Experiment, name: str, **kwargs) -> None:
     _curve_count += 1
 
 
-def log_figure(exp: comet_ml.Experiment, fig: Figure, name: str, step: int) -> None:
+def log_figure(exp: comet_ml.CometExperiment, fig: Figure, name: str, step: int) -> None:
     """Log matplotlib figure to Comet. Aggressively cleans up to prevent memory leaks."""
     with io.BytesIO() as buf:
         fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")

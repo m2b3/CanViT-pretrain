@@ -30,10 +30,8 @@ class Config:
     # Training
     batch_size: int = 64
     warmup_steps: int = 100_000
-    start_lr: float | None = 1e-7  # None = peak_lr / warmup_steps (old behavior)
+    start_lr: float | None = 1e-7  # None = peak_lr / warmup_steps
     peak_lr: float = 4e-4
-    end_lr: float | None = 1e-6  # None = 0 (only used if cosine_decay=True)
-    cosine_decay: bool = False  # False = constant LR after warmup; True = cosine decay
     # weight_decay: float = 0.05  # standard in ViTs
     # we can use a much lower weight decay due to the richness of our training signal
     # and we *should*, due to the use of small batches
@@ -57,7 +55,7 @@ class Config:
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
-    n_steps: int = 1_000_000
+    steps_per_job: int = 5_000  # Steps this job does before exiting (for SLURM arrays)
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
@@ -68,24 +66,26 @@ class Config:
     #   {feature_base_dir}/{teacher_model}/{image_resolution}/shards/
     feature_base_dir: Path | None = None
     feature_image_root: Path | None = None  # Required with feature_base_dir
+    # Run identification and checkpointing
+    run_name: str | None = None  # Auto-generated if None: YYYY-MM-DD_HH-MM
     ckpt_dir: Path = Path("checkpoints")
-    resume_ckpt: Path | None = None
+    resume_ckpt: Path | None = None  # Explicit checkpoint override (ignores run_name)
+    force_new_experiment: bool = False  # Force new Comet experiment instead of continuing
     reset_policy: bool = False  # Reinitialize policy weights when resuming
-    reset_opt_and_sched: bool = (
-        True  # Reset both optimizer and scheduler (tied together)
-    )
+    reset_opt_and_sched: bool = False  # Reset optimizer and scheduler on resume
     reset_normalizer: bool = False  # Re-warmup normalizer stats when resuming
     # Training
     num_workers: int = 16
     crop_scale_min: float = 0.8
     image_resolution: int = 512
     # Logging
+    comet_project: str = "avp-vit-scene-match"
     log_every: int = 20
     val_every: int = 250
     n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
-    total_viz: int = 1000
-    total_curves: int = 300  # ~3 curves/event, budget 900
-    ckpt_every: int = 10_000
+    viz_every_n_vals: int = 10  # Log viz every N validation runs
+    curve_every_n_vals: int = 5  # Log curves every N validation runs
+    ckpt_every: int = 5_000
     log_spatial_stats: bool = True
     # Compilation and precision
     compile: bool = True

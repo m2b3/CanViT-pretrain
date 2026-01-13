@@ -23,7 +23,7 @@ def main() -> None:
     log.info("=" * 60)
     log.info(f"Config: {cfg}")
     log.info(f"Device: {cfg.device}")
-    log.info(f"Total steps: {cfg.n_steps:,}")
+    log.info(f"Steps per job: {cfg.steps_per_job:,}")
     log.info(f"Grid size: {cfg.grid_size}")
     log.info(f"Warmup: {cfg.warmup_steps} steps")
     log.info("=" * 60)

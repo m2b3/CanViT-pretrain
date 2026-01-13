@@ -70,7 +70,7 @@ class PolicyRolloutResult:
 
 def _log_pca(
     *,
-    exp: comet_ml.Experiment,
+    exp: comet_ml.CometExperiment,
     step: int,
     prefix: str,
     acc: ValAccumulator,
@@ -149,7 +149,7 @@ def _log_pca(
 
 def _log_policy_viz(
     *,
-    exp: comet_ml.Experiment,
+    exp: comet_ml.CometExperiment,
     step: int,
     prefix: str,
     model: "ActiveCanViT",
@@ -276,7 +276,7 @@ def _validate_policy_rollout(
 
 def _log_policy_pca(
     *,
-    exp: comet_ml.Experiment,
+    exp: comet_ml.CometExperiment,
     step: int,
     prefix: str,
     result: PolicyRolloutResult,
@@ -316,7 +316,7 @@ def _log_policy_pca(
 
 def validate(
     *,
-    exp: comet_ml.Experiment,
+    exp: comet_ml.CometExperiment,
     step: int,
     model: ActiveCanViT,
     compute_raw_targets: Callable[[Tensor, int], "NormFeatures"],

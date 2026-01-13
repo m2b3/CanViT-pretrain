@@ -29,7 +29,7 @@ from avp_vit.train.probe import (
     labels_are_in1k,
     load_probe,
 )
-from avp_vit.train.scheduler import warmup_cosine_scheduler
+from avp_vit.train.scheduler import warmup_constant_scheduler
 from avp_vit.train.viewpoint import (
     PixelBox,
     Viewpoint,
@@ -75,7 +75,7 @@ __all__ = [
     "labels_are_in1k",
     "load_probe",
     # Scheduler
-    "warmup_cosine_scheduler",
+    "warmup_constant_scheduler",
     # Viewpoint
     "PixelBox",
     "Viewpoint",

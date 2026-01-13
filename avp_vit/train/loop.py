@@ -3,6 +3,7 @@
 import logging
 import os
 import signal
+import subprocess
 import traceback
 from datetime import datetime, timezone
 from collections.abc import Callable
@@ -12,7 +13,6 @@ from typing import NamedTuple
 
 import comet_ml
 import dacite
-import numpy as np
 import optuna
 import torch
 from torch import Tensor, nn
@@ -36,7 +36,7 @@ from ytch.model import count_parameters  # noqa: E402
 
 from avp_vit import ActiveCanViTConfig  # noqa: E402
 from avp_vit.checkpoint import CheckpointData, load as load_checkpoint  # noqa: E402
-from avp_vit.checkpoint import save as save_checkpoint  # noqa: E402
+from avp_vit.checkpoint import save as save_checkpoint, update_symlink, find_latest  # noqa: E402
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 
 from .config import Config  # noqa: E402
@@ -45,7 +45,7 @@ from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .norm import PositionAwareNorm  # noqa: E402
 from .probe import load_probe  # noqa: E402
-from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noqa: E402
+from .scheduler import warmup_constant_scheduler  # noqa: E402
 from .step import TeacherTargets, training_step  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
@@ -59,18 +59,6 @@ def _handle_sigusr1(signum: int, frame: object) -> None:
     global _checkpoint_requested
     _checkpoint_requested = True
     log.info("SIGUSR1 received - will save checkpoint after current step")
-
-
-def log_spaced_steps(n: int, max_step: int, K: float | None = None) -> frozenset[int]:
-    """Generate n steps from 0 to max_step with geometrically increasing gaps."""
-    assert n > 1
-    n_gaps = n - 1
-    K = K if K is not None else float(n)
-    r = K ** (1 / (n_gaps - 1))
-    g1 = max_step * (r - 1) / (r**n_gaps - 1)
-    gaps = g1 * (r ** np.arange(n_gaps))
-    steps = np.concatenate([[0], np.cumsum(gaps)])
-    return frozenset(int(round(s)) for s in steps)
 
 
 def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
@@ -112,7 +100,47 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"Starting trial {trial.number}")
     log.info(f"Device: {cfg.device}")
 
-    exp = comet_ml.Experiment(project_name="avp-vit-scene-match", auto_metric_logging=False)
+    # === RUN NAME AND CHECKPOINT RESOLUTION ===
+    run_name = cfg.run_name
+    if run_name is None:
+        run_name = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    run_dir = cfg.ckpt_dir / run_name
+    log.info(f"Run: {run_name} (dir: {run_dir})")
+
+    # Check for failure marker (prevents infinite crash loops in job arrays)
+    failed_marker = run_dir / "FAILED"
+    if failed_marker.exists():
+        log.error(f"FAILED marker exists: {failed_marker}")
+        log.error(f"Previous job crashed. Delete marker to retry: rm {failed_marker}")
+        cancel_slurm_array()
+        raise RuntimeError(f"Refusing to start: {failed_marker} exists")
+
+    # Create run_dir early so we can write FAILED marker on crash
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        return training_loop(cfg=cfg, trial=trial, run_name=run_name, run_dir=run_dir)
+    except Exception:
+        log.exception("Training crashed - writing FAILED marker")
+        failed_marker.write_text(f"Crashed at {datetime.now(timezone.utc).isoformat()}\n")
+        cancel_slurm_array()
+        raise
+
+
+def cancel_slurm_array() -> None:
+    """Cancel remaining SLURM array tasks. No-op if not in a SLURM job."""
+    job_id = os.environ.get("SLURM_ARRAY_JOB_ID")
+    if job_id is None:
+        return
+    log.info(f"Cancelling SLURM array job {job_id}")
+    try:
+        subprocess.run(["scancel", job_id], check=True)
+    except Exception:
+        log.exception(f"Failed to cancel SLURM job {job_id}")
+
+
+def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: Path) -> float:
+    """Main training loop. Called by train() with crash handling wrapper."""
     from dataclasses import asdict
 
     def flatten_dict(d: dict, prefix: str = "") -> dict[str, object]:
@@ -125,8 +153,43 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 flat[key] = str(v) if not isinstance(v, (int, float, bool, str, type(None))) else v
         return flat
 
+    # Determine checkpoint to resume from
+    ckpt_path_to_load: Path | None = None
+    if cfg.resume_ckpt is not None:
+        ckpt_path_to_load = cfg.resume_ckpt
+        log.info(f"Explicit resume checkpoint: {ckpt_path_to_load}")
+    else:
+        latest = find_latest(run_dir)
+        if latest is not None:
+            ckpt_path_to_load = latest
+            log.info(f"Auto-resume from latest: {ckpt_path_to_load}")
+
+    # Load checkpoint BEFORE creating Comet experiment
+    ckpt_data: CheckpointData | None = None
+    prev_comet_id: str | None = None
+    if ckpt_path_to_load is not None:
+        ckpt_data = load_checkpoint(ckpt_path_to_load, cfg.device)
+        prev_comet_id = ckpt_data.get("comet_id")
+
+    # === COMET EXPERIMENT ===
+    comet_cfg = comet_ml.ExperimentConfig(auto_metric_logging=False)
+    if prev_comet_id is not None and not cfg.force_new_experiment:
+        log.info(f"Continuing Comet experiment: {prev_comet_id}")
+        exp = comet_ml.start(
+            experiment_key=prev_comet_id,
+            project_name=cfg.comet_project,
+            experiment_config=comet_cfg,
+        )
+    else:
+        if cfg.force_new_experiment and prev_comet_id:
+            log.info(f"Forcing new experiment (prev was {prev_comet_id})")
+        exp = comet_ml.start(
+            project_name=cfg.comet_project,
+            experiment_config=comet_cfg,
+        )
+
     exp.log_parameters(flatten_dict(asdict(cfg)))
-    exp.log_parameters({"trial_number": trial.number})
+    exp.log_parameters({"trial_number": trial.number, "run_name": run_name})
     if slurm_job_id := os.environ.get("SLURM_JOB_ID"):
         exp.log_parameters({"slurm_job_id": slurm_job_id})
 
@@ -173,27 +236,11 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     optimizer = torch.optim.AdamW(trainable, lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
     start_lr = cfg.start_lr if cfg.start_lr is not None else cfg.peak_lr / cfg.warmup_steps
-    if cfg.cosine_decay:
-        scheduler = warmup_cosine_scheduler(
-            optimizer, cfg.n_steps, cfg.warmup_steps, cfg.peak_lr,
-            start_lr=cfg.start_lr, end_lr=cfg.end_lr,
-        )
-        end_lr = cfg.end_lr if cfg.end_lr is not None else 0.0
-        log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e}→{end_lr:.2e} (cosine), wd={cfg.weight_decay:.2e}")
-    else:
-        scheduler = warmup_constant_scheduler(
-            optimizer, cfg.warmup_steps, cfg.peak_lr,
-            start_lr=cfg.start_lr,
-        )
-        log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e} (constant), wd={cfg.weight_decay:.2e}")
-
-    # Generate viz/curve steps as multiples of val_every (so they actually trigger!)
-    n_val_steps = cfg.n_steps // cfg.val_every
-    viz_indices = log_spaced_steps(cfg.total_viz, n_val_steps)
-    curve_indices = log_spaced_steps(cfg.total_curves, n_val_steps)
-    viz_steps = frozenset(i * cfg.val_every for i in viz_indices)
-    curve_steps = frozenset(i * cfg.val_every for i in curve_indices)
-    log.info(f"Viz steps: {len(viz_steps)} points, curves: {len(curve_steps)} points")
+    scheduler = warmup_constant_scheduler(
+        optimizer, cfg.warmup_steps, cfg.peak_lr,
+        start_lr=cfg.start_lr,
+    )
+    log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e} (constant), wd={cfg.weight_decay:.2e}")
 
     amp_ctx = (
         torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16)
@@ -202,9 +249,8 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
     log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
     log.info(f"Non-blocking transfers: {'enabled' if cfg.non_blocking_transfer else 'DISABLED (sync)'}")
 
-    ckpt_data: CheckpointData | None = None
-    if cfg.resume_ckpt is not None:
-        ckpt_data = load_checkpoint(cfg.resume_ckpt, cfg.device)
+    # === RESTORE MODEL/OPTIMIZER STATE FROM CHECKPOINT ===
+    if ckpt_data is not None:
         ckpt_cfg = dacite.from_dict(ActiveCanViTConfig, ckpt_data["model_config"])
         if ckpt_cfg != cfg.model:
             log.warning("Checkpoint config differs from current config!")
@@ -256,7 +302,9 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         training_config_history = ckpt_data.get("training_config_history") or {}
     training_config_history[datetime.now(timezone.utc).isoformat()] = flatten_dict(asdict(cfg))
 
-    ckpt_path = cfg.ckpt_dir / f"{exp.get_key()}.pt"
+    def make_ckpt_path(step: int) -> Path:
+        """Generate versioned checkpoint path: {run_dir}/step-{step}.pt"""
+        return run_dir / f"step-{step}.pt"
 
     def compute_raw_targets(images: Tensor, sz: int) -> NormFeatures:
         with amp_ctx:
@@ -338,18 +386,22 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
     # Step semantics: step S = model state after S gradient updates
     # step=0: before any gradient (initial model)
-    # step=n_steps: after all n_steps gradient updates (final model)
-    log.info("Starting training loop...")
+    # Scheduler last_epoch tracks gradient updates done so far
+    start_step = scheduler.last_epoch
+    end_step = start_step + cfg.steps_per_job
+    log.info(f"Starting training loop: steps {start_step} → {end_step}")
     model.train()  # Explicit: validate() restores, but be clear about initial state
-    pbar = tqdm(range(cfg.n_steps + 1), desc="Training", unit="step")
+    pbar = tqdm(range(start_step, end_step + 1), desc="Training", unit="step")
 
     for step in pbar:
         batch: TrainBatch | None = None
-        do_pca = step in viz_steps  # Used by both validation and training viz
+        # Determine viz/curve based on validation count
+        val_count = step // cfg.val_every
+        do_pca = step % cfg.val_every == 0 and val_count % cfg.viz_every_n_vals == 0
+        do_curves = step % cfg.val_every == 0 and val_count % cfg.curve_every_n_vals == 0
 
         # === VALIDATION/VIZ PHASE (state after `step` gradient updates) ===
         if step % cfg.val_every == 0:
-            do_curves = step in curve_steps
 
             # Validation on val batch (always at val_every)
             val_images, val_labels = val_loader.next_batch_with_labels()
@@ -384,11 +436,14 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
 
         # === CHECKPOINT PHASE ===
         global _checkpoint_requested
-        if step % cfg.ckpt_every == 0 or _checkpoint_requested:
+        at_ckpt_interval = step % cfg.ckpt_every == 0
+        is_resume_start = step == start_step and start_step > 0  # skip duplicate on resume
+        if (at_ckpt_interval and not is_resume_start) or _checkpoint_requested:
             if _checkpoint_requested:
                 log.info(f"Saving signal-triggered checkpoint at step {step}")
                 _checkpoint_requested = False
             ema_loss = ema.get("total_loss")
+            ckpt_path = make_ckpt_path(step)
             save_checkpoint(
                 ckpt_path, model, cfg.student_model,
                 step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
@@ -399,11 +454,12 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 scheduler_state=scheduler.state_dict(),
                 training_config_history=training_config_history,
             )
+            update_symlink(run_dir / "latest.pt", ckpt_path)
             exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
             exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
 
-        # === TRAINING PHASE (only for step < n_steps) ===
-        if step < cfg.n_steps:
+        # === TRAINING PHASE (only for step < end_step) ===
+        if step < end_step:
             if batch is None:
                 batch = load_train_batch()
 
@@ -524,12 +580,13 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
                 )
                 log_figure(exp, fig, "train/pca", step)
 
-    # Final checkpoint (if not already saved at step=n_steps)
-    if cfg.n_steps % cfg.ckpt_every != 0:
+    # Final checkpoint for this job (if not already saved at end_step)
+    if end_step % cfg.ckpt_every != 0:
         ema_loss = ema.get("total_loss")
+        ckpt_path = make_ckpt_path(end_step)
         save_checkpoint(
             ckpt_path, model, cfg.student_model,
-            step=cfg.n_steps, train_loss=ema_loss.item() if ema_loss is not None else None,
+            step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
             comet_id=exp.get_key(),
             scene_norm_state=scene_norm.state_dict(),
             cls_norm_state=cls_norm.state_dict(),
@@ -537,6 +594,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
             scheduler_state=scheduler.state_dict(),
             training_config_history=training_config_history,
         )
+        update_symlink(run_dir / "latest.pt", ckpt_path)
 
     ema_loss = ema.get("total_loss")
     final_loss = ema_loss.item() if ema_loss is not None else float("inf")
