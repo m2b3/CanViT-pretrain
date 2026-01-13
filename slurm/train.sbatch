@@ -9,11 +9,19 @@
 #SBATCH --error=logs/train-%A_%a.err
 
 # AVP-ViT training on IN21k with precomputed features
-# Usage: sbatch slurm/train.sbatch [tyro overrides...]
-# Array: sbatch --time=00:10:00 --array=0-2%1 slurm/train.sbatch --steps-per-job 10 ...
-# Examples:
+#
+# Single job (long run, manual resume):
 #   sbatch slurm/train.sbatch
-#   sbatch slurm/train.sbatch --no-enable-glimpse-patches-loss --no-enable-glimpse-cls-loss
+#
+# Production job array (recommended - auto-resume, fault tolerant):
+#   sbatch --time=00:30:00 --array=0-333%1 slurm/train.sbatch --steps-per-job 6000
+#   (333 jobs × 6000 steps = 2M steps, ~7 days at 200 steps/min)
+#
+# Continue existing run (manual or after job array completes):
+#   sbatch --time=00:30:00 --array=0-99%1 slurm/train.sbatch --run-name train-XXXXXXX
+#
+# Quick test:
+#   sbatch --time=00:10:00 --array=0-2%1 slurm/train.sbatch --steps-per-job 10
 
 set -eux
 
