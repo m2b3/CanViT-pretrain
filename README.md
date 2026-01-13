@@ -50,34 +50,67 @@ Everything can change. Be ready.
 
 **Current state (Jan 2026)**: Policy learning is experimental. Might take long pretraining to start mattering. The branching structure may evolve.
 
-## Architecture Split
+## Repository Structure
 
-- **`avp_vit/`** = training code, checkpointing, this repo
-- **`canvit`** = model architecture, lives in `.venv/.../site-packages/canvit/`
+```
+avp_vit/                    # Main package
+  train/                    # Training infrastructure
+    config.py               # ← THE training config (dataclass with all hyperparams)
+    loop.py                 # Main training loop, resume logic
+    step.py                 # Single training step (forward, loss, backward)
+    data.py                 # Data loading (raw images or precomputed features)
+    feature_dataset.py      # IterableDataset for precomputed teacher features
+    norm.py                 # Position-aware normalization (required for inference)
+    viz/                    # Visualization (PCA, metrics, Comet logging)
+  checkpoint/               # Checkpoint save/load (TypedDict schema in __init__.py)
 
-**Before assuming anything about the model, read canvit source.** It's a separate dependency.
+inference_app/              # Streamlit demo for interactive inference
 
-## Discovery
+scripts/                    # One-off utilities
+  flops.py                  # FLOP analysis
+  export_features.py        # Precompute teacher features (for fast training)
+  bench_*.py                # Benchmarks (latency, throughput, loaders)
+  validate_in1k/            # ImageNet-1k evaluation
+  train_ade20k_probe.py     # Segmentation probe training
 
-```bash
-git ls-files                    # this repo's structure
-uv run pypatree                 # this repo with signatures
-ls .venv/.../site-packages/canvit/  # model architecture
+slurm/                      # HPC infrastructure
+  env.sh                    # ← Environment setup (paths, caches) - source this first
+  train.sbatch              # Production training (job arrays)
+  export_features.sh        # Feature precomputation jobs
+
+canvit                      # Model architecture (SEPARATE REPO)
+                            # Source: ~/code/CanViT or https://github.com/m2b3/CanViT/
+                            # Installed as SSH dep (deploy keys, see SLURM.md)
+                            # Key modules: hub.py, viewpoint/, coords/
 ```
 
-## Entry Points
+## Documentation
 
-- Training: `avp_vit/train/__main__.py`
-- Inference demo: `inference_app/` (Streamlit, run with `uv run streamlit run inference_app/__main__.py`)
-- Config: `avp_vit/train/config.py`
-- FLOP analysis: `scripts/flops.py`
+| File | Content |
+|------|---------|
+| `CLAUDE.md` | Development guidelines, session startup |
+| `SLURM.md` | Distributed training on HPC clusters |
+| `POLICY.md` | Policy learning design notes |
+| `avp_vit/train/config.py` | All training hyperparameters (dataclass) |
+| `avp_vit/checkpoint/__init__.py` | Checkpoint schema (`CheckpointData` TypedDict) |
+
+## Commands
+
+```bash
+# Setup (on cluster)
+source slurm/env.sh
+
+# Training
+sbatch slurm/train.sbatch              # Production (SLURM job arrays)
+uv run -m avp_vit.train --help         # Local / see all options
+
+# Inference demo (reference implementation for checkpoint loading + model usage)
+uv run streamlit run inference_app/__main__.py
+```
 
 ## Pitfalls
 
-- **DINOv3 exists and is not DINOv2** - not a typo, not the same. Don't assume. Ask or check the code.
-- **Never hardcode, never assume** - model names, dimensions, conventions. Read the actual code.
-- **Training-inference mismatch is subtle** - deep learning is brittle. Sometimes we aim for zero-shot generalization, sometimes we accept it's not possible. Be explicit about assumptions.
-- **Coordinate conventions vary** - internal vs external APIs vs PyTorch grid_sample. Check canvit source in venv (or https://github.com/m2b3/CanViT/ - private for now): `viewpoint/` and `coords/`.
-- **Normalizer states required for inference** - checkpoints include `scene_norm_state`, `cls_norm_state`, `glimpse_patches_norm_state`, `glimpse_cls_norm_state`. See `avp_vit/train/norm.py`.
+- **DINOv3 exists and is not DINOv2** - not a typo, not the same. Don't assume.
+- **Coordinate conventions vary** - internal vs external APIs vs PyTorch grid_sample. Check canvit: `viewpoint/`, `coords/`.
 - **GPU syncs kill performance** - `.item()`, `.cpu()`, logging inside hot loops. Keep logging outside.
-- **Logging is essential** - but outside hot loops. We want visibility, not sync stalls.
+- **Read canvit source before assuming model behavior** - it's not in this repo.
