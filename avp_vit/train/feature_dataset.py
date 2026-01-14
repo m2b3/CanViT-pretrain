@@ -55,8 +55,8 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
             shard_idx = shard_counter % n_shards
             shard_path = self.shard_files[shard_idx]
 
-            log.info(f"Worker {worker_id}: loading shard {shard_idx}/{n_shards} ({shard_path.name})")
-
+            # All workers load same shard (mmap=cheap), but each processes different samples:
+            # worker i gets samples i, i+num_workers, i+2*num_workers, ...
             t0 = time.perf_counter()
             shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
             t_load = time.perf_counter() - t0
@@ -64,9 +64,10 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
             n_samples = len(shard["paths"])
             failed_indices = set(shard.get("failed_indices", []))
 
-            log.info(f"Worker {worker_id}: shard {shard_idx} loaded in {t_load:.3f}s, {n_samples} samples")
-            if failed_indices:
-                log.warning(f"Worker {worker_id}: {len(failed_indices)} pre-marked failures")
+            if worker_id == 0:
+                log.info(f"Shard {shard_idx}/{n_shards} ({shard_path.name}): {n_samples} samples, loaded in {t_load:.3f}s")
+                if failed_indices:
+                    log.warning(f"  {len(failed_indices)} pre-marked failures")
 
             yielded = 0
             skipped = 0
@@ -95,7 +96,8 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
                 )
                 yielded += 1
 
-            log.info(f"Worker {worker_id}: shard {shard_idx} done, yielded={yielded}, skipped={skipped}")
+            if worker_id == 0:
+                log.info(f"Shard {shard_idx} done: yielded={yielded}, skipped={skipped}")
 
             shard_counter += 1
 
