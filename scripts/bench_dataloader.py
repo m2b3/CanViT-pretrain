@@ -43,7 +43,7 @@ class Config:
 
 
 def main(cfg: Config) -> None:
-    from avp_vit.train.feature_dataset import ShardedFeatureLoader
+    from avp_vit.train.data import ShardedFeatureLoader
 
     shards_dir = cfg.feature_base_dir / cfg.teacher_model / str(cfg.image_size) / "shards"
     log.info("=" * 60)

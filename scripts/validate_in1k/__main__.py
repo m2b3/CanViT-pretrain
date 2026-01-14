@@ -23,7 +23,7 @@ from canvit.viewpoint import Viewpoint as CanvitViewpoint
 
 from avp_vit import ActiveCanViT
 from avp_vit.checkpoint import load as load_ckpt, load_model
-from avp_vit.train.data import val_transform
+from avp_vit.train.transforms import val_transform
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import make_eval_viewpoints

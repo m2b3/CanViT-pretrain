@@ -11,7 +11,7 @@
 #SBATCH --mail-user=me@yberreby.com
 #SBATCH --mail-type=BEGIN,END,FAIL,REQUEUE
 
-# AVP-ViT training: 400 jobs × 5000 steps = 2M steps (~8 days)
+# AVP-ViT training: 401 jobs × 4992 steps ≈ 2M steps (~8 days)
 #
 # Default (just run it):
 #   sbatch slurm/train.sbatch

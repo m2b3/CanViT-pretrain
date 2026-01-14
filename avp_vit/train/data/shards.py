@@ -4,7 +4,7 @@ Design:
 - Single IterableDataset that iterates over ALL shards sequentially
 - Workers split SAMPLES within each shard (not shards across workers)
 - Deterministic order: shard 0, 1, 2, ..., n-1, 0, 1, ... (no shuffling)
-- Progress tracked via `shards_completed` for checkpoint/resume
+- Resume via start_shard = start_step // batches_per_shard
 - Persistent workers work naturally (dataset controls iteration)
 """
 
@@ -18,7 +18,7 @@ from PIL import Image
 from torch import Tensor
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
-from .transforms import val_transform
+from ..transforms import val_transform
 
 log = logging.getLogger(__name__)
 

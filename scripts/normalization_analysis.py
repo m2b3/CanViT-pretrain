@@ -19,7 +19,7 @@ from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
 from canvit.hub import create_backbone
-from avp_vit.train.data import val_transform
+from avp_vit.train.transforms import val_transform
 from avp_vit.train.probe import load_probe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")

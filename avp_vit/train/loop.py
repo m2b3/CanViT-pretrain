@@ -40,8 +40,7 @@ from avp_vit.checkpoint import save as save_checkpoint, update_symlink, find_lat
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 
 from .config import Config  # noqa: E402
-from .data import create_loaders, scene_size_px  # noqa: E402
-from .feature_dataset import ShardedFeatureLoader  # noqa: E402
+from .data import ShardedFeatureLoader, create_loaders, scene_size_px  # noqa: E402
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .norm import PositionAwareNorm  # noqa: E402

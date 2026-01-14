@@ -19,7 +19,7 @@ from torchvision.models.resnet import ResNet50_Weights
 
 from avp_vit import RecurrentState
 from avp_vit.checkpoint import load as load_ckpt, load_model
-from avp_vit.train.data import imagenet_normalize
+from avp_vit.train.transforms import imagenet_normalize
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint

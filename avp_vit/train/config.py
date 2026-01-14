@@ -55,7 +55,8 @@ class Config:
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
     policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
-    steps_per_job: int = 5_000  # Steps this job does before exiting (for SLURM arrays)
+    # 4992 = 78 × 64 (batches_per_shard) - clean shard boundary alignment
+    steps_per_job: int = 4_992  # Steps this job does before exiting (for SLURM arrays)
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
     val_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/val")
@@ -85,7 +86,7 @@ class Config:
     n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
     viz_every_n_vals: int = 5  # Log viz every N validation runs
     curve_every_n_vals: int = 5  # Log curves every N validation runs
-    ckpt_every: int = 5_000
+    ckpt_every: int = 4_992  # Match steps_per_job for clean shard boundaries
     log_spatial_stats: bool = True
     # Compilation and precision
     compile: bool = True

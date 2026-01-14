@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 from torch import Tensor
 
 if TYPE_CHECKING:
-    from .config import Config
+    from ..config import Config
 from torch.utils.data import DataLoader, Dataset
 
 from drac_imagenet import IndexedImageFolder
 
-from .feature_dataset import ShardedFeatureLoader
-from .transforms import val_transform
+from .shards import ShardedFeatureLoader
+from ..transforms import val_transform
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ def create_loaders(cfg: "Config", start_step: int) -> Loaders:
         cfg: Training config
         start_step: Step to resume from (0 for fresh start). CRITICAL for correct shard positioning.
     """
-    from .config import Config
+    from ..config import Config
     assert isinstance(cfg, Config)
     log.info(f"=== CREATE_LOADERS: start_step={start_step} ===")
 
