@@ -189,7 +189,7 @@ def training_step(
 
     def compute_loss(out: GlimpseOutput) -> LossOutput:
         scene_pred = model.predict_teacher_scene(out.state.canvas)
-        cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls)
+        cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas)
 
         scene_patches_loss = torch.zeros((), device=device)
         scene_cls_loss = torch.zeros((), device=device)

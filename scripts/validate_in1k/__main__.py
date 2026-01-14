@@ -80,7 +80,7 @@ def run_trajectory(
         return []
 
     def step_fn(acc: list[Tensor], out: GlimpseOutput, _vp: CanvitViewpoint) -> list[Tensor]:
-        cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls)
+        cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas)
         acc.append(cls_pred)
         return acc
 
