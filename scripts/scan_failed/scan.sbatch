@@ -28,7 +28,7 @@ mkdir -p logs
 log "Installing dependencies..."
 uv sync
 
-SHARDS_DIR="$FEATURES_DIR/in21k/shards"
+SHARDS_DIR="$FEATURES_DIR/in21k/dinov3_vitb16/512/shards"
 OUT_FILE="$FEATURES_DIR/in21k/failed_index.parquet"
 
 log "Scanning: $SHARDS_DIR"
