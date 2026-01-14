@@ -2,7 +2,7 @@
 
 from torch import Tensor
 
-from ..data import IMAGENET_MEAN, IMAGENET_STD
+from ..transforms import IMAGENET_MEAN, IMAGENET_STD
 
 
 def imagenet_denormalize(t: Tensor) -> Tensor:

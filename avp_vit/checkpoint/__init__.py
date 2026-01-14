@@ -16,6 +16,7 @@ import torch
 from torch import Tensor
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
+from avp_vit.train.feature_dataset import LoaderState
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +44,8 @@ class CheckpointData(TypedDict):
     scheduler_state: dict | None
     # Training config history: {timestamp: config_dict} - tracks config across resumes
     training_config_history: dict[str, dict] | None
+    # Data loader state for resume (shards_completed)
+    loader_state: LoaderState | None
     # Environment metadata for debugging
     hostname: str | None
     slurm_job_id: str | None
@@ -149,6 +152,7 @@ def save(
     optimizer_state: dict | None = None,
     scheduler_state: dict | None = None,
     training_config_history: dict[str, dict] | None = None,
+    loader_state: LoaderState | None = None,
 ) -> None:
     """Save checkpoint with all info needed to reconstruct model.
 
@@ -182,6 +186,7 @@ def save(
         "optimizer_state": optimizer_state,
         "scheduler_state": scheduler_state,
         "training_config_history": training_config_history,
+        "loader_state": loader_state,
         "hostname": hostname,
         "slurm_job_id": slurm_job_id,
         "slurm_array_task_id": slurm_array_task_id,
@@ -222,6 +227,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "optimizer_state": raw.get("optimizer_state"),
         "scheduler_state": raw.get("scheduler_state"),
         "training_config_history": raw.get("training_config_history"),
+        "loader_state": raw.get("loader_state"),
         "hostname": raw.get("hostname"),
         "slurm_job_id": raw.get("slurm_job_id"),
         "slurm_array_task_id": raw.get("slurm_array_task_id"),

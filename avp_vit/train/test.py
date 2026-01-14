@@ -6,10 +6,12 @@ from torch import Tensor
 from torchvision import transforms
 
 from avp_vit.train.data import (
-    IMAGENET_MEAN,
-    IMAGENET_STD,
     MAX_CONSECUTIVE_FAILURES,
     InfiniteLoader,
+)
+from avp_vit.train.transforms import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
     imagenet_normalize,
     train_transform,
     val_transform,

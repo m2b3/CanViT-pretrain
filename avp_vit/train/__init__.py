@@ -5,14 +5,16 @@ Entry point: python -m avp_vit.train
 """
 
 from avp_vit.train.data import (
-    IMAGENET_MEAN,
-    IMAGENET_STD,
     Batch,
     InfiniteLoader,
     Loaders,
     create_loaders,
-    imagenet_normalize,
     scene_size_px,
+)
+from avp_vit.train.transforms import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    imagenet_normalize,
     train_transform,
     val_transform,
 )
