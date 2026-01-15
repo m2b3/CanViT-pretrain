@@ -330,7 +330,11 @@ def main(cfg: Config) -> None:
     model_cfg = dacite.from_dict(ActiveCanViTConfig, {**ckpt["model_config"], "teacher_dim": ckpt["teacher_dim"]})
     bb = create_backbone(ckpt["backbone"], pretrained=False)
     model = ActiveCanViT(backbone=bb, cfg=model_cfg, policy=None)
-    model.load_state_dict(ckpt["state_dict"], strict=False)
+    missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
+    if missing:
+        log.warning(f"  Missing keys: {missing}")
+    if unexpected:
+        log.info(f"  Unexpected keys (ignored): {unexpected}")
     model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)

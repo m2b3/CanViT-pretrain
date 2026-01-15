@@ -40,8 +40,19 @@ Check canvit source in venv - model architecture lives there, not here. Read `in
 **DINOv3 ≠ DINOv2.** Different model, different codebase.
 
 - **Patch size is 16px**, always. Do NOT assume 14px like DINOv2.
-- Always get patch size from `backbone.patch_size_px` or `teacher.patch_size_px` — never hardcode.
-- When in doubt about DINOv3 API, read the source in `.venv/.../site-packages/dinov3/`.
+- Access via `.patch_size_px` attribute on any `DINOv3Backbone` instance (whether called `backbone`, `teacher`, etc.)
+- **Never hardcode patch size.** Always read from the backbone object.
+
+**To verify DINOv3 API:**
+```bash
+uv run ipython -c "
+from canvit.hub import create_backbone
+bb = create_backbone('dinov3_vitb16', pretrained=False)
+print(dir(bb))  # see available attributes
+"
+```
+
+Or read source: `.venv/lib/python3.12/site-packages/dinov3/` and `canvit/backbone/dinov3.py`.
 
 ## Commands
 
