@@ -348,10 +348,15 @@ def main(cfg: Config) -> None:
     log.info(f"  Teacher embed_dim: {teacher.embed_dim}, patch_size: {teacher.patch_size_px}")
 
     # Compute grid sizes
-    canvas_grid = cfg.image_size // model.backbone.patch_size_px
-    glimpse_grid = ckpt["model_config"].get("glimpse_grid_size", 8)
-    glimpse_px = glimpse_grid * model.backbone.patch_size_px
-    log.info(f"  Canvas grid: {canvas_grid}x{canvas_grid}, Glimpse grid: {glimpse_grid}x{glimpse_grid}")
+    patch_size = model.backbone.patch_size_px
+    assert teacher.patch_size_px == patch_size, f"Teacher/model patch size mismatch: {teacher.patch_size_px} vs {patch_size}"
+    assert cfg.image_size % patch_size == 0, f"image_size {cfg.image_size} not divisible by patch_size {patch_size}"
+    assert "glimpse_grid_size" in ckpt["model_config"], "glimpse_grid_size missing from checkpoint model_config"
+
+    canvas_grid = cfg.image_size // patch_size
+    glimpse_grid = ckpt["model_config"]["glimpse_grid_size"]
+    glimpse_px = glimpse_grid * patch_size
+    log.info(f"  Canvas grid: {canvas_grid}x{canvas_grid}, Glimpse grid: {glimpse_grid}x{glimpse_grid}, Patch: {patch_size}px")
 
     dims: dict[FeatureType, int] = {
         "hidden": model.canvas_dim,

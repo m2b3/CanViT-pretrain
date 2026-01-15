@@ -35,6 +35,14 @@ Check canvit source in venv - model architecture lives there, not here. Read `in
 - State hypotheses before investigating
 - If you change code that would make README.md misleading, update it
 
+## DINOv3 Notes
+
+**DINOv3 ≠ DINOv2.** Different model, different codebase.
+
+- **Patch size is 16px**, always. Do NOT assume 14px like DINOv2.
+- Always get patch size from `backbone.patch_size_px` or `teacher.patch_size_px` — never hardcode.
+- When in doubt about DINOv3 API, read the source in `.venv/.../site-packages/dinov3/`.
+
 ## Commands
 
 ```bash
