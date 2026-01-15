@@ -260,8 +260,8 @@ def main(cfg: Config) -> None:
                             continue
                         for t, feat in enumerate(feat_list):
                             name = f"{feat_type}/t{t}"
-                            scale = H_mask // feat.shape[1]
-                            preds = probes[name].head(feat).argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
+                            scale = vm.shape[1] // feat.shape[1]
+                            preds = probes[name].head(feat.float()).argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
                             ious[name].update(preds, vm)
 
             # Log metrics + curves
@@ -277,7 +277,7 @@ def main(cfg: Config) -> None:
 
             pbar.set_postfix({f[:3]: f"{ious[f'{f}/t0'].compute().item():.3f}" for f in cfg.features})
 
-        # Train
+        # Train: extract features in AMP, train probes in fp32
         with amp_ctx:
             feats = extract_features(model, teacher, images, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, device)
 
@@ -290,8 +290,7 @@ def main(cfg: Config) -> None:
                 p.head.train()
                 p.optimizer.zero_grad()
                 scale = H_mask // feat.shape[1]
-                with amp_ctx:
-                    loss = focal_loss(p.head(feat.detach()), masks, scale)
+                loss = focal_loss(p.head(feat.detach().float()), masks, scale)
                 loss.backward()
                 nn.utils.clip_grad_norm_(p.head.parameters(), cfg.grad_clip)
                 p.optimizer.step()
