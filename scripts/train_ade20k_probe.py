@@ -211,9 +211,8 @@ def extract_features(
 
 
 def upsample_preds(logits: Tensor, target_size: int) -> Tensor:
-    """Upsample probe predictions to mask resolution."""
-    scale = target_size // logits.shape[2]
-    return logits.argmax(1).repeat_interleave(scale, 1).repeat_interleave(scale, 2)
+    """Upsample logits to mask resolution, then argmax."""
+    return F.interpolate(logits, (target_size, target_size), mode="bilinear", align_corners=False).argmax(1)
 
 
 def train_probe(probe: Probe, feat: Tensor, masks: Tensor, grad_clip: float, ema_alpha: float) -> None:
