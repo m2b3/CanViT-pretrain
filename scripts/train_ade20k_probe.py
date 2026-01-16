@@ -47,8 +47,6 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
 
 FeatureType = Literal["hidden", "predicted_norm", "teacher_full", "teacher_glimpse"]
-RECURRENT_FEATURES: frozenset[FeatureType] = frozenset({"hidden", "predicted_norm"})
-STATIC_FEATURES: frozenset[FeatureType] = frozenset({"teacher_full", "teacher_glimpse"})
 
 
 @dataclass
@@ -434,6 +432,12 @@ def main(cfg: Config) -> None:
     log.info(f"  {len(probes)} probes, {probe_params:,} trainable params total")
     log.info(f"  Probe names: {list(probes.keys())}")
 
+    # Create IoU metrics ONCE here - NOT in validation loop (avoids GPU sync on .to(device))
+    iou_metrics: dict[str, MulticlassJaccardIndex] = {
+        feat: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device)
+        for feat in cfg.features
+    }
+
     # Data
     log.info("Loading datasets...")
     train_ds = ADE20kDataset(cfg.ade20k_root, "training", cfg.image_size, augment=True)
@@ -468,7 +472,9 @@ def main(cfg: Config) -> None:
         if step % cfg.val_every == 0:
             for p in probes.values():
                 p.head.eval()
-            ious = {n: MulticlassJaccardIndex(NUM_CLASSES, ignore_index=IGNORE_LABEL, average="macro").to(device) for n in probes}
+            # Reset metrics (already on device - NO .to(device) here, that causes GPU sync!)
+            for m in iou_metrics.values():
+                m.reset()
 
             with torch.no_grad():
                 for vi, vm in val_loader:
@@ -476,10 +482,10 @@ def main(cfg: Config) -> None:
                     with amp_ctx:
                         feats = extract_features(model, teacher, vi, cfg.n_timesteps, canvas_grid, glimpse_grid, glimpse_px, ckpt["teacher_dim"], device)
                     for feat_type in cfg.features:
-                        eval_probe(probes[feat_type], feats.get(feat_type), vm, ious[feat_type])
+                        eval_probe(probes[feat_type], feats.get(feat_type), vm, iou_metrics[feat_type])
 
             any_improved = False
-            for name, iou in ious.items():
+            for name, iou in iou_metrics.items():
                 miou = iou.compute().item()
                 exp.log_metric(f"{name}/val_miou", miou, step=step)
                 if miou > probes[name].best_miou:
@@ -489,7 +495,7 @@ def main(cfg: Config) -> None:
             if any_improved and cfg.probe_ckpt_dir:
                 save_probes(cfg.probe_ckpt_dir / "best.pt", probes, step, cfg)
 
-            postfix = {feat[:3]: f"{ious[feat].compute().item():.3f}" for feat in cfg.features}
+            postfix = {feat[:3]: f"{iou_metrics[feat].compute().item():.3f}" for feat in cfg.features}
             pbar.set_postfix(postfix)
 
         # Visualization
