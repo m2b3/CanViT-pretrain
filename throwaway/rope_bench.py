@@ -1,13 +1,11 @@
 """RoPE implementation comparison and benchmarking.
 
-Correctness testing: Each implementation is compared against the reference
-(canvit's rope_apply) using torch.allclose with atol=1e-5, rtol=0.
-The max absolute difference is printed for each implementation.
+Correctness: All implementations compared against f32 reference (ground truth).
+Shows precision loss for bf16 variants.
 
 Usage:
-    uv run python throwaway/rope_bench.py              # CPU (default)
-    uv run python throwaway/rope_bench.py --device cuda  # GPU
     uv run python throwaway/rope_bench.py --device cuda --iters 200
+    uv run python throwaway/rope_bench.py --device cuda --dtype bfloat16 --iters 200
 """
 
 import logging
@@ -30,7 +28,7 @@ class Config:
     device: str = "cpu"
     """Device: 'cpu', 'cuda', 'mps'."""
     dtype: str = "float32"
-    """Data type: 'float32' or 'bfloat16'."""
+    """Data type for benchmark: 'float32' or 'bfloat16'."""
     batch: int = 64
     """Batch size."""
     n_heads: int = 16
@@ -43,8 +41,6 @@ class Config:
     """Warmup iterations."""
     iters: int = 100
     """Timed iterations."""
-    atol: float = 1e-5
-    """Absolute tolerance for correctness check."""
 
 
 # =============================================================================
@@ -52,67 +48,15 @@ class Config:
 # =============================================================================
 
 
-def rotate_half_reference(x: Tensor) -> Tensor:
-    """Reference: chunk + cat."""
+def rotate_half(x: Tensor) -> Tensor:
+    """Rotate pairs: [a, b] -> [-b, a]."""
     a, b = x.chunk(2, dim=-1)
     return torch.cat([-b, a], dim=-1)
 
 
-def rope_apply_reference(x: Tensor, sin: Tensor, cos: Tensor) -> Tensor:
-    """Reference implementation from canvit."""
-    return x * cos + rotate_half_reference(x) * sin
-
-
-# =============================================================================
-# Alternative implementations
-# =============================================================================
-
-
-def rope_apply_direct(x: Tensor, sin: Tensor, cos: Tensor) -> Tensor:
-    """Direct formula without rotate_half intermediate.
-
-    Expands: out = x * cos + rotate_half(x) * sin
-    Where rotate_half([a, b]) = [-b, a]
-
-    Result:
-    - out[:half] = a * cos[:half] - b * sin[:half]
-    - out[half:] = b * cos[half:] + a * sin[half:]
-    """
-    half = x.shape[-1] // 2
-    a = x[..., :half]
-    b = x[..., half:]
-    out_first = a * cos[..., :half] - b * sin[..., :half]
-    out_second = b * cos[..., half:] + a * sin[..., half:]
-    return torch.cat([out_first, out_second], dim=-1)
-
-
-def rope_apply_addcmul(x: Tensor, sin: Tensor, cos: Tensor) -> Tensor:
-    """Use addcmul for potential fusion.
-
-    addcmul(input, tensor1, tensor2, value) = input + value * tensor1 * tensor2
-    """
-    half = x.shape[-1] // 2
-    a = x[..., :half]
-    b = x[..., half:]
-
-    # out_first = a * cos_first - b * sin_first
-    out_first = torch.addcmul(a * cos[..., :half], b, sin[..., :half], value=-1)
-    # out_second = b * cos_second + a * sin_second
-    out_second = torch.addcmul(b * cos[..., half:], a, sin[..., half:], value=1)
-
-    return torch.cat([out_first, out_second], dim=-1)
-
-
-def rope_apply_inplace(x: Tensor, sin: Tensor, cos: Tensor) -> Tensor:
-    """Pre-allocate output and write in-place."""
-    half = x.shape[-1] // 2
-    a = x[..., :half].contiguous()
-    b = x[..., half:].contiguous()
-
-    out = torch.empty_like(x)
-    out[..., :half] = a * cos[..., :half] - b * sin[..., :half]
-    out[..., half:] = b * cos[..., half:] + a * sin[..., half:]
-    return out
+def rope_apply(x: Tensor, sin: Tensor, cos: Tensor) -> Tensor:
+    """Reference: x * cos + rotate_half(x) * sin."""
+    return x * cos + rotate_half(x) * sin
 
 
 # =============================================================================
@@ -128,38 +72,26 @@ def sync_device(device: torch.device) -> None:
         torch.mps.synchronize()
 
 
-def measure_diff(
-    impl: Callable[[Tensor, Tensor, Tensor], Tensor],
-    x: Tensor,
-    sin: Tensor,
-    cos: Tensor,
-    reference: Tensor,
-) -> float:
-    """Return max absolute difference from reference."""
-    result = impl(x, sin, cos)
-    return (result - reference).abs().max().item()
+def max_abs_diff(a: Tensor, b: Tensor) -> float:
+    """Max absolute difference, comparing in f32."""
+    return (a.float() - b.float()).abs().max().item()
 
 
 def bench_time(
-    impl: Callable[[Tensor, Tensor, Tensor], Tensor],
-    x: Tensor,
-    sin: Tensor,
-    cos: Tensor,
+    fn: Callable[[], Tensor],
     warmup: int,
     iters: int,
     device: torch.device,
 ) -> float:
     """Return mean time per call in ms."""
-    # Warmup
     for _ in range(warmup):
-        _ = impl(x, sin, cos)
+        _ = fn()
     sync_device(device)
 
-    # Time
     sync_device(device)
     t0 = time.perf_counter()
     for _ in range(iters):
-        _ = impl(x, sin, cos)
+        _ = fn()
     sync_device(device)
     return (time.perf_counter() - t0) / iters * 1000
 
@@ -169,94 +101,87 @@ def main(cfg: Config) -> None:
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[cfg.dtype]
     bytes_per_elem = 4 if dtype == torch.float32 else 2
 
-    # Device info
     if device.type == "cuda":
         torch.set_float32_matmul_precision("high")
         log.info(f"cuda_device: {torch.cuda.get_device_name()}")
 
-    # Config
     log.info(f"device: {device}")
     log.info(f"dtype: {cfg.dtype}")
     log.info(f"shape: [{cfg.batch}, {cfg.n_heads}, {cfg.n_spatial}, {cfg.head_dim}]")
     n_elements = cfg.batch * cfg.n_heads * cfg.n_spatial * cfg.head_dim
-    log.info(f"n_elements: {n_elements}")
     log.info(f"size_mb: {n_elements * bytes_per_elem / 1e6:.1f}")
-    log.info(f"warmup: {cfg.warmup}")
-    log.info(f"iters: {cfg.iters}")
-    log.info(f"atol: {cfg.atol}")
+    log.info(f"warmup: {cfg.warmup}, iters: {cfg.iters}")
     log.info("")
 
-    # Create test tensors
+    # Create test tensors in BOTH f32 and target dtype
     torch.manual_seed(42)
-    x = torch.randn(cfg.batch, cfg.n_heads, cfg.n_spatial, cfg.head_dim, device=device, dtype=dtype)
-    sin = torch.randn(cfg.batch, 1, cfg.n_spatial, cfg.head_dim, device=device, dtype=dtype)
-    cos = torch.randn(cfg.batch, 1, cfg.n_spatial, cfg.head_dim, device=device, dtype=dtype)
+    shape_x = (cfg.batch, cfg.n_heads, cfg.n_spatial, cfg.head_dim)
+    shape_sc = (cfg.batch, 1, cfg.n_spatial, cfg.head_dim)
 
-    # Compute reference
-    reference = rope_apply_reference(x, sin, cos)
+    x_f32 = torch.randn(shape_x, device=device, dtype=torch.float32)
+    sin_f32 = torch.randn(shape_sc, device=device, dtype=torch.float32)
+    cos_f32 = torch.randn(shape_sc, device=device, dtype=torch.float32)
 
-    # Implementations
-    implementations = [
-        ("reference", rope_apply_reference),
-        ("direct", rope_apply_direct),
-        ("addcmul", rope_apply_addcmul),
-        ("inplace", rope_apply_inplace),
-    ]
+    x = x_f32.to(dtype)
+    sin = sin_f32.to(dtype)
+    cos = cos_f32.to(dtype)
 
-    # === CORRECTNESS ===
-    log.info("=== CORRECTNESS (max_abs_diff vs reference) ===")
-    for name, impl in implementations:
-        diff = measure_diff(impl, x, sin, cos, reference)
-        status = "PASS" if diff <= cfg.atol else "FAIL"
-        log.info(f"{name}: {diff:.2e} ({status})")
+    # Ground truth: f32 eager
+    ref_f32 = rope_apply(x_f32, sin_f32, cos_f32)
+
+    # ==========================================================================
+    log.info("=== CORRECTNESS (max_abs_diff vs f32 reference) ===")
     log.info("")
 
-    # === EAGER TIMING ===
-    log.info("=== EAGER TIMING (ms per call) ===")
-    for name, impl in implementations:
-        t = bench_time(impl, x, sin, cos, cfg.warmup, cfg.iters, device)
-        log.info(f"{name}: {t:.3f}")
-    log.info("")
+    # Eager same-dtype
+    out_eager = rope_apply(x, sin, cos)
+    diff_eager = max_abs_diff(out_eager, ref_f32)
+    log.info(f"eager {cfg.dtype}: {diff_eager:.2e}")
 
-    # === COMPILED TIMING ===
-    log.info("=== COMPILED TIMING (ms per call) ===")
-    compile_impls = [
-        ("reference", rope_apply_reference),
-        ("direct", rope_apply_direct),
-        ("addcmul", rope_apply_addcmul),
-        # inplace breaks dynamo with out= on non-contiguous
-    ]
+    # Compiled same-dtype
+    rope_compiled = torch.compile(rope_apply, fullgraph=True)
+    for _ in range(cfg.warmup):
+        _ = rope_compiled(x, sin, cos)
+    sync_device(device)
+    out_compiled = rope_compiled(x, sin, cos)
+    diff_compiled = max_abs_diff(out_compiled, ref_f32)
+    log.info(f"compiled {cfg.dtype}: {diff_compiled:.2e}")
 
-    for name, impl in compile_impls:
-        try:
-            compiled = torch.compile(impl, fullgraph=True)
-            # Warmup compile
-            for _ in range(cfg.warmup):
-                _ = compiled(x, sin, cos)
-            sync_device(device)
+    # Mixed: x=bf16, sin/cos=f32 (what canvit does)
+    if dtype == torch.bfloat16:
+        out_mixed = rope_apply(x, sin_f32, cos_f32)
+        diff_mixed = max_abs_diff(out_mixed, ref_f32)
+        log.info(f"mixed (x=bf16, rope=f32): {diff_mixed:.2e}")
 
-            # Correctness
-            diff = measure_diff(compiled, x, sin, cos, reference)
-            status = "PASS" if diff <= cfg.atol else "FAIL"
-
-            # Time
-            t = bench_time(compiled, x, sin, cos, cfg.warmup, cfg.iters, device)
-            log.info(f"{name}: {t:.3f} (diff={diff:.2e}, {status})")
-        except Exception as e:
-            log.info(f"{name}: FAILED ({type(e).__name__})")
-
-    log.info("")
-    log.info("=== inplace compiled ===")
-    try:
-        compiled = torch.compile(rope_apply_inplace, fullgraph=True)
+        rope_compiled_mixed = torch.compile(rope_apply, fullgraph=True)
         for _ in range(cfg.warmup):
-            _ = compiled(x, sin, cos)
+            _ = rope_compiled_mixed(x, sin_f32, cos_f32)
         sync_device(device)
-        t = bench_time(compiled, x, sin, cos, cfg.warmup, cfg.iters, device)
-        diff = measure_diff(compiled, x, sin, cos, reference)
-        log.info(f"inplace: {t:.3f} (diff={diff:.2e})")
-    except Exception as e:
-        log.info(f"inplace: FAILED ({type(e).__name__}: {e})")
+        out_compiled_mixed = rope_compiled_mixed(x, sin_f32, cos_f32)
+        diff_compiled_mixed = max_abs_diff(out_compiled_mixed, ref_f32)
+        log.info(f"compiled mixed (x=bf16, rope=f32): {diff_compiled_mixed:.2e}")
+
+    log.info("")
+
+    # ==========================================================================
+    log.info("=== TIMING (ms per call) ===")
+    log.info("")
+
+    t_eager = bench_time(lambda: rope_apply(x, sin, cos), cfg.warmup, cfg.iters, device)
+    log.info(f"eager {cfg.dtype}: {t_eager:.3f}")
+
+    t_compiled = bench_time(lambda: rope_compiled(x, sin, cos), cfg.warmup, cfg.iters, device)
+    log.info(f"compiled {cfg.dtype}: {t_compiled:.3f}")
+
+    if dtype == torch.bfloat16:
+        t_mixed = bench_time(lambda: rope_apply(x, sin_f32, cos_f32), cfg.warmup, cfg.iters, device)
+        log.info(f"mixed (x=bf16, rope=f32): {t_mixed:.3f}")
+
+        t_compiled_mixed = bench_time(lambda: rope_compiled_mixed(x, sin_f32, cos_f32), cfg.warmup, cfg.iters, device)
+        log.info(f"compiled mixed (x=bf16, rope=f32): {t_compiled_mixed:.3f}")
+
+    log.info("")
+    log.info(f"speedup compiled vs eager: {t_eager / t_compiled:.1f}x")
 
 
 if __name__ == "__main__":
