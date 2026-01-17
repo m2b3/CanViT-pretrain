@@ -157,10 +157,11 @@ class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
         self.size = size
         self.load_size = size * 2 if augment else size
         self.transform = A.Compose([A.HorizontalFlip(p=0.5), A.RandomCrop(size, size)]) if augment else None
-        img_dir, ann_dir = root / "images" / split, root / "annotations" / split
+        img_dir = root / "images" / split
+        ann_dir = root / "annotations" / split
         self.imgs = sorted(img_dir.glob("*.jpg"))
         self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
-        assert len(self.imgs) > 0, f"No images in {img_dir}"
+        assert len(self.imgs) > 0, f"No images in {img_dir.resolve()} (root={root.resolve()})"
         log.info(f"ADE20k {split}: {len(self)} images")
 
     def __len__(self) -> int:
