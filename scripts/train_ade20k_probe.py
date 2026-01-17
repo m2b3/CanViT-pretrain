@@ -87,6 +87,7 @@ class Config:
     device: str | None = None
     amp: bool = True
     probe_ckpt_dir: Path | None = None
+    resume_from: Path | None = None  # Load probe weights (restarts LR schedule)
 
 
 class ProbeHead(nn.Module):
@@ -512,6 +513,18 @@ def main(cfg: Config) -> None:
         feat: make_probe(feat, dims[feat], cfg, device) for feat in cfg.features
     }
     log.info(f"  {len(probes)} probes: {list(probes.keys())}")
+
+    # Resume from checkpoint (weights only, LR restarts)
+    if cfg.resume_from:
+        log.info(f"Resuming from {cfg.resume_from}")
+        ckpt_data = torch.load(cfg.resume_from, map_location=device, weights_only=True)
+        for name, probe in probes.items():
+            if name in ckpt_data["probe_state_dicts"]:
+                probe.head.load_state_dict(ckpt_data["probe_state_dicts"][name])
+                probe.best_mean_miou = ckpt_data["best_mean_mious"].get(name, 0.0)
+                log.info(f"  Loaded {name} (best mIoU: {probe.best_mean_miou:.4f})")
+            else:
+                log.warning(f"  {name} not in checkpoint, starting fresh")
 
     # Per-timestep IoU metrics for val
     val_iou: dict[str, list[MulticlassJaccardIndex]] = {
