@@ -36,6 +36,7 @@ from tqdm import tqdm
 
 from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.checkpoint import load as load_ckpt
+from avp_vit.train.config import Config as TrainConfig
 from avp_vit.train.viewpoint import Viewpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -190,22 +191,32 @@ def extract_features(
     min_vp_scale: float,
 ) -> PerTimestepFeatures:
     """Extract per-timestep features. Returns {feat_type: [t0, t1, ...]}."""
-    B = images.shape[0]
+    B, C, H, W = images.shape
+    assert C == 3 and H == W, f"Expected square RGB images, got {images.shape}"
+
     feats: PerTimestepFeatures = {"hidden": [], "predicted_norm": [], "teacher_glimpse": []}
     state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
 
     # Teacher glimpse baseline (static, same at all timesteps)
     sz = glimpse_grid * teacher.patch_size_px
-    small = F.interpolate(images, (sz, sz), mode="bilinear", align_corners=False)
+    small = F.interpolate(images, size=(sz, sz), mode="bilinear", align_corners=False)
     teacher_glimpse_feat = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
+    assert teacher_glimpse_feat.shape == (B, glimpse_grid, glimpse_grid, teacher.embed_dim)
 
     for t in range(n_timesteps):
-        vp = Viewpoint.full_scene(batch_size=B, device=device) if t == 0 else Viewpoint.random(batch_size=B, device=device, min_scale=min_vp_scale, max_scale=1.0)
+        if t == 0:
+            vp = Viewpoint.full_scene(batch_size=B, device=device)
+        else:
+            vp = Viewpoint.random(batch_size=B, device=device, min_scale=min_vp_scale, max_scale=1.0)
+
         out = model.forward_step(image=images, state=state, viewpoint=vp, glimpse_size_px=glimpse_px)
         state = out.state
 
-        feats["hidden"].append(model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1))
-        feats["predicted_norm"].append(model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1))
+        hidden = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+        predicted = model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+
+        feats["hidden"].append(hidden)
+        feats["predicted_norm"].append(predicted)
         feats["teacher_glimpse"].append(teacher_glimpse_feat)  # same each timestep (baseline)
 
     return feats
@@ -287,8 +298,8 @@ def main(cfg: Config) -> None:
 
     # Grid sizes and viewpoint config from training checkpoint
     patch_size = model.backbone.patch_size_px
+    assert cfg.image_size % patch_size == 0, f"image_size {cfg.image_size} not divisible by patch_size {patch_size}"
     canvas_grid = cfg.image_size // patch_size
-    from avp_vit.train.config import Config as TrainConfig
     train_hist = ckpt.get("training_config_history") or {}
     train_cfg = list(train_hist.values())[-1] if train_hist else {}
     glimpse_grid = train_cfg.get("glimpse_grid_size", TrainConfig.glimpse_grid_size)
