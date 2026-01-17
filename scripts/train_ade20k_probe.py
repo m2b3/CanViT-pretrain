@@ -19,6 +19,7 @@ from typing import Literal, TypedDict
 import albumentations as A
 import comet_ml
 import dacite
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -38,6 +39,7 @@ from avp_vit import ActiveCanViT, ActiveCanViTConfig
 from avp_vit.checkpoint import load as load_ckpt
 from avp_vit.train.config import Config as TrainConfig
 from avp_vit.train.viewpoint import Viewpoint
+from avp_vit.train.viz import fit_pca, pca_rgb, imagenet_denormalize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -76,6 +78,8 @@ class Config:
 
     log_every: int = 20
     val_every: int = 500
+    viz_every: int = 500
+    viz_samples: int = 4
 
     comet_project: str = "avp-ade20k-probe"
     comet_workspace: str = "m2b3-ava"
@@ -303,6 +307,113 @@ def save_probes(path: Path, probes: dict[str, Probe], step: int, cfg: Config) ->
     except Exception:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+# Fixed ADE20K color palette (deterministic)
+_ADE20K_PALETTE = np.random.RandomState(42).randint(
+    0, 255, (NUM_CLASSES + 1, 3), dtype=np.uint8
+)
+_ADE20K_PALETTE[NUM_CLASSES] = 0  # ignored → black
+
+
+def _colorize_mask(mask: np.ndarray) -> np.ndarray:
+    """Map class indices to RGB colors. Ignored pixels → black."""
+    return _ADE20K_PALETTE[np.where(mask == IGNORE_LABEL, NUM_CLASSES, mask)]
+
+
+def _correctness_map(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+    """Create correctness heatmap: green=correct, red=wrong, black=ignored."""
+    H, W = pred.shape
+    out = np.zeros((H, W, 3), dtype=np.uint8)
+    ignored = gt == IGNORE_LABEL
+    correct = (pred == gt) & ~ignored
+    wrong = (pred != gt) & ~ignored
+    out[correct] = [0, 200, 0]  # green
+    out[wrong] = [200, 0, 0]  # red
+    out[ignored] = [0, 0, 0]  # black
+    return out
+
+
+def log_viz(
+    exp: comet_ml.Experiment,
+    step: int,
+    probes: dict[str, Probe],
+    feats: PerTimestepFeatures,
+    images: Tensor,
+    masks: Tensor,
+    cfg: Config,
+) -> None:
+    """Log visualization: PCA of features, colored predictions, correctness heatmap."""
+    n = min(cfg.viz_samples, images.shape[0])
+    T = cfg.n_timesteps
+    n_feats = len(cfg.features)
+
+    # Columns: Image | GT | then for each feature: PCA_t0 | Pred_t0 | Corr_t0 | ... | PCA_tT | Pred_tT | Corr_tT
+    # For clarity, show only first and last timestep
+    t_show = [0, T - 1] if T > 1 else [0]
+    cols_per_feat = 3 * len(t_show)  # PCA, Pred, Corr per timestep
+    n_cols = 2 + n_feats * cols_per_feat
+
+    fig, axes = plt.subplots(n, n_cols, figsize=(2.5 * n_cols, 2.5 * n))
+    if n == 1:
+        axes = axes[np.newaxis, :]
+
+    # Denormalize images for display
+    imgs_np = [imagenet_denormalize(images[i]).cpu().numpy() for i in range(n)]
+    masks_np = masks[:n].cpu().numpy()
+
+    for i in range(n):
+        col = 0
+
+        # Image
+        axes[i, col].imshow(imgs_np[i])
+        axes[i, col].set_title("Image" if i == 0 else "")
+        axes[i, col].axis("off")
+        col += 1
+
+        # Ground truth
+        axes[i, col].imshow(_colorize_mask(masks_np[i]))
+        axes[i, col].set_title("GT" if i == 0 else "")
+        axes[i, col].axis("off")
+        col += 1
+
+        # For each feature type
+        for feat_type in cfg.features:
+            for t in t_show:
+                feat = feats[feat_type][t]  # [B, H, W, D]
+                H_feat, W_feat, D = feat.shape[1], feat.shape[2], feat.shape[3]
+                feat_np = feat[i].cpu().float().numpy().reshape(-1, D)
+
+                # PCA visualization
+                pca = fit_pca(feat_np)
+                pca_img = pca_rgb(pca, feat_np, H_feat, W_feat)
+                axes[i, col].imshow(pca_img)
+                axes[i, col].set_title(f"{feat_type[:6]} PCA t{t}" if i == 0 else "")
+                axes[i, col].axis("off")
+                col += 1
+
+                # Prediction (colored by class)
+                with torch.no_grad():
+                    logits = probes[feat_type].head(feat[i : i + 1].float())
+                    pred = logits[0].argmax(0).cpu().numpy()  # [H, W]
+                axes[i, col].imshow(_colorize_mask(pred))
+                axes[i, col].set_title(f"Pred t{t}" if i == 0 else "")
+                axes[i, col].axis("off")
+                col += 1
+
+                # Correctness heatmap
+                gt_down = (
+                    downsample_masks(masks[i : i + 1], H_feat, W_feat)[0].cpu().numpy()
+                )
+                corr_img = _correctness_map(pred, gt_down)
+                axes[i, col].imshow(corr_img)
+                axes[i, col].set_title(f"Corr t{t}" if i == 0 else "")
+                axes[i, col].axis("off")
+                col += 1
+
+    plt.tight_layout()
+    exp.log_figure(figure_name=f"viz_{step}", figure=fig, step=step)
+    plt.close(fig)
 
 
 def main(cfg: Config) -> None:
@@ -591,6 +702,13 @@ def main(cfg: Config) -> None:
                     m.reset()
 
             exp.log_metrics(log_dict, step=step)
+
+        # === Visualization ===
+        if step % cfg.viz_every == 0:
+            for p in probes.values():
+                p.head.eval()
+            with torch.no_grad():
+                log_viz(exp, step, probes, feats, images, masks, cfg)
 
     pbar.close()
     log.info("=" * 60)
