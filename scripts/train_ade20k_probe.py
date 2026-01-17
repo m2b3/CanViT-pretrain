@@ -139,8 +139,19 @@ class Probe:
 PerTimestepFeatures = dict[FeatureType, list[Tensor]]
 
 
+def upsample_preds(preds: Tensor, target_h: int, target_w: int) -> Tensor:
+    """Upsample predictions (post-argmax) to mask resolution for fair mIoU."""
+    if preds.shape[1:] == (target_h, target_w):
+        return preds
+    return (
+        F.interpolate(preds.unsqueeze(1).float(), (target_h, target_w), mode="nearest")
+        .squeeze(1)
+        .long()
+    )
+
+
 def downsample_masks(masks: Tensor, target_h: int, target_w: int) -> Tensor:
-    """Downsample masks using nearest neighbor (INT_MAX workaround)."""
+    """Downsample masks using nearest neighbor (for focal loss only)."""
     if masks.shape[1:] == (target_h, target_w):
         return masks
     return (
@@ -404,11 +415,11 @@ def log_viz(
                 axes[i, col].axis("off")
                 col += 1
 
-                # Correctness heatmap
-                gt_down = (
-                    downsample_masks(masks[i : i + 1], H_feat, W_feat)[0].cpu().numpy()
-                )
-                corr_img = _correctness_map(pred, gt_down)
+                # Correctness heatmap (at mask resolution for fair comparison)
+                pred_up = upsample_preds(
+                    torch.from_numpy(pred).unsqueeze(0), masks.shape[1], masks.shape[2]
+                )[0].numpy()
+                corr_img = _correctness_map(pred_up, masks_np[i])
                 axes[i, col].imshow(corr_img)
                 axes[i, col].set_title(f"Corr t{t}" if i == 0 else "")
                 axes[i, col].axis("off")
@@ -596,11 +607,9 @@ def main(cfg: Config) -> None:
                         )
                         for t in t_range:
                             logits = probes[feat_type].head(feats[feat_type][t].float())
-                            preds = logits.argmax(1)  # [B, Hl, Wl] - no upsample
-                            vm_down = downsample_masks(
-                                vm, preds.shape[1], preds.shape[2]
-                            )
-                            val_iou[feat_type][t].update(preds, vm_down)
+                            preds = logits.argmax(1)  # [B, Hl, Wl]
+                            preds_up = upsample_preds(preds, vm.shape[1], vm.shape[2])
+                            val_iou[feat_type][t].update(preds_up, vm)
 
             # Log mIoU (per-timestep for recurrent, single for static)
             for feat_type in cfg.features:
@@ -675,12 +684,12 @@ def main(cfg: Config) -> None:
             probe.scheduler.step()
             probe.accumulate(loss, grad_norm)  # NO .item() - stays on GPU
 
-            # Update train IoU metrics (using pre-update logits, at feature resolution)
+            # Update train IoU metrics (using pre-update logits, upsampled to mask res)
             with torch.no_grad():
                 for t, logits in zip(t_range, logits_list, strict=True):
                     preds = logits.detach().argmax(1)  # [B, Hl, Wl]
-                    masks_down = downsample_masks(masks, preds.shape[1], preds.shape[2])
-                    train_iou[feat_type][t].update(preds, masks_down)
+                    preds_up = upsample_preds(preds, masks.shape[1], masks.shape[2])
+                    train_iou[feat_type][t].update(preds_up, masks)
 
         step += 1
         pbar.update(1)
