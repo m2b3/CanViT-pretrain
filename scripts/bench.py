@@ -80,12 +80,41 @@ from canvit.hub import create_backbone
 from canvit.viewpoint import Viewpoint
 
 
-def _default_model_config() -> ActiveCanViTConfig:
-    """Default model config with teacher_dim=768 (ViT-B)."""
-    return ActiveCanViTConfig(teacher_dim=768)
-
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
+
+# Placeholder teacher_dim (ViT-B). Overwritten at runtime with actual teacher.embed_dim.
+_PLACEHOLDER_TEACHER_DIM = 768
+
+
+def _default_model_config() -> ActiveCanViTConfig:
+    """Model config with placeholder teacher_dim (fixed at runtime)."""
+    return ActiveCanViTConfig(teacher_dim=_PLACEHOLDER_TEACHER_DIM)
+
+
+def _is_dataclass_instance(obj: Any) -> bool:
+    """Check if obj is a dataclass instance (not the class itself)."""
+    return hasattr(obj, "__dataclass_fields__")
+
+
+def _log_config_diff(
+    cfg: Any, default_cfg: Any, prefix: str = "", indent: int = 2
+) -> None:
+    """Recursively log config fields, highlighting overrides. Handles nested dataclasses."""
+    pad = " " * indent
+    for f in fields(cfg):
+        val = getattr(cfg, f.name)
+        default_val = getattr(default_cfg, f.name)
+        field_name = f"{prefix}{f.name}" if prefix else f.name
+
+        if _is_dataclass_instance(val) and _is_dataclass_instance(default_val):
+            # Recurse into nested dataclass
+            log.info(f"{pad}{field_name}:")
+            _log_config_diff(val, default_val, prefix="", indent=indent + 2)
+        elif val != default_val:
+            log.info(f"{pad}[OVERRIDE] {field_name} = {val} (default: {default_val})")
+        else:
+            log.info(f"{pad}{field_name} = {val}")
 
 
 @dataclass
@@ -349,18 +378,12 @@ def main(cfg: BenchConfig) -> None:
     model = ActiveCanViT(backbone=backbone, cfg=cfg.model, policy=None).to(device).eval()
     log.info(f"  canvas_dim={cfg.model.canvas_dim}, read_after={model.read_after_blocks}")
 
-    # Log model config (highlight non-defaults)
+    # Log model config (highlight non-defaults, recurse into nested dataclasses)
     log.info("")
     log.info("Model config:")
     default_cfg = _default_model_config()
     default_cfg.teacher_dim = teacher.embed_dim  # Fair comparison
-    for f in fields(cfg.model):
-        val = getattr(cfg.model, f.name)
-        default_val = getattr(default_cfg, f.name)
-        if val != default_val:
-            log.info(f"  [OVERRIDE] {f.name} = {val} (default: {default_val})")
-        else:
-            log.info(f"  {f.name} = {val}")
+    _log_config_diff(cfg.model, default_cfg)
 
     # Compile
     if not cfg.no_compile:
