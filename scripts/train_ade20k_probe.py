@@ -138,18 +138,34 @@ class Features:
         raise ValueError(f"Unknown feature type: {feat_type}")
 
 
+def downsample_masks(masks: Tensor, target_h: int, target_w: int) -> Tensor:
+    """Downsample masks to target resolution using nearest neighbor.
+
+    Workaround for PyTorch INT_MAX limit on bilinear interpolation output size.
+    With batch=64, classes=150, size=512: 64*150*512*512 > INT_MAX.
+    Downsampling masks is slightly coarser but avoids the limit.
+
+    TODO: Revert to upsampling logits if PyTorch removes this limit.
+    """
+    if masks.shape[1:] == (target_h, target_w):
+        return masks
+    return F.interpolate(
+        masks.unsqueeze(1).float(), (target_h, target_w), mode="nearest"
+    ).squeeze(1).long()
+
+
 def focal_loss(logits: Tensor, masks: Tensor, gamma: float) -> Tensor:
-    """Pixel-wise focal loss. Upsamples logits to mask resolution."""
-    C, H, W = logits.shape[1], masks.shape[1], masks.shape[2]
-    logits_up = F.interpolate(logits, (H, W), mode="bilinear", align_corners=False)
-    log_probs = F.log_softmax(logits_up, dim=1)  # [B, C, H, W]
+    """Pixel-wise focal loss. Downsamples masks to logits resolution (INT_MAX workaround)."""
+    B, C, Hl, Wl = logits.shape
+    masks = downsample_masks(masks, Hl, Wl)
+    log_probs = F.log_softmax(logits, dim=1)  # [B, C, Hl, Wl]
     probs = log_probs.exp()
 
-    valid = masks != IGNORE_LABEL  # [B, H, W]
-    targets = masks.clamp(0, C - 1).long()  # [B, H, W]
+    valid = masks != IGNORE_LABEL  # [B, Hl, Wl]
+    targets = masks.clamp(0, C - 1).long()  # [B, Hl, Wl]
 
-    log_p = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [B, H, W]
-    p = probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [B, H, W]
+    log_p = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [B, Hl, Wl]
+    p = probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [B, Hl, Wl]
     return -((1 - p) ** gamma * log_p * valid).sum() / valid.sum().clamp(min=1)
 
 
