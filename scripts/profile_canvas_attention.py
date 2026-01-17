@@ -27,8 +27,13 @@ GLIMPSE_PX = GLIMPSE_GRID * PATCH_SIZE  # 128
 N_WARMUP = 10
 N_PROFILE = 10
 
+import argparse
+
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-compile", action="store_true", help="Skip torch.compile")
+    args = parser.parse_args()
     assert torch.cuda.is_available(), "CUDA required"
     device = torch.device("cuda")
 
@@ -61,13 +66,16 @@ def main():
     print(f"  n_read_attn: {len(model.read_attn)}, n_write_attn: {len(model.write_attn)}")
     print()
 
-    # Compile like training
-    print("Compiling...")
-    model.compile()
-    # Teacher backbone blocks also compiled in training
-    for block in teacher.vit.blocks:
-        block.compile()
-    print("Compilation done.")
+    # Compile like training (unless --no-compile)
+    if args.no_compile:
+        print("SKIPPING COMPILATION (--no-compile)")
+    else:
+        print("Compiling...")
+        model.compile()
+        # Teacher backbone blocks also compiled in training
+        for block in teacher.vit.blocks:
+            block.compile()
+        print("Compilation done.")
     print()
 
     # Create inputs - scene size = canvas_grid * patch_size = 32 * 16 = 512
