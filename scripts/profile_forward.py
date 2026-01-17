@@ -73,11 +73,9 @@ def clear_cache() -> None:
 
 def get_compile_kwargs(mode: str) -> dict:
     """Get torch.compile kwargs for a given mode."""
-    # Disable cudagraphs - conflicts with cached tensors in model
-    base = {"options": {"triton.cudagraphs": False}}
     if mode == "default":
-        return base
-    return {"mode": mode, **base}
+        return {}
+    return {"mode": mode}
 
 
 def create_fresh_model(device: torch.device, model_cfg: ActiveCanViTConfig):
