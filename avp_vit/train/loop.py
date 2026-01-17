@@ -154,17 +154,18 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         return flat
 
     # Determine checkpoint to resume from
+    # Priority: run_dir's latest.pt > resume_ckpt > fresh start
+    # This allows resume_ckpt to seed a new run while subsequent jobs auto-resume
     ckpt_path_to_load: Path | None = None
-    if cfg.resume_ckpt is not None:
+    latest = find_latest(run_dir)
+    if latest is not None:
+        ckpt_path_to_load = latest
+        log.info(f"Auto-resume from run_dir: {ckpt_path_to_load}")
+    elif cfg.resume_ckpt is not None:
         ckpt_path_to_load = cfg.resume_ckpt
-        log.info(f"Explicit resume checkpoint: {ckpt_path_to_load}")
+        log.info(f"Seeding from resume_ckpt: {ckpt_path_to_load}")
     else:
-        latest = find_latest(run_dir)
-        if latest is not None:
-            ckpt_path_to_load = latest
-            log.info(f"Auto-resume from latest: {ckpt_path_to_load}")
-        else:
-            log.info("No checkpoint found - starting fresh")
+        log.info("No checkpoint found - starting fresh")
 
     # Load checkpoint BEFORE creating Comet experiment
     ckpt_data: CheckpointData | None = None
