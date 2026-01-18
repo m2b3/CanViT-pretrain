@@ -17,7 +17,8 @@ import torchvision.transforms as transforms
 
 from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.norm import PositionAwareNorm
-from avp_vit.train.viewpoint import Viewpoint, sample_at_viewpoint
+from avp_vit.train.viewpoint import Viewpoint
+from canvit.viewpoint import sample_at_viewpoint
 from canvit import create_backbone
 
 

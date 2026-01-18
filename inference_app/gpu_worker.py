@@ -17,12 +17,13 @@ from torch import Tensor
 from torchvision import transforms
 from torchvision.models.resnet import ResNet50_Weights
 
-from avp_vit import RecurrentState
+from canvit import RecurrentState
 from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.transforms import imagenet_normalize
 from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import load_probe
-from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint, sample_at_viewpoint
+from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint
+from canvit.viewpoint import sample_at_viewpoint
 from avp_vit.train.viz import fit_pca, imagenet_denormalize
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit import create_backbone

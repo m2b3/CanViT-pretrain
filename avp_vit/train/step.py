@@ -11,8 +11,8 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
-from avp_vit import ACVFRP, CanViTOutput, RecurrentState
-from canvit import Viewpoint, sample_at_viewpoint
+from avp_vit import ACVFRP
+from canvit import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 
 from .loss import mse_loss
 from .viewpoint import Viewpoint as NamedViewpoint, ViewpointType

@@ -38,7 +38,8 @@ from tqdm import tqdm
 from avp_vit import ACVFRP, ACVFRPConfig
 from avp_vit.checkpoint import load as load_ckpt
 from avp_vit.train.config import Config as TrainConfig
-from avp_vit.train.viewpoint import Viewpoint, sample_at_viewpoint
+from avp_vit.train.viewpoint import Viewpoint
+from canvit.viewpoint import sample_at_viewpoint
 from avp_vit.train.viz import fit_pca, pca_rgb, imagenet_denormalize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

@@ -8,7 +8,7 @@ import comet_ml
 import numpy as np
 import torch
 import torch.nn.functional as F
-from canvit import CanViTOutput, sample_at_viewpoint
+from canvit import CanViTOutput, RecurrentState, sample_at_viewpoint
 from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from canvit.policy import PolicyHead
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
@@ -18,7 +18,7 @@ from dinov3_probes import DINOv3LinearClassificationHead
 
 from ytch.correctness import assert_shape
 
-from avp_vit import ACVFRP, RecurrentState
+from avp_vit import ACVFRP
 from ..norm import PositionAwareNorm
 from ..probe import (
     compute_in1k_top1,

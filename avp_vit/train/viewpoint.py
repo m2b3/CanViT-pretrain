@@ -12,14 +12,12 @@ from typing import NamedTuple
 
 import torch
 from canvit.viewpoint import Viewpoint as CoreViewpoint
-from canvit.viewpoint import sample_at_viewpoint
 from torch import Tensor
 
 __all__ = [
     "PixelBox",
     "Viewpoint",
     "ViewpointType",
-    "sample_at_viewpoint",
     "random_viewpoint",
     "make_eval_viewpoints",
     "viewpoint_to_pixel_box",
