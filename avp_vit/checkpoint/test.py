@@ -5,18 +5,18 @@ from pathlib import Path
 
 import torch
 
-from avp_vit import ActiveCanViT, ActiveCanViTConfig
+from avp_vit import ACVFRP, ACVFRPConfig
 from canvit.backbone.dinov3 import DINOv3Backbone
 from avp_vit.checkpoint import CheckpointData, load, save
 
 
-def _make_tiny_model(device: torch.device) -> ActiveCanViT:
-    """Create minimal ActiveCanViT for testing (no pretrained weights needed)."""
+def _make_tiny_model(device: torch.device) -> ACVFRP:
+    """Create minimal ACVFRP for testing (no pretrained weights needed)."""
     from dinov3.hub.backbones import dinov3_vits16
 
     backbone = DINOv3Backbone(dinov3_vits16(pretrained=False).to(device))
-    cfg = ActiveCanViTConfig(teacher_dim=384)
-    return ActiveCanViT(backbone=backbone, cfg=cfg).to(device)
+    cfg = ACVFRPConfig(teacher_dim=384)
+    return ACVFRP(backbone=backbone, cfg=cfg).to(device)
 
 
 def test_save_load_roundtrip() -> None:

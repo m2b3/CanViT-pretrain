@@ -21,7 +21,7 @@ from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit import create_backbone
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
 
-from avp_vit import ActiveCanViT
+from avp_vit import ACVFRP
 from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.transforms import val_transform
 from avp_vit.train.norm import PositionAwareNorm
@@ -66,7 +66,7 @@ def load_cls_normalizer(ckpt_path: Path, device: torch.device) -> PositionAwareN
 
 
 def run_trajectory(
-    model: ActiveCanViT,
+    model: ACVFRP,
     images: Tensor,
     canvas_grid: int,
     glimpse_size_px: int,

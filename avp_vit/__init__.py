@@ -1,17 +1,23 @@
 """avp_vit: Active Vision Pretraining with ViT.
 
-Re-exports from canvit for backward compatibility.
+Re-exports from canvit for convenience.
 """
 
 from canvit import CanViT, CanViTConfig, GlimpseOutput, RecurrentState
 from canvit.model.active.pretraining import (
-    ActiveCanViTForReconstructivePretraining as ActiveCanViT,
-    ActiveCanViTForReconstructivePretrainingConfig as ActiveCanViTConfig,
+    ActiveCanViTForReconstructivePretraining,
+    ActiveCanViTForReconstructivePretrainingConfig,
 )
 
+# Short aliases (distinct from canvit.ActiveCanViT base class)
+ACVFRP = ActiveCanViTForReconstructivePretraining
+ACVFRPConfig = ActiveCanViTForReconstructivePretrainingConfig
+
 __all__ = [
-    "ActiveCanViT",
-    "ActiveCanViTConfig",
+    "ActiveCanViTForReconstructivePretraining",
+    "ActiveCanViTForReconstructivePretrainingConfig",
+    "ACVFRP",
+    "ACVFRPConfig",
     "CanViT",
     "CanViTConfig",
     "GlimpseOutput",

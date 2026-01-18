@@ -3,7 +3,7 @@
 
 Compares:
 - DINOv3 teacher (standard API) at glimpse and full image sizes
-- Our ActiveCanViT model forward pass
+- Our ACVFRP model forward pass
 - Multi-step trajectories
 
 All timings at batch_size=1 for real-time inference scenarios.
@@ -30,7 +30,7 @@ from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit import create_backbone
-from canvit.model.active import ActiveCanViT
+from avp_vit import ACVFRP
 from canvit.viewpoint import Viewpoint
 from ytch.device import sync_device
 
@@ -147,7 +147,7 @@ def main() -> None:
 
     model = load_model(cfg.ckpt, device)
     model.eval()
-    assert isinstance(model, ActiveCanViT), f"Expected ActiveCanViT, got {type(model)}"
+    assert isinstance(model, ACVFRP), f"Expected ACVFRP, got {type(model)}"
     log.info(f"Loaded model: {type(model).__name__}")
 
     ckpt = load_ckpt(cfg.ckpt, "cpu")

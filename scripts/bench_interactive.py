@@ -25,7 +25,7 @@ WARMUP = 5
 print("Loading teacher...")
 from canvit import create_backbone  # noqa: E402
 from canvit.viewpoint import Viewpoint  # noqa: E402
-from avp_vit import ActiveCanViT, ActiveCanViTConfig  # noqa: E402
+from avp_vit import ACVFRP, ACVFRPConfig  # noqa: E402
 
 CKPT = os.path.expanduser(os.environ['DINOV3_VITB16_CKPT'])
 teacher = create_backbone('dinov3_vitb16', weights=CKPT).to(DEVICE).eval()
@@ -34,7 +34,7 @@ print(f"  teacher: {teacher.embed_dim}d, {teacher.n_blocks} blocks")
 
 print("Loading student...")
 backbone = create_backbone('dinov3_vitb16', pretrained=False).to(DEVICE)
-student = ActiveCanViT(backbone=backbone, cfg=ActiveCanViTConfig(teacher_dim=768)).to(DEVICE).eval()
+student = ACVFRP(backbone=backbone, cfg=ACVFRPConfig(teacher_dim=768)).to(DEVICE).eval()
 student_compiled: dict[str, object] = {}
 PATCH = backbone.patch_size_px
 print(f"  student: patch={PATCH}px")

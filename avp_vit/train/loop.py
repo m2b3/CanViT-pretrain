@@ -33,7 +33,7 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
 from ytch.model import count_parameters  # noqa: E402
 
-from avp_vit import ActiveCanViTConfig  # noqa: E402
+from avp_vit import ACVFRPConfig  # noqa: E402
 from avp_vit.checkpoint import CheckpointData, load as load_checkpoint  # noqa: E402
 from avp_vit.checkpoint import save as save_checkpoint, update_symlink, find_latest  # noqa: E402
 from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
@@ -277,7 +277,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     # === RESTORE MODEL/OPTIMIZER STATE FROM CHECKPOINT ===
     if ckpt_data is not None:
-        ckpt_cfg = dacite.from_dict(ActiveCanViTConfig, ckpt_data["model_config"])
+        ckpt_cfg = dacite.from_dict(ACVFRPConfig, ckpt_data["model_config"])
         if ckpt_cfg != cfg.model:
             log.warning("Checkpoint config differs from current config!")
             log.warning(f"  Checkpoint: {ckpt_cfg}")

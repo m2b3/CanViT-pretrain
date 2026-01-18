@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
-from avp_vit import ActiveCanViT, GlimpseOutput, RecurrentState
+from avp_vit import ACVFRP, GlimpseOutput, RecurrentState
 from canvit import Viewpoint
 
 from .loss import mse_loss
@@ -81,7 +81,7 @@ class ChunkState:
 
 def training_step(
     *,
-    model: ActiveCanViT,
+    model: ACVFRP,
     images: Tensor,
     scene_target: Tensor,
     cls_target: Tensor,

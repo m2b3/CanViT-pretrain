@@ -73,7 +73,7 @@ from rich.console import Console
 from rich.table import Table
 from tqdm import tqdm
 
-from avp_vit import ActiveCanViT, ActiveCanViTConfig
+from avp_vit import ACVFRP, ACVFRPConfig
 from avp_vit.train.config import Config as TrainConfig
 from canvit import create_backbone
 from canvit.viewpoint import Viewpoint
@@ -86,9 +86,9 @@ log = logging.getLogger(__name__)
 _PLACEHOLDER_TEACHER_DIM = 768
 
 
-def _default_model_config() -> ActiveCanViTConfig:
+def _default_model_config() -> ACVFRPConfig:
     """Model config with placeholder teacher_dim (fixed at runtime)."""
-    return ActiveCanViTConfig(teacher_dim=_PLACEHOLDER_TEACHER_DIM)
+    return ACVFRPConfig(teacher_dim=_PLACEHOLDER_TEACHER_DIM)
 
 
 def _is_dataclass_instance(obj: Any) -> bool:
@@ -143,7 +143,7 @@ class BenchConfig:
     teacher_model: str | None = None
 
     # Model config - exposed for ablations
-    model: ActiveCanViTConfig = field(default_factory=_default_model_config)
+    model: ACVFRPConfig = field(default_factory=_default_model_config)
 
     # Bench-specific
     warmup_iters: int = 5
@@ -374,7 +374,7 @@ def main(cfg: BenchConfig) -> None:
     backbone = create_backbone(cfg.teacher_model, pretrained=False)
     # Update teacher_dim to match actual teacher (in case default 768 differs)
     cfg.model.teacher_dim = teacher.embed_dim
-    model = ActiveCanViT(backbone=backbone, cfg=cfg.model, policy=None).to(device).eval()
+    model = ACVFRP(backbone=backbone, cfg=cfg.model, policy=None).to(device).eval()
     log.info(f"  canvas_dim={cfg.model.canvas_dim}, read_after={model.read_after_blocks}")
 
     # Log model config (highlight non-defaults, recurse into nested dataclasses)

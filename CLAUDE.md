@@ -58,7 +58,7 @@ Or read source: `.venv/lib/python3.12/site-packages/dinov3/` and `canvit/backbon
 
 **⚠️ VERIFY THIS SECTION AGAINST SOURCE CODE** — it can go stale. Check `avp_vit/__init__.py` and canvit source in `.venv/lib/python3.12/site-packages/canvit/`.
 
-**CRITICAL ALIAS**: `avp_vit.ActiveCanViT` is actually `ActiveCanViTForReconstructivePretraining` (see `avp_vit/__init__.py`). This is why `predict_teacher_scene` exists on loaded models.
+**Alias**: `avp_vit.ACVFRP` = `ActiveCanViTForReconstructivePretraining` (see `avp_vit/__init__.py`). Acronym distinguishes from base `ActiveCanViT` class.
 
 **Class hierarchy** (each adds methods):
 ```

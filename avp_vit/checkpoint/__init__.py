@@ -1,4 +1,4 @@
-"""Checkpoint serialization for ActiveCanViT models."""
+"""Checkpoint serialization for ACVFRP models."""
 
 import logging
 import os
@@ -15,7 +15,7 @@ import dacite
 import torch
 from torch import Tensor
 
-from avp_vit import ActiveCanViT, ActiveCanViTConfig
+from avp_vit import ACVFRP, ACVFRPConfig
 
 log = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ def _strip_orig_mod(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
 
 def save(
     path: Path,
-    model: ActiveCanViT,
+    model: ACVFRP,
     backbone: str,
     *,
     step: int | None = None,
@@ -156,7 +156,7 @@ def save(
     """
     from canvit.policy import PolicyHead
 
-    assert isinstance(model.cfg, ActiveCanViTConfig)
+    assert isinstance(model.cfg, ACVFRPConfig)
     git_commit, git_dirty = _git_info()
     hostname, slurm_job_id, slurm_array_task_id, cmdline = get_env_metadata()
 
@@ -247,8 +247,8 @@ def _has_policy_keys(state_dict: dict[str, Tensor]) -> bool:
     return any(k.startswith("policy.") for k in state_dict)
 
 
-def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = False) -> ActiveCanViT:
-    """Load ActiveCanViT from checkpoint.
+def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = False) -> ACVFRP:
+    """Load ACVFRP from checkpoint.
 
     Policy handling:
     - If checkpoint has policy_config: create PolicyHead with that config
@@ -269,7 +269,7 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Fa
     model_config = ckpt["model_config"]
     if "teacher_dim" not in model_config:
         model_config = {**model_config, "teacher_dim": ckpt["teacher_dim"]}
-    cfg = dacite.from_dict(ActiveCanViTConfig, model_config)
+    cfg = dacite.from_dict(ACVFRPConfig, model_config)
 
     # Create policy if checkpoint has policy config or policy weights
     policy: PolicyHead | None = None
@@ -290,7 +290,7 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Fa
             "Using default PolicyConfig. Re-save checkpoint to fix."
         )
 
-    model = ActiveCanViT(backbone=backbone, cfg=cfg, policy=policy)
+    model = ACVFRP(backbone=backbone, cfg=cfg, policy=policy)
 
     # Filter state_dict to avoid size mismatches (e.g., architectural changes)
     state_dict = ckpt["state_dict"]

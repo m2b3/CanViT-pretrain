@@ -18,7 +18,7 @@ from dinov3_probes import DINOv3LinearClassificationHead
 
 from ytch.correctness import assert_shape
 
-from avp_vit import ActiveCanViT, RecurrentState
+from avp_vit import ACVFRP, RecurrentState
 from ..norm import PositionAwareNorm
 from ..probe import (
     compute_in1k_top1,
@@ -152,7 +152,7 @@ def _log_policy_viz(
     exp: comet_ml.CometExperiment,
     step: int,
     prefix: str,
-    model: "ActiveCanViT",
+    model: "ACVFRP",
     images: Tensor,
     canvas_grid_size: int,
     glimpse_size_px: int,
@@ -200,7 +200,7 @@ def _log_policy_viz(
 
 def _validate_policy_rollout(
     *,
-    model: "ActiveCanViT",
+    model: "ACVFRP",
     images: Tensor,
     canvas_grid_size: int,
     glimpse_size_px: int,
@@ -318,7 +318,7 @@ def validate(
     *,
     exp: comet_ml.CometExperiment,
     step: int,
-    model: ActiveCanViT,
+    model: ACVFRP,
     compute_raw_targets: Callable[[Tensor, int], "NormFeatures"],
     scene_normalizer: PositionAwareNorm,
     cls_normalizer: PositionAwareNorm,
