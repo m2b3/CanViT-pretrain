@@ -58,17 +58,14 @@ Or read source: `.venv/lib/python3.12/site-packages/dinov3/` and `canvit/backbon
 
 **⚠️ VERIFY THIS SECTION AGAINST SOURCE CODE** — it can go stale. Check `avp_vit/__init__.py` and canvit source in `.venv/lib/python3.12/site-packages/canvit/`.
 
-**Alias**: `avp_vit.ACVFRP` = `ActiveCanViTForReconstructivePretraining` (see `avp_vit/__init__.py`). Acronym distinguishes from base `ActiveCanViT` class.
+**Alias**: `avp_vit.ACVFRP` = `CanViTForPretraining` (see `avp_vit/__init__.py`). Historical acronym kept for consistency.
 
-**Class hierarchy** (each adds methods):
+**Class hierarchy**:
 ```
-CanViT (canvit/model/base.py)
-  → init_state, get_spatial, init_canvas, forward
+CanViT (canvit/model/base/)
+  → init_state, init_canvas, forward, forward_reduce, get_spatial
 
-ActiveCanViT (canvit/model/active/base.py)
-  → forward_step, forward_reduce
-
-ActiveCanViTForReconstructivePretraining (canvit/model/active/pretraining/base.py)
+CanViTForPretraining (canvit/model/pretraining/)
   → predict_teacher_scene, predict_scene_teacher_cls
 ```
 
