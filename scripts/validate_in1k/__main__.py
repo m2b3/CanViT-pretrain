@@ -6,12 +6,13 @@ Usage:
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
 import tyro
 from torch import Tensor
+from ytch.device import get_sensible_device
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
@@ -38,7 +39,7 @@ class Config:
     checkpoint: Path
     batch_size: int = 64
     num_workers: int = 8
-    device: str = "mps"
+    device: torch.device = field(default_factory=get_sensible_device)
     canvas_grid: int = 32
     glimpse_grid: int = 8
     n_viewpoints: int = 5
@@ -97,7 +98,7 @@ def run_trajectory(
 
 @torch.inference_mode()
 def validate(cfg: Config) -> dict[str, float]:
-    device = torch.device(cfg.device)
+    device = cfg.device
     log.info(f"Device: {device}")
 
     model = load_model(cfg.checkpoint, device)
