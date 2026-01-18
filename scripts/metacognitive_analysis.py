@@ -17,7 +17,7 @@ import torchvision.transforms as transforms
 
 from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.norm import PositionAwareNorm
-from avp_vit.train.viewpoint import Viewpoint
+from avp_vit.train.viewpoint import Viewpoint, sample_at_viewpoint
 from canvit import create_backbone
 
 
@@ -78,9 +78,8 @@ def collect_trajectory_data(
                 recon_before = model.predict_teacher_scene(state.canvas)
                 error_before = (recon_before - teacher_norm).pow(2).sum(dim=-1)
 
-                out = model.forward_step(
-                    image=img_t, state=state, viewpoint=vp, glimpse_size_px=glimpse_px
-                )
+                glimpse = sample_at_viewpoint(spatial=img_t, viewpoint=vp, glimpse_size_px=glimpse_px)
+                out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
                 state = out.state
 
                 recon_after = model.predict_teacher_scene(state.canvas)
