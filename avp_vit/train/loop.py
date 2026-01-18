@@ -216,9 +216,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     bundle = create_model(student_backbone, teacher.embed_dim, cfg)
     model, glimpse_size_px = bundle.model, bundle.glimpse_size_px
 
-    if cfg.compile and cfg.model.gradient_checkpointing:
-        raise ValueError("compile=True and gradient_checkpointing=True may be incompatible.")
-
     if cfg.enable_policy and not cfg.model.enable_vpe:
         raise ValueError("enable_policy=True requires cfg.model.enable_vpe=True (VPE provides policy input)")
 
