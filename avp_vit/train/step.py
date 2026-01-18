@@ -11,8 +11,8 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
-from avp_vit import ACVFRP, GlimpseOutput, RecurrentState
-from canvit import Viewpoint
+from avp_vit import ACVFRP, CanViTOutput, RecurrentState
+from canvit import Viewpoint, sample_at_viewpoint
 
 from .loss import mse_loss
 from .viewpoint import Viewpoint as NamedViewpoint, ViewpointType
@@ -77,6 +77,13 @@ class ChunkState:
     n_steps: int
     scene_pred: Tensor
     cls_pred: Tensor
+
+
+class StepOutput(NamedTuple):
+    """Output from forward_glimpse: model output + sampled glimpse."""
+
+    out: CanViTOutput
+    glimpse: Tensor
 
 
 def training_step(
@@ -152,26 +159,24 @@ def training_step(
     def to_canvit_vp(vp: NamedViewpoint) -> Viewpoint:
         return Viewpoint(centers=vp.centers, scales=vp.scales)
 
-    def forward_glimpse(*, state: RecurrentState, vp: Viewpoint, use_ckpt: bool) -> GlimpseOutput:
+    def forward_glimpse(*, state: RecurrentState, vp: Viewpoint, use_ckpt: bool) -> StepOutput:
+        glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_size_px)
         if use_ckpt:
             out = checkpoint(
-                lambda cv, cl, ctr, sc: model.forward_step(
-                    image=images,
+                lambda g, cv, cl, ctr, sc: model.forward(
+                    glimpse=g,
                     state=RecurrentState(canvas=cv, recurrent_cls=cl),
                     viewpoint=Viewpoint(centers=ctr, scales=sc),
-                    glimpse_size_px=glimpse_size_px,
                 ),
-                state.canvas, state.recurrent_cls, vp.centers, vp.scales,
+                glimpse, state.canvas, state.recurrent_cls, vp.centers, vp.scales,
                 use_reentrant=False,
             )
-            assert isinstance(out, GlimpseOutput)
-            return out
-        return model.forward_step(
-            image=images, state=state,
-            viewpoint=vp, glimpse_size_px=glimpse_size_px,
-        )
+            assert isinstance(out, CanViTOutput)
+            return StepOutput(out=out, glimpse=glimpse)
+        out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
+        return StepOutput(out=out, glimpse=glimpse)
 
-    def compute_loss(out: GlimpseOutput) -> LossOutput:
+    def compute_loss(out: CanViTOutput) -> LossOutput:
         scene_pred = model.predict_teacher_scene(out.state.canvas)
         cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls)
 
@@ -220,13 +225,14 @@ def training_step(
         with amp_ctx:
             vp0_named = make_named_vp(t0_type, None)
             vp0 = to_canvit_vp(vp0_named)
-            out = forward_glimpse(state=state_init, vp=vp0, use_ckpt=False)
+            step_out = forward_glimpse(state=state_init, vp=vp0, use_ckpt=False)
+            out, glimpse = step_out.out, step_out.glimpse
             L = compute_loss(out)
 
         if do_viz:
             assert viz_data is not None
             viz_data.viewpoints.append(vp0_named)
-            viz_data.viz_samples.append(extract_sample0_viz(out, L.scene_pred, model))
+            viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, model))
 
         chunk = ChunkState(
             state=out.state,
@@ -248,13 +254,14 @@ def training_step(
 
             with amp_ctx:
                 use_ckpt = use_checkpointing and (t % 2 == 1)
-                out = forward_glimpse(state=chunk.state, vp=vp, use_ckpt=use_ckpt)
+                step_out = forward_glimpse(state=chunk.state, vp=vp, use_ckpt=use_ckpt)
+                out, glimpse = step_out.out, step_out.glimpse
                 L = compute_loss(out)
 
             if do_viz:
                 assert viz_data is not None
                 viz_data.viewpoints.append(vp_named)
-                viz_data.viz_samples.append(extract_sample0_viz(out, L.scene_pred, model))
+                viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, model))
 
             chunk.chunk_combined_loss = chunk.chunk_combined_loss + L.combined.float()
             chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()

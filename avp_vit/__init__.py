@@ -3,23 +3,20 @@
 Re-exports from canvit for convenience.
 """
 
-from canvit import CanViT, CanViTConfig, GlimpseOutput, RecurrentState
-from canvit.model.active.pretraining import (
-    ActiveCanViTForReconstructivePretraining,
-    ActiveCanViTForReconstructivePretrainingConfig,
-)
+from canvit import CanViT, CanViTConfig, CanViTOutput, RecurrentState
+from canvit.model.pretraining import CanViTForPretraining, CanViTForPretrainingConfig
 
-# Short aliases (distinct from canvit.ActiveCanViT base class)
-ACVFRP = ActiveCanViTForReconstructivePretraining
-ACVFRPConfig = ActiveCanViTForReconstructivePretrainingConfig
+# Short aliases
+ACVFRP = CanViTForPretraining
+ACVFRPConfig = CanViTForPretrainingConfig
 
 __all__ = [
-    "ActiveCanViTForReconstructivePretraining",
-    "ActiveCanViTForReconstructivePretrainingConfig",
     "ACVFRP",
     "ACVFRPConfig",
     "CanViT",
     "CanViTConfig",
-    "GlimpseOutput",
+    "CanViTForPretraining",
+    "CanViTForPretrainingConfig",
+    "CanViTOutput",
     "RecurrentState",
 ]

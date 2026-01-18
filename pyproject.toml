@@ -37,7 +37,7 @@ build-backend = "hatchling.build"
 dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
 ybml = { git = "https://github.com/yberreby/ybml.git", rev = "133cc9b" }
 ijepa = { git = "https://github.com/yberreby/ijepa.git" }
-canvit = { git = "ssh://git@github.com/m2b3/CanViT.git", branch = "main" }
+canvit = { git = "ssh://git@github.com/m2b3/CanViT.git", branch = "careful-simplifications" }
 dinov3-probes = { git = "https://github.com/yberreby/dinov3-probes.git" }
 
 [dependency-groups]
