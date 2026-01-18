@@ -38,7 +38,7 @@ from tqdm import tqdm
 from avp_vit import ACVFRP, ACVFRPConfig
 from avp_vit.checkpoint import load as load_ckpt
 from avp_vit.train.config import Config as TrainConfig
-from avp_vit.train.viewpoint import Viewpoint
+from avp_vit.train.viewpoint import Viewpoint, sample_at_viewpoint
 from avp_vit.train.viz import fit_pca, pca_rgb, imagenet_denormalize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -262,9 +262,8 @@ def extract_features(
                 batch_size=B, device=device, min_scale=min_vp_scale, max_scale=1.0
             )
 
-        out = model.forward_step(
-            image=images, state=state, viewpoint=vp, glimpse_size_px=glimpse_px
-        )
+        glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_px)
+        out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
         state = out.state
 
         hidden = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
