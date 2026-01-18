@@ -9,7 +9,6 @@ Usage:
     uv run python scripts/bench.py --latency                    # Latency (BS=1)
     uv run python scripts/bench.py --no-compile                 # Compare eager vs compiled
     uv run python scripts/bench.py --time-budget-s 2            # Longer runs
-    uv run python scripts/bench.py --model.attention.use-ewa=False  # Ablate EWA
 
 Design Decisions:
 
@@ -143,7 +142,7 @@ class BenchConfig:
     canvas_grid: int | None = None
     teacher_model: str | None = None
 
-    # Model config - exposed for ablations (e.g., --model.attention.use-ewa=False)
+    # Model config - exposed for ablations
     model: ActiveCanViTConfig = field(default_factory=_default_model_config)
 
     # Bench-specific

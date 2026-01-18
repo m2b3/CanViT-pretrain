@@ -306,7 +306,7 @@ def main() -> None:
         )
         results["predict_cls"] = run(
             "predict_scene_teacher_cls",
-            lambda: model.predict_scene_teacher_cls(sample_out.state.recurrent_cls, sample_out.state.canvas),
+            lambda: model.predict_scene_teacher_cls(sample_out.state.recurrent_cls),
         )
 
         if model.policy is not None and sample_out.vpe is not None:
@@ -331,7 +331,7 @@ def main() -> None:
             glimpse_size_px=glimpse_px,
         )
         _ = model.predict_teacher_scene(out.state.canvas)
-        _ = model.predict_scene_teacher_cls(out.state.recurrent_cls, out.state.canvas)
+        _ = model.predict_scene_teacher_cls(out.state.recurrent_cls)
         if model.policy is not None and out.vpe is not None:
             _ = model.policy(out.vpe)
 

@@ -135,13 +135,10 @@ def _regular_adapter_flops(
 # =============================================================================
 
 
-def _canvas_attention_params(
-    local_dim: int, canvas_dim: int, use_ewa: bool = True
-) -> int:
+def _canvas_attention_params(local_dim: int, canvas_dim: int) -> int:
     """Canvas attention params per adapter (read + write)."""
-    linear_params = 4 * local_dim * canvas_dim  # 4 Linears
-    ewa_params = 4 * 2 * canvas_dim if use_ewa else 0  # 4 EWAs, each has scale + bias
-    return linear_params + ewa_params
+    linear_params = 4 * local_dim * canvas_dim  # 4 Linears (Q, O on read; K, V on write)
+    return linear_params
 
 
 def _regular_attention_params(local_dim: int, canvas_dim: int) -> int:
