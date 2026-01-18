@@ -42,9 +42,7 @@ class Config:
     n_random_start_branches: int = 1  # branches starting with RANDOM viewpoint at t0
     chunk_size: int = 2  # BPTT chunk size (glimpses per chunk, gradient flows within)
     continue_prob: float = 0.5  # peak prob of adding another chunk to trajectory
-    continue_prob_warmup_steps: int = (
-        100_000  # ramp 0 → continue_prob over this many steps
-    )
+    continue_prob_warmup_steps: int = 0 # preliminary ablations: this seems unnecessary. TODO remove associated logic
     enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
     enable_scene_patches_loss: bool = True  # Scene (canvas) patch reconstruction loss
     enable_scene_cls_loss: bool = True  # Scene (global) CLS reconstruction loss
