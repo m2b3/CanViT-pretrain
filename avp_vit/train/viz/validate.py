@@ -19,7 +19,7 @@ from dinov3_probes import DINOv3LinearClassificationHead
 from ytch.correctness import assert_shape
 
 from avp_vit import CanViTForPretraining
-from ..norm import PositionAwareNorm
+from canvit import CLSStandardizer, PatchStandardizer
 from ..probe import (
     compute_in1k_top1,
     get_imagenet_class_names,
@@ -199,7 +199,7 @@ def _validate_policy_rollout(
     n_steps: int,
     probe: DINOv3LinearClassificationHead,
     labels: Tensor,
-    cls_normalizer: PositionAwareNorm,
+    cls_normalizer: CLSStandardizer,
     collect_viz: bool = False,
 ) -> PolicyRolloutResult:
     """Run policy rollout: full scene → policy → policy → ...
@@ -234,7 +234,7 @@ def _validate_policy_rollout(
 
         # Compute IN1K accuracy
         predicted_cls = model.predict_scene_teacher_cls(state.recurrent_cls)
-        cls_raw = cls_normalizer.denormalize(predicted_cls)
+        cls_raw = cls_normalizer.destandardize(predicted_cls)
         logits = probe(cls_raw)
         accs.append(compute_in1k_top1(logits, labels))
 
@@ -308,8 +308,8 @@ def validate(
     step: int,
     model: CanViTForPretraining,
     compute_raw_targets: Callable[[Tensor, int], "NormFeatures"],
-    scene_normalizer: PositionAwareNorm,
-    cls_normalizer: PositionAwareNorm,
+    scene_normalizer: PatchStandardizer,
+    cls_normalizer: CLSStandardizer,
     images: Tensor,
     canvas_grid_size: int,
     scene_size_px: int,
@@ -389,13 +389,13 @@ def validate(
                 )
 
                 # Cosine similarity: both raw (stable across runs) and normalized
-                scene_pred_raw = scene_normalizer.denormalize(predicted_scene)
+                scene_pred_raw = scene_normalizer.destandardize(predicted_scene)
                 acc.scene_cos_raw.append(F.cosine_similarity(scene_pred_raw, raw_feats.patches, dim=-1).mean().item())
                 acc.scene_cos_norm.append(F.cosine_similarity(predicted_scene, target, dim=-1).mean().item())
 
                 if has_cls and predicted_cls is not None:
                     assert cls_target is not None
-                    cls_pred_raw = cls_normalizer.denormalize(predicted_cls.unsqueeze(1)).squeeze(1)
+                    cls_pred_raw = cls_normalizer.destandardize(predicted_cls.unsqueeze(1)).squeeze(1)
                     acc.cls_cos_raw.append(F.cosine_similarity(cls_pred_raw, raw_feats.cls, dim=-1).mean().item())
                     acc.cls_cos_norm.append(F.cosine_similarity(predicted_cls, cls_target, dim=-1).mean().item())
 

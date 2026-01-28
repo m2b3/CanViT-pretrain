@@ -18,7 +18,6 @@ from avp_vit.train.transforms import (
     train_transform,
     val_transform,
 )
-from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.probe import (
     IN1K_NUM_CLASSES,
     PROBE_REGISTRY,
@@ -63,8 +62,6 @@ __all__ = [
     "scene_size_px",
     "train_transform",
     "val_transform",
-    # Norm
-    "PositionAwareNorm",
     # Probe
     "IN1K_NUM_CLASSES",
     "PROBE_REGISTRY",

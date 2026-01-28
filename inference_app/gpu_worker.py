@@ -20,7 +20,7 @@ from torchvision.models.resnet import ResNet50_Weights
 from canvit import RecurrentState
 from avp_vit.checkpoint import load as load_ckpt, load_model
 from avp_vit.train.transforms import imagenet_normalize
-from avp_vit.train.norm import PositionAwareNorm
+from canvit import CLSStandardizer, PatchStandardizer
 from avp_vit.train.probe import load_probe
 from avp_vit.train.viewpoint import Viewpoint as NamedViewpoint
 from canvit.viewpoint import sample_at_viewpoint
@@ -55,8 +55,8 @@ class GPUWorker:
         self._initialized = True
         self._model = None
         self._teacher: DINOv3Backbone | None = None
-        self._scene_norm: PositionAwareNorm | None = None
-        self._cls_norm: PositionAwareNorm | None = None
+        self._scene_norm: PatchStandardizer | None = None
+        self._cls_norm: CLSStandardizer | None = None
         self._probe: DINOv3LinearClassificationHead | None = None
         self._device: torch.device | None = None
         self._patch_size: int = 14
@@ -94,8 +94,8 @@ class GPUWorker:
             except Exception as e:
                 log.warning(f"Teacher failed: {e}")
 
-            self._scene_norm = self._load_norm(ckpt, "scene_norm_state")
-            self._cls_norm = self._load_norm(ckpt, "cls_norm_state", grid=1)
+            self._scene_norm = self._load_scene_norm(ckpt)
+            self._cls_norm = self._load_cls_norm(ckpt)
             self._probe = load_probe(ckpt["backbone"], self._device)
             self._patch_size = self._model.backbone.patch_size_px
             self._backbone = ckpt.get("backbone", "?")
@@ -110,11 +110,20 @@ class GPUWorker:
             self._sync()
             return self._backbone, self._step_count
 
-    def _load_norm(self, ckpt: dict, key: str, grid: int | None = None) -> PositionAwareNorm | None:
-        if (s := ckpt.get(key)) is None:
+    def _load_scene_norm(self, ckpt: dict) -> PatchStandardizer | None:
+        if (s := ckpt.get("scene_norm_state")) is None:
             return None
-        n, d = s["mean"].shape
-        norm = PositionAwareNorm(n, d, grid if grid else int(n**0.5))
+        n_tokens, embed_dim = s["mean"].shape
+        grid_size = int(n_tokens**0.5)
+        norm = PatchStandardizer(grid_size=grid_size, embed_dim=embed_dim)
+        norm.load_state_dict(s)
+        return norm.eval().to(self._device)
+
+    def _load_cls_norm(self, ckpt: dict) -> CLSStandardizer | None:
+        if (s := ckpt.get("cls_norm_state")) is None:
+            return None
+        _, embed_dim = s["mean"].shape
+        norm = CLSStandardizer(embed_dim=embed_dim)
         norm.load_state_dict(s)
         return norm.eval().to(self._device)
 
@@ -256,7 +265,7 @@ class GPUWorker:
 
             # Classification
             cls_pred = self._model.predict_scene_teacher_cls(out.state.recurrent_cls)
-            top5 = self._top5(self._cls_norm.denormalize(cls_pred)) if self._probe and self._cls_norm else []
+            top5 = self._top5(self._cls_norm.destandardize(cls_pred)) if self._probe and self._cls_norm else []
 
             # Policy
             policy_center = policy_scale = None

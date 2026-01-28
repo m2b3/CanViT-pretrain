@@ -16,7 +16,6 @@ from avp_vit.train.transforms import (
     train_transform,
     val_transform,
 )
-from avp_vit.train.norm import PositionAwareNorm
 from avp_vit.train.scheduler import warmup_constant_scheduler
 from avp_vit.train.viewpoint import (
     PixelBox,
@@ -153,36 +152,6 @@ class TestInfiniteLoader:
         loader = InfiniteLoader(_MockLoader(batches))  # type: ignore[arg-type]
         imgs = loader.next_batch()
         assert torch.equal(imgs, torch.tensor([1, 2]))
-
-
-# === Norm Tests ===
-
-class TestPositionAwareNorm:
-    def test_basic_shapes(self) -> None:
-        norm = PositionAwareNorm(n_tokens=16, embed_dim=32, grid_size=4)
-        # Must set stats before forward
-        data = torch.randn(100, 16, 32)
-        norm.set_stats(data)
-        x = torch.randn(2, 16, 32)
-        out = norm(x)
-        assert out.shape == x.shape
-
-    def test_set_stats_initializes(self) -> None:
-        norm = PositionAwareNorm(n_tokens=4, embed_dim=8, grid_size=2)
-        assert not norm.initialized
-        data = torch.randn(10, 4, 8)
-        norm.set_stats(data)
-        assert norm.initialized
-
-    def test_denormalize_inverts(self) -> None:
-        norm = PositionAwareNorm(n_tokens=4, embed_dim=8, grid_size=2)
-        data = torch.randn(100, 4, 8)
-        norm.set_stats(data)
-        x = torch.randn(2, 4, 8)
-        normalized = norm(x)
-        recovered = norm.denormalize(normalized)
-        # Should be exact inversion with fixed stats
-        assert torch.allclose(recovered, x, atol=1e-5)
 
 
 # === Scheduler Tests ===

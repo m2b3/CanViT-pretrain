@@ -158,7 +158,7 @@ def validate(cfg: Config) -> dict[str, float]:
         # Model predictions at each timestep
         cls_preds = run_trajectory(model, images, cfg.canvas_grid, glimpse_size_px, cfg.n_viewpoints)
         for t, cls_pred in enumerate(cls_preds):
-            cls_raw = cls_norm.denormalize(cls_pred)
+            cls_raw = cls_norm.destandardize(cls_pred)
             logits = probe(cls_raw)
             _, top5_pred = logits.topk(5, dim=-1)
             top1_pred = top5_pred[:, 0]

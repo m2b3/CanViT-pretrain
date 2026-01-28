@@ -42,7 +42,7 @@ from .config import Config  # noqa: E402
 from .data import ShardedFeatureLoader, create_loaders, scene_size_px  # noqa: E402
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
-from .norm import PositionAwareNorm  # noqa: E402
+from canvit import CLSStandardizer, PatchStandardizer  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_constant_scheduler  # noqa: E402
 from .step import training_step  # noqa: E402
@@ -77,8 +77,8 @@ def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
 
 def init_normalizer_stats_from_shard(
     shard_path: Path,
-    scene_norm: PositionAwareNorm,
-    cls_norm: PositionAwareNorm,
+    scene_norm: PatchStandardizer,
+    cls_norm: CLSStandardizer,
     device: torch.device,
 ) -> None:
     """Initialize normalizer stats from one precomputed shard."""
@@ -343,12 +343,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             feats = teacher.forward_norm_features(images)
             return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
-    scene_norm = PositionAwareNorm(
-        n_tokens=G * G, embed_dim=teacher.embed_dim, grid_size=G,
-    ).to(cfg.device)
-    cls_norm = PositionAwareNorm(
-        n_tokens=1, embed_dim=teacher.embed_dim, grid_size=1,
-    ).to(cfg.device)
+    scene_norm = PatchStandardizer(grid_size=G, embed_dim=teacher.embed_dim).to(cfg.device)
+    cls_norm = CLSStandardizer(embed_dim=teacher.embed_dim).to(cfg.device)
 
 
     norm_loaded = False
@@ -491,8 +487,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 cls_target=batch.cls_target,
                 raw_scene_target=batch.raw_scene_target,
                 raw_cls_target=batch.raw_cls_target,
-                scene_denorm=scene_norm.denormalize,
-                cls_denorm=cls_norm.denormalize,
+                scene_denorm=scene_norm.destandardize,
+                cls_denorm=cls_norm.destandardize,
                 enable_scene_patches_loss=cfg.enable_scene_patches_loss,
                 enable_scene_cls_loss=cfg.enable_scene_cls_loss,
                 glimpse_size_px=glimpse_size_px,
