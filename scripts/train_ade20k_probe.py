@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Train ADE20K segmentation probes on AVP features.
 
+Usage: sbatch slurm/ade20k_probe.sbatch --avp-ckpt <path> [--max-steps N] [...]
+
 ONE probe per feature type with SHARED weights across timesteps (anytime decoding).
 Training: loss averaged across timesteps, single backward pass.
 Eval: mIoU computed per timestep → logged as curves.
