@@ -23,7 +23,7 @@ git log --oneline -10
 uv run pypatree
 ```
 
-Check canvit source in venv - model architecture lives there, not here. Read `inference_app/` for how pieces connect.
+Check canvit source in venv - model architecture lives there, not here.
 
 **If anything is unclear or doesn't match expectations, STOP and ask the user.** Do not proceed with confusion.
 
@@ -79,14 +79,11 @@ RecurrentState(
 
 **Viewpoint coordinates**: `centers` is `[cy, cx]` — **y first**, normalized to `[-1, 1]`.
 
-**Reference implementation**: `inference_app/gpu_worker.py` shows correct checkpoint loading and inference.
-
 ## Commands
 
 ```bash
 uv run pypatree                              # structure
 uv run -m avp_vit.train                      # training
-uv run streamlit run inference_app/__main__.py # demo
 COMET_API_KEY=$(cat ~/comet_api_key.txt) uv run ...
 uv run ipython -c "..."                      # quick experiments
 ```

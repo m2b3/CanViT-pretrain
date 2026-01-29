@@ -20,11 +20,6 @@ avp_vit/
   checkpoint/
     __init__.py           # CheckpointData TypedDict, save/load functions
 
-inference_app/            # Streamlit demo
-  gpu_worker.py           # ← Reference implementation for checkpoint loading
-  app.py                  # UI (no torch)
-  rendering.py            # Viz helpers (numpy/PIL only)
-
 scripts/                  # Analysis and utilities
   export_features.py      # Precompute teacher features to shards
   flops.py                # FLOP analysis
@@ -102,9 +97,6 @@ source slurm/env.sh
 # Training
 sbatch slurm/train.sbatch                    # Production
 uv run -m avp_vit.train --help               # All options
-
-# Inference (reference implementation for loading + using checkpoints)
-uv run streamlit run inference_app/__main__.py
 ```
 
 ## Pitfalls
