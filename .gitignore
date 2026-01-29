@@ -16,3 +16,6 @@ avp_vit/train/viz/test_outputs/
 
 # Untracked directories (not part of main project)
 throwaway/
+*.DS_Store
+.coverage
+profile_*.json
