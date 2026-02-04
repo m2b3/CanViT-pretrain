@@ -57,7 +57,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from avp_vit.train.transforms import val_transform
+from canvit_pretrain.train.transforms import val_transform
 
 # -----------------------------------------------------------------------------
 # Constants

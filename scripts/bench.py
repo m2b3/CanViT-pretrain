@@ -73,8 +73,8 @@ from rich.console import Console
 from rich.table import Table
 from tqdm import tqdm
 
-from avp_vit import CanViTForPretraining, CanViTForPretrainingConfig
-from avp_vit.train.config import Config as TrainConfig
+from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
+from canvit_pretrain.train.config import Config as TrainConfig
 from canvit import create_backbone
 from canvit.viewpoint import Viewpoint
 
