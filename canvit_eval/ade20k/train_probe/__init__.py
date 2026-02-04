@@ -87,6 +87,7 @@ def train(cfg: Config) -> None:
     log.info(f"Timesteps: {cfg.n_timesteps}")
     log.info(f"Viewpoint: scale=[{cfg.min_vp_scale}, {cfg.max_vp_scale}], train_start_full={cfg.train_start_full}")
     log.info(f"Training: BS={cfg.batch_size}, steps={cfg.max_steps}, LR={cfg.peak_lr}")
+    log.info(f"Val: resize_mode=squish")
 
     # Model
     log.info("Loading model...")
@@ -138,7 +139,7 @@ def train(cfg: Config) -> None:
         return img_t, mask_t.squeeze(0)  # (1, H, W) → (H, W)
 
     train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training", transform=train_transform)
-    val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation", transform=make_val_transform(cfg.image_size, "center_crop"))
+    val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation", transform=make_val_transform(cfg.image_size, "squish"))
     train_loader = DataLoader(
         train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True
     )
