@@ -6,6 +6,13 @@ from torch import Tensor
 from canvit_eval.ade20k.dataset import IGNORE_LABEL
 
 
+def ce_loss(logits: Tensor, masks: Tensor) -> Tensor:
+    """Cross-entropy loss for semantic segmentation (matches DINOv3)."""
+    if masks.shape[1:] != logits.shape[2:]:
+        masks = F.interpolate(masks.unsqueeze(1).float(), logits.shape[2:], mode="nearest").squeeze(1).long()
+    return F.cross_entropy(logits, masks, ignore_index=IGNORE_LABEL)
+
+
 def focal_loss(logits: Tensor, masks: Tensor, gamma: float) -> Tensor:
     """Focal loss for semantic segmentation."""
     B, C, Hl, Wl = logits.shape

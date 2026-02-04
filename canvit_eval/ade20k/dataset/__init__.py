@@ -3,34 +3,48 @@
 import logging
 from pathlib import Path
 
-import albumentations as A
 import numpy as np
 import torch
+from dinov3.eval.segmentation.transforms import make_segmentation_train_transforms
 from PIL import Image
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torch.utils.data import Dataset
+from torchvision import transforms as T
+
+from canvit_pretrain.train.transforms import val_transform
 
 log = logging.getLogger(__name__)
 
 NUM_CLASSES = 150
 IGNORE_LABEL = 255
-_MEAN = torch.tensor(IMAGENET_DEFAULT_MEAN).view(3, 1, 1)
-_STD = torch.tensor(IMAGENET_DEFAULT_STD).view(3, 1, 1)
 
 
 class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
     """ADE20K segmentation dataset."""
 
-    def __init__(self, root: Path, split: str, size: int, *, augment: bool) -> None:
+    def __init__(
+        self,
+        root: Path,
+        split: str,
+        size: int,
+        *,
+        augment: bool,
+        aug_scale_range: tuple[float, float],
+        aug_flip_prob: float,
+    ) -> None:
         self.size = size
+        self._augment = augment
+        self._img_transform = val_transform(size) if not augment else None
+        self._mask_spatial = T.Compose([T.Resize(size, T.InterpolationMode.NEAREST), T.CenterCrop(size)])
 
         if augment:
-            self.load_size = size * 2
-            self.transform = A.Compose([A.HorizontalFlip(p=0.5), A.RandomCrop(size, size)])
-        else:
-            self.load_size = size
-            self.transform = None
+            self.transform = make_segmentation_train_transforms(
+                img_size=size,
+                random_img_size_ratio_range=list(aug_scale_range),
+                crop_size=(size, size),
+                flip_prob=aug_flip_prob,
+                reduce_zero_label=True,
+            )
 
         img_dir = root / "images" / split
         ann_dir = root / "annotations" / split
@@ -44,17 +58,16 @@ class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
         return len(self.imgs)
 
     def __getitem__(self, i: int) -> tuple[Tensor, Tensor]:
-        img = np.array(
-            Image.open(self.imgs[i]).convert("RGB").resize((self.load_size, self.load_size), Image.Resampling.BILINEAR)
-        )
-        mask = np.array(Image.open(self.anns[i]).resize((self.load_size, self.load_size), Image.Resampling.NEAREST))
+        img = Image.open(self.imgs[i]).convert("RGB")
+        mask = Image.open(self.anns[i])
 
-        if self.transform:
-            out = self.transform(image=img, mask=mask)
-            img, mask = out["image"], out["mask"]
+        if self._augment:
+            img_t, mask_t = self.transform(img, mask)
+            mask_t = mask_t.squeeze(0)  # (1, H, W) → (H, W)
+        else:
+            img_t = self._img_transform(img)
+            mask_t = torch.from_numpy(np.array(self._mask_spatial(mask))).long()
+            # reduce_zero_label: 0→255, 1-150→0-149
+            mask_t = torch.where((mask_t >= 1) & (mask_t <= 150), mask_t - 1, IGNORE_LABEL)
 
-        img_t = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
-        img_t = (img_t - _MEAN) / _STD
-        mask_t = torch.from_numpy(mask.astype(np.int64))
-        valid = (mask_t >= 1) & (mask_t <= 150)
-        return img_t, torch.where(valid, mask_t - 1, IGNORE_LABEL)
+        return img_t, mask_t

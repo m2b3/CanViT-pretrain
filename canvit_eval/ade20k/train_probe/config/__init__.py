@@ -1,4 +1,7 @@
-"""ADE20K probe training configuration."""
+"""ADE20K probe training configuration.
+
+Defaults aligned with DINOv3's linear probing protocol (Appendix D.1).
+"""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -6,6 +9,7 @@ from typing import Literal
 
 FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse"]
 STATIC_FEATURES: frozenset[FeatureType] = frozenset({"teacher_glimpse"})
+LossType = Literal["ce", "focal"]
 
 
 @dataclass
@@ -24,19 +28,32 @@ class Config:
     max_vp_scale: float = 1.0
     train_start_full: bool = False  # If True, t=0 is full scene. Val ALWAYS starts full.
 
-    batch_size: int = 64
+    # Training hyperparameters (defaults match DINOv3 linear probing protocol)
+    batch_size: int = 16  # DINOv3: 2 * 8 GPUs = 16
     eval_batch_size: int = 32
     num_workers: int = 4
-    peak_lr: float = 1e-4
-    min_lr: float = 1e-7
-    weight_decay: float = 1e-4
-    warmup_ratio: float = 0.1
-    max_steps: int = 5000
-    grad_clip: float = 1.0
-    focal_gamma: float = 2.0
-    log_every: int = 20
-    val_every: int = 500
-    viz_every: int = 500
+    peak_lr: float = 1e-3  # DINOv3: 1e-3
+    weight_decay: float = 1e-3  # DINOv3: 1e-3
+    warmup_steps: int = 1500  # DINOv3: 1500
+    warmup_lr_ratio: float = 1e-6  # DINOv3: start LR = peak_lr * 1e-6
+    max_steps: int = 40000  # DINOv3: 40k iterations
+    grad_clip: float = float("inf")  # DINOv3: no gradient clipping
+
+    # Loss
+    loss_type: LossType = "ce"  # DINOv3 uses CE; "focal" available for comparison
+    focal_gamma: float = 2.0  # Only used if loss_type="focal"
+
+    # Probe head
+    dropout: float = 0.1  # DINOv3: 0.1 dropout in linear head
+
+    # Data augmentation (DINOv3 defaults)
+    aug_scale_range: tuple[float, float] = (0.5, 2.0)
+    aug_flip_prob: float = 0.5
+
+    # Logging
+    log_every: int = 50
+    val_every: int = 5000  # DINOv3: eval_interval=5000
+    viz_every: int = 5000
     viz_samples: int = 4
     comet_project: str = "canvit-ade20k-probe"
     comet_workspace: str = "m2b3-ava"

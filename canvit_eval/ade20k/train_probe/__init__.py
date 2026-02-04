@@ -4,9 +4,13 @@ Trains segmentation probes on frozen CanViT features:
 - ONE probe per feature type, shared weights across timesteps (anytime decoding)
 - Training: loss averaged across timesteps, single backward pass
 - Eval: mIoU computed per timestep, logged as curves
+
+Training protocol aligned with DINOv3's linear probing (Appendix D.1).
+Note: We use whole-image inference, not sliding window (intentional simplification).
 """
 
 import logging
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -20,9 +24,9 @@ from canvit import CanViTForPretrainingHFHub, sample_at_viewpoint
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit_utils.policies import random_viewpoints
 from canvit_utils.teacher import load_teacher
+from dinov3.eval.segmentation.schedulers import WarmupOneCycleLR
 from torch import Tensor
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
@@ -32,19 +36,29 @@ from canvit_eval.ade20k.probe import ProbeHead
 from canvit_eval.ade20k.viz import log_viz
 
 from .config import STATIC_FEATURES, Config, FeatureType
-from .loss import focal_loss, upsample_preds
+from .loss import ce_loss, focal_loss, upsample_preds
 from .state import ProbeState
 
 log = logging.getLogger(__name__)
 
 
-def _make_probe(name: str, dim: int, cfg: Config, device: torch.device) -> ProbeState:
-    warmup_steps = int(cfg.warmup_ratio * cfg.max_steps)
-    head = ProbeHead(dim).to(device)
+def _make_probe(name: str, dim: int, cfg: Config, device: torch.device, *, use_ln: bool) -> ProbeState:
+    """Create probe with DINOv3's WarmupOneCycleLR scheduler."""
+    head = ProbeHead(dim, dropout=cfg.dropout, use_ln=use_ln).to(device)
     opt = AdamW(head.parameters(), lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
-    warmup = LinearLR(opt, cfg.min_lr / cfg.peak_lr, 1.0, max(1, warmup_steps))
-    cosine = CosineAnnealingLR(opt, cfg.max_steps - warmup_steps, eta_min=cfg.min_lr)
-    return ProbeState(name, head, opt, SequentialLR(opt, [warmup, cosine], [warmup_steps]))
+    scheduler = WarmupOneCycleLR(
+        opt,
+        max_lr=cfg.peak_lr,
+        total_steps=cfg.max_steps,
+        warmup_iters=cfg.warmup_steps,
+        warmup_ratio=cfg.warmup_lr_ratio,
+        pct_start=0,  # no rising phase after warmup
+        anneal_strategy="cos",
+        final_div_factor=float("inf"),  # decay to 0
+        use_beta1=False,
+        update_momentum=False,
+    )
+    return ProbeState(name, head, opt, scheduler)
 
 
 def _save_checkpoint(path: Path, probes: dict[FeatureType, ProbeState], step: int) -> None:
@@ -137,7 +151,11 @@ def train(cfg: Config) -> None:
         "predicted_norm": teacher.embed_dim,
         "teacher_glimpse": teacher.embed_dim,
     }
-    probes: dict[FeatureType, ProbeState] = {feat: _make_probe(feat, dims[feat], cfg, device) for feat in cfg.features}
+    # Only raw canvas features need LN; predicted_norm and teacher_glimpse are already normalized
+    needs_ln: dict[FeatureType, bool] = {"hidden": True, "predicted_norm": False, "teacher_glimpse": False}
+    probes: dict[FeatureType, ProbeState] = {
+        feat: _make_probe(feat, dims[feat], cfg, device, use_ln=needs_ln[feat]) for feat in cfg.features
+    }
     for feat, probe in probes.items():
         log.info(f"  probe[{feat}]: dim={dims[feat]}, params={sum(p.numel() for p in probe.head.parameters()):,}")
 
@@ -154,8 +172,14 @@ def train(cfg: Config) -> None:
     }
 
     # Data
-    train_ds = ADE20kDataset(cfg.ade20k_root, "training", cfg.image_size, augment=True)
-    val_ds = ADE20kDataset(cfg.ade20k_root, "validation", cfg.image_size, augment=False)
+    train_ds = ADE20kDataset(
+        cfg.ade20k_root, "training", cfg.image_size,
+        augment=True, aug_scale_range=cfg.aug_scale_range, aug_flip_prob=cfg.aug_flip_prob,
+    )
+    val_ds = ADE20kDataset(
+        cfg.ade20k_root, "validation", cfg.image_size,
+        augment=False, aug_scale_range=cfg.aug_scale_range, aug_flip_prob=cfg.aug_flip_prob,
+    )
     train_loader = DataLoader(
         train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True
     )
@@ -252,10 +276,16 @@ def train(cfg: Config) -> None:
             probe.optimizer.zero_grad()
             t_range = [0] if feat_type in STATIC_FEATURES else range(cfg.n_timesteps)
             logits_list = [probe.head(feats[feat_type][t].float()) for t in t_range]
-            losses = [focal_loss(logits, masks, cfg.focal_gamma) for logits in logits_list]
+            if cfg.loss_type == "ce":
+                losses = [ce_loss(logits, masks) for logits in logits_list]
+            else:
+                losses = [focal_loss(logits, masks, cfg.focal_gamma) for logits in logits_list]
             loss = torch.stack(losses).mean()
             loss.backward()
-            grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), cfg.grad_clip)
+            if math.isfinite(cfg.grad_clip):
+                grad_norm = nn.utils.clip_grad_norm_(probe.head.parameters(), cfg.grad_clip)
+            else:
+                grad_norm = torch.nn.utils.clip_grad_norm_(probe.head.parameters(), float("inf"))
             probe.optimizer.step()
             probe.scheduler.step()
             probe.accumulate(loss, grad_norm)
@@ -302,7 +332,8 @@ def train(cfg: Config) -> None:
                     mious = [train_iou[feat_type][t].compute().item() for t in range(cfg.n_timesteps)]
                     log_dict[f"{feat_type}/train_miou_mean"] = sum(mious) / len(mious)
                     if log_curves:
-                        exp.log_curve(f"{feat_type}/train_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
+                        xs = list(range(cfg.n_timesteps))
+                        exp.log_curve(f"{feat_type}/train_miou_curve", x=xs, y=mious, step=step)
                     for m in train_iou[feat_type]:
                         m.reset()
 
