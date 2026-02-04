@@ -38,8 +38,9 @@ log = logging.getLogger(__name__)
 
 
 def _default_output() -> Path:
-    job_id = os.environ.get("SLURM_JOB_ID", "local")
-    return Path(f"outputs/ade20k_eval_{job_id}.pt")
+    job_id = os.environ.get("SLURM_ARRAY_JOB_ID", os.environ.get("SLURM_JOB_ID", "local"))
+    task_id = os.environ.get("SLURM_ARRAY_TASK_ID", "0")
+    return Path(f"outputs/ade20k_eval_{job_id}_{task_id}.pt")
 
 
 @dataclass
