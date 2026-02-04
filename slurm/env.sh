@@ -71,8 +71,12 @@ else
     echo "[env] No HF token found (may fail on private repos)"
 fi
 
-# Sync then activate venv just in case we forget to use `uv run`
+# Sync and activate venv (only in SLURM jobs where we control venv location)
 uv sync
-source "$UV_PROJECT_ENVIRONMENT/bin/activate"
+if [ -n "$UV_PROJECT_ENVIRONMENT" ]; then
+    source "$UV_PROJECT_ENVIRONMENT/bin/activate"
+else
+    echo "[env] No venv activation (use 'uv run' directly)"
+fi
 
 echo "[env] Done"
