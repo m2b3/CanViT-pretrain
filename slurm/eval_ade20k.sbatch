@@ -1,38 +1,27 @@
 #!/bin/bash
-#SBATCH --job-name=canvit-ade20k
+#SBATCH --job-name=ade20k-eval
 #SBATCH --account=rrg-skrishna_gpu
-#SBATCH --time=03:00:00
+#SBATCH --time=00:05:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --output=logs/eval-ade20k-%j.out
-#SBATCH --error=logs/eval-ade20k-%j.err
+#SBATCH --mem=32G
+#SBATCH --output=logs/ade20k-eval-%j.out
+#SBATCH --error=logs/ade20k-eval-%j.err
 
-# CanViT ADE20K probe training/evaluation
-# Usage:
-#   sbatch slurm/eval_ade20k.sbatch train --max-steps 5000
-#   sbatch slurm/eval_ade20k.sbatch evaluate --probe-ckpt /path/to/best.pt
+# ADE20K probe evaluation (single run)
+# Usage: sbatch slurm/eval_ade20k.sbatch --probe-ckpt /path/to/best.pt [--policy random] [...]
 
 set -eux
 
-log() { echo "[$(date '+%H:%M:%S')] $*"; }
-
-log "=== CanViT ADE20K Evaluation ==="
-log "Job: $SLURM_JOB_ID on $(hostname)"
-log "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo 'N/A')"
-log "Args: $*"
-
 cd ~/scratch/CanViT-train
 source slurm/env.sh
-
 mkdir -p logs
 
-# Extract ADE20K to SLURM_TMPDIR if needed
-export ADE20K_ROOT="$SLURM_TMPDIR/ADEChallengeData2016"
-if [ ! -d "$ADE20K_ROOT" ]; then
-    log "Extracting ADE20K dataset..."
-    unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
-fi
+echo "=== ADE20K Probe Evaluation ==="
+echo "Job: $SLURM_JOB_ID on $(hostname)"
 
-log "Running..."
-exec uv run python -m canvit_eval.ade20k "$@"
+# Extract ADE20K
+export ADE20K_ROOT="$SLURM_TMPDIR/ADEChallengeData2016"
+[ ! -d "$ADE20K_ROOT" ] && unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
+
+exec uv run python -m canvit_eval.ade20k evaluate "$@"

@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=canvit-ade20k-sweep
+#SBATCH --job-name=ade20k-sweep
 #SBATCH --account=rrg-skrishna_gpu
-#SBATCH --time=00:30:00
+#SBATCH --time=00:05:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --output=logs/eval-ade20k-sweep-%A_%a.out
-#SBATCH --error=logs/eval-ade20k-sweep-%A_%a.err
+#SBATCH --mem=32G
+#SBATCH --output=logs/ade20k-sweep-%A_%a.out
+#SBATCH --error=logs/ade20k-sweep-%A_%a.err
 
 # ADE20K probe evaluation sweep: N rollouts of a given policy
 #
@@ -42,14 +42,11 @@ case "$NAME" in
         ;;
 esac
 
-# Extract ADE20K to SLURM_TMPDIR if needed
+# Extract ADE20K
 export ADE20K_ROOT="$SLURM_TMPDIR/ADEChallengeData2016"
-if [ ! -d "$ADE20K_ROOT" ]; then
-    echo "Extracting ADE20K dataset..."
-    unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
-fi
+[ ! -d "$ADE20K_ROOT" ] && unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
 
-# Build output path: outputs/ade20k_eval/{policy}_{timestamp}_{git}_{jobid}_{taskid}.pt
+# Output path
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 GIT_SHORT=$(git rev-parse --short HEAD)
 OUTPUT_DIR="outputs/ade20k_eval"
