@@ -52,9 +52,9 @@ class Config:
     aug_flip_prob: float = 0.5
 
     # Logging
-    log_every: int = 50
-    val_every: int = 5000  # DINOv3: eval_interval=5000
-    viz_every: int = 5000
+    log_every: int = 20
+    val_every: int = 500
+    viz_every: int = 500
     viz_samples: int = 4
     comet_project: str = "canvit-ade20k-probe"
     comet_workspace: str = "m2b3-ava"

@@ -1,10 +1,10 @@
 """Training state for probes."""
 
 from dataclasses import dataclass
+from typing import Any
 
 from torch import Tensor
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import SequentialLR
 
 from canvit_eval.ade20k.probe import ProbeHead
 
@@ -16,7 +16,7 @@ class ProbeState:
     name: str
     head: ProbeHead
     optimizer: AdamW
-    scheduler: SequentialLR
+    scheduler: Any  # WarmupOneCycleLR or other LR scheduler
     best_mean_miou: float = 0.0
     _loss_sum: Tensor | None = None
     _grad_norm_sum: Tensor | None = None

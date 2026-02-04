@@ -219,6 +219,7 @@ def train(cfg: Config) -> None:
     step = 0
     train_iter = iter(train_loader)
     pbar = tqdm(total=cfg.max_steps, desc="Training")
+    val_viz_batch: tuple[Tensor, Tensor, ExtractedFeatures] | None = None
 
     while step < cfg.max_steps:
         try:
@@ -237,21 +238,25 @@ def train(cfg: Config) -> None:
                 for m in val_iou[feat]:
                     m.reset()
 
+            first_val_batch = True
             with torch.no_grad():
                 for vi, vm in val_loader:
                     vi, vm = vi.to(device), vm.to(device)
                     with amp_ctx:
-                        feats = _extract_features(
+                        val_feats = _extract_features(
                             model=model, teacher=teacher, images=vi, n_timesteps=cfg.n_timesteps,
                             canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, device=device,
                             min_vp_scale=cfg.min_vp_scale, max_vp_scale=cfg.max_vp_scale,
                             start_with_full_scene=True,  # Val ALWAYS starts full
                             compute_teacher_full=cfg.compute_teacher_full,
                         )
+                    if first_val_batch:
+                        val_viz_batch = (vi, vm, val_feats)
+                        first_val_batch = False
                     for feat_type in cfg.features:
                         t_range = [0] if feat_type in STATIC_FEATURES else range(cfg.n_timesteps)
                         for t in t_range:
-                            logits = probes[feat_type].head(feats.get(feat_type, t).float())
+                            logits = probes[feat_type].head(val_feats.get(feat_type, t).float())
                             preds_up = upsample_preds(logits.argmax(1), vm.shape[1], vm.shape[2])
                             val_iou[feat_type][t].update(preds_up, vm)
 
@@ -325,7 +330,10 @@ def train(cfg: Config) -> None:
             for p in probes.values():
                 p.head.eval()
             with torch.no_grad():
-                log_viz(exp, step, probes, feats, images, masks, cfg.viz_samples, cfg.n_timesteps)
+                log_viz(exp, step, probes, feats, images, masks, cfg.viz_samples, cfg.n_timesteps, split="train")
+                if val_viz_batch is not None:
+                    v_img, v_mask, v_feats = val_viz_batch
+                    log_viz(exp, step, probes, v_feats, v_img, v_mask, cfg.viz_samples, cfg.n_timesteps, split="val")
             viz_time = time.perf_counter() - viz_start
             log.info(f"Step {step}: viz took {viz_time:.1f}s")
             exp.log_metric("timing/viz_seconds", viz_time, step=step)

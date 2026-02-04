@@ -1,7 +1,7 @@
 """Visualization for ADE20K probe training."""
 
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 
 import comet_ml
 import matplotlib.pyplot as plt
@@ -13,10 +13,9 @@ from sklearn.decomposition import PCA
 from torch import Tensor
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES
+from canvit_eval.ade20k.train_probe.config import STATIC_FEATURES, FeatureType
+from canvit_eval.ade20k.train_probe.features import ExtractedFeatures
 from canvit_pretrain.train.viz.image import imagenet_denormalize
-
-FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse"]
-STATIC_FEATURES: frozenset[FeatureType] = frozenset({"teacher_glimpse"})
 
 
 class ProbeStateLike(Protocol):
@@ -74,7 +73,7 @@ def correctness_map(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
 
 def make_viz_figure(
     probes: dict[FeatureType, ProbeStateLike],
-    feats: dict[FeatureType, list[Tensor]],
+    feats: ExtractedFeatures,
     images: Tensor,
     masks: Tensor,
     n_samples: int,
@@ -118,7 +117,9 @@ def make_viz_figure(
         # This ensures consistent semantic directions while avoiding washed-out t=0
         pca_per_feat: dict[FeatureType, PCA | None] = {}
         for feat_type in feat_types:
-            feat_final = feats[feat_type][t_final][i].cpu().float().numpy()
+            feat_tensor = feats.get(feat_type, t_final)
+            assert feat_tensor is not None
+            feat_final = feat_tensor[i].cpu().float().numpy()
             H, W, D = feat_final.shape
             pca_per_feat[feat_type] = _fit_pca(feat_final.reshape(-1, D))
 
@@ -126,7 +127,9 @@ def make_viz_figure(
             pca = pca_per_feat[feat_type]
 
             for t, t_name in [(0, "t0"), (t_final, "t-1")]:
-                feat_i = feats[feat_type][t][i]
+                feat_tensor = feats.get(feat_type, t)
+                assert feat_tensor is not None
+                feat_i = feat_tensor[i]
                 H, W, D = feat_i.shape
 
                 # Prediction
@@ -174,15 +177,16 @@ def log_viz(
     exp: comet_ml.Experiment,
     step: int,
     probes: dict[FeatureType, ProbeStateLike],
-    feats: dict[FeatureType, list[Tensor]],
+    feats: ExtractedFeatures,
     images: Tensor,
     masks: Tensor,
     n_samples: int,
     n_timesteps: int,
+    split: str = "train",
 ) -> None:
     """Log visualization to Comet."""
     fig = make_viz_figure(probes, feats, images, masks, n_samples, n_timesteps)
-    exp.log_figure(figure_name=f"viz_{step}", figure=fig, step=step)
+    exp.log_figure(figure_name=f"viz_{split}_{step}", figure=fig, step=step)
     plt.close(fig)
 
 
