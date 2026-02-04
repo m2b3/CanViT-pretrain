@@ -223,6 +223,7 @@ def update_accuracy(
 
 def build_output_dict(
     out: OutputTensors,
+    paths: list[str],
     correct_top1: Tensor,
     correct_top5: Tensor,
     n_images: int,
@@ -234,6 +235,7 @@ def build_output_dict(
     T = cfg.n_viewpoints
 
     result = {
+        "paths": paths,  # List of image paths, index-aligned with tensors
         "labels": out.labels,
         "top_k_preds": out.top_k_preds,
         "top_k_probs": out.top_k_probs,
@@ -299,6 +301,7 @@ def evaluate(cfg: Config) -> Path:
     )
     N = len(dataset)
     assert N > 0, f"Empty dataset at {cfg.val_dir}"
+    paths = [p for p, _ in dataset.samples]  # From ImageFolder metadata, no I/O
     log.info(f"Dataset: {N} images, {len(loader)} batches")
 
     # Allocate outputs
@@ -357,7 +360,7 @@ def evaluate(cfg: Config) -> Path:
         log.info(f"  t{t}: top1={100*c1[t]/N:.2f}%, top5={100*c5[t]/N:.2f}%")
 
     # Save
-    output_dict = build_output_dict(out, correct_top1, correct_top5, N, cfg)
+    output_dict = build_output_dict(out, paths, correct_top1, correct_top5, N, cfg)
     cfg.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(output_dict, cfg.output)
     size_mb = cfg.output.stat().st_size / 1e6
