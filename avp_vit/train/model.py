@@ -6,6 +6,7 @@ from typing import NamedTuple
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit import create_backbone
 from canvit.policy import PolicyConfig, PolicyHead
+from canvit_utils.teacher import load_teacher as _load_teacher
 
 from avp_vit import CanViTForPretraining
 
@@ -23,12 +24,7 @@ class ModelBundle(NamedTuple):
 
 def load_teacher(cfg: Config) -> DINOv3Backbone:
     """Load frozen DINOv3 teacher backbone."""
-    backbone = create_backbone(cfg.teacher_model, weights=str(cfg.teacher_ckpt))
-    backbone.vit.eval()
-    for p in backbone.parameters():
-        p.requires_grad = False
-    log.info(f"Teacher ready: {cfg.teacher_model}, {backbone.n_blocks} blocks")
-    return backbone.to(cfg.device)
+    return _load_teacher(cfg.teacher_model, cfg.device, weights=str(cfg.teacher_ckpt))
 
 
 def load_student_backbone(cfg: Config) -> DINOv3Backbone:

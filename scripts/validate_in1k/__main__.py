@@ -23,8 +23,8 @@ from tqdm import tqdm
 
 from canvit import CanViTOutput, RecurrentState
 from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit import create_backbone
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
+from canvit_utils.teacher import load_teacher as _load_teacher
 
 from avp_vit import CanViTForPretraining
 from avp_vit.checkpoint import load as load_ckpt, load_model
@@ -64,9 +64,7 @@ class Config:
 def load_teacher(ckpt_path: Path, device: torch.device) -> DINOv3Backbone:
     """Load teacher backbone from checkpoint."""
     ckpt = load_ckpt(ckpt_path, "cpu")
-    teacher = create_backbone(ckpt["backbone"], pretrained=True)
-    assert isinstance(teacher, DINOv3Backbone)
-    return teacher.to(device).eval()
+    return _load_teacher(ckpt["backbone"], device)
 
 
 def load_cls_normalizer(ckpt_path: Path, device: torch.device) -> CLSStandardizer:
