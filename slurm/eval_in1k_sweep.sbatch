@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=canvit-in1k-sweep
 #SBATCH --account=rrg-skrishna_gpu
-#SBATCH --time=01:00:00
+#SBATCH --time=00:15:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
@@ -14,8 +14,6 @@
 #   sbatch --array=0-1 slurm/eval_in1k_sweep.sbatch c2f
 #   sbatch --array=0-1 slurm/eval_in1k_sweep.sbatch fullrand
 #   sbatch --array=0-1 slurm/eval_in1k_sweep.sbatch iid
-#
-# First argument is policy name: c2f, fullrand, iid
 
 set -eux
 
@@ -23,7 +21,6 @@ NAME="${1:?Usage: sbatch --array=0-N eval_in1k_sweep.sbatch <c2f|fullrand|iid>}"
 
 cd ~/scratch/CanViT-train
 source slurm/env.sh
-mkdir -p logs outputs
 
 case "$NAME" in
     c2f)
@@ -44,10 +41,16 @@ case "$NAME" in
         ;;
 esac
 
-ROLLOUT=$SLURM_ARRAY_TASK_ID
-OUTPUT="outputs/in1k_${NAME}_r${ROLLOUT}.pt"
+# Build output path: outputs/in1k_eval/{policy}_{timestamp}_{git}_{jobid}_{taskid}.pt
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+GIT_SHORT=$(git rev-parse --short HEAD)
+OUTPUT_DIR="outputs/in1k_eval"
+OUTPUT="${OUTPUT_DIR}/in1k_${NAME}_${TIMESTAMP}_${GIT_SHORT}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.pt"
 
-echo "Policy: $NAME ($POLICY), rollout: $ROLLOUT, output: $OUTPUT"
+mkdir -p logs "$OUTPUT_DIR"
+
+echo "Policy: $NAME ($POLICY)"
+echo "Output: $OUTPUT"
 exec uv run python -m canvit_eval.in1k \
     --policy "$POLICY" \
     --output "$OUTPUT" \
