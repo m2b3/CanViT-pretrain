@@ -4,13 +4,13 @@ version = "0.1.0"
 description = "CanViT pretraining and evaluation"
 authors = [{ name = "Yohaï-Eliel BERREBY", email = "me@yberreby.com" }]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "canvit",
     "dinov3",
-    "dinov3-probes",
+    "dinov3-in1k-probes",
     "ybml",
-    "torch>=2.0",
+    "torch>=2.10",
     "torchvision",
     "huggingface-hub",
     "safetensors",
@@ -43,7 +43,7 @@ packages = ["canvit_pretrain", "canvit_eval", "drac_imagenet"]
 dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
 ybml = { git = "https://github.com/yberreby/ybml.git" }
 canvit = { git = "ssh://git@github.com/yberreby/CanViT.git", branch = "main" }
-dinov3-probes = { git = "https://github.com/yberreby/dinov3-probes.git" }
+dinov3-in1k-probes = { git = "https://github.com/yberreby/dinov3-in1k-probes.git" }
 
 [dependency-groups]
 dev = [

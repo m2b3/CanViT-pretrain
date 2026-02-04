@@ -5,8 +5,8 @@ import os
 import signal
 import subprocess
 import traceback
-from datetime import datetime, timezone
 from contextlib import nullcontext
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -31,18 +31,19 @@ class TrainBatch(NamedTuple):
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
+from canvit import CLSStandardizer, PatchStandardizer  # noqa: E402
+from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
 from ytch.model import count_parameters  # noqa: E402
 
 from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
-from canvit_pretrain.checkpoint import CheckpointData, load as load_checkpoint  # noqa: E402
-from canvit_pretrain.checkpoint import save as save_checkpoint, update_symlink, find_latest  # noqa: E402
-from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
+from canvit_pretrain.checkpoint import CheckpointData, find_latest, update_symlink  # noqa: E402
+from canvit_pretrain.checkpoint import load as load_checkpoint
+from canvit_pretrain.checkpoint import save as save_checkpoint  # noqa: E402
 
 from .config import Config  # noqa: E402
 from .data import ShardedFeatureLoader, create_loaders, scene_size_px  # noqa: E402
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
-from canvit import CLSStandardizer, PatchStandardizer  # noqa: E402
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_constant_scheduler  # noqa: E402
 from .step import training_step  # noqa: E402
@@ -121,7 +122,7 @@ def train(cfg: Config, trial: optuna.Trial) -> float:
         return training_loop(cfg=cfg, trial=trial, run_name=run_name, run_dir=run_dir)
     except Exception:
         log.exception("Training crashed - writing FAILED marker")
-        failed_marker.write_text(f"Crashed at {datetime.now(timezone.utc).isoformat()}\n")
+        failed_marker.write_text(f"Crashed at {datetime.now(UTC).isoformat()}\n")
         cancel_slurm_array()
         raise
 
@@ -328,7 +329,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     training_config_history: dict[str, dict] = {}
     if ckpt_data is not None:
         training_config_history = ckpt_data.get("training_config_history") or {}
-    training_config_history[datetime.now(timezone.utc).isoformat()] = flatten_dict(asdict(cfg))
+    training_config_history[datetime.now(UTC).isoformat()] = flatten_dict(asdict(cfg))
 
     def make_ckpt_path(step: int) -> Path:
         """Generate versioned checkpoint path: {run_dir}/step-{step}.pt"""

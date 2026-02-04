@@ -1,23 +1,25 @@
 """Training step with truncated BPTT and independent branches."""
 
 import random
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Callable, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from canvit import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
 from canvit_pretrain import CanViTForPretraining
-from canvit import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 
 from .loss import mse_loss
-from .viewpoint import Viewpoint as NamedViewpoint, ViewpointType
-from .viz.sample import VizSampleData, extract_sample0_viz
+from .viewpoint import Viewpoint as NamedViewpoint
+from .viewpoint import ViewpointType
 from .viz.image import imagenet_denormalize
+from .viz.sample import VizSampleData, extract_sample0_viz
 
 
 class LossOutput(NamedTuple):

@@ -1,17 +1,15 @@
-"""ImageNet normalization and transforms.
+"""ImageNet normalization and transforms for pretraining.
 
-Single source of truth for normalization constants used in training and validation.
+Constants from timm. Training-specific augmentations defined here.
 """
 
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision import transforms
-
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 def imagenet_normalize() -> transforms.Normalize:
     """ImageNet normalization transform."""
-    return transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+    return transforms.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)
 
 
 def train_transform(size: int, crop_scale: tuple[float, float]) -> transforms.Compose:

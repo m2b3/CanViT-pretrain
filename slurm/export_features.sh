@@ -40,7 +40,7 @@ set -euo pipefail
 # SETUP - source env.sh FIRST (defines paths)
 # ==============================================================================
 
-cd ~/scratch/avp-vit
+cd ~/scratch/CanViT-train
 source slurm/env.sh
 mkdir -p logs
 

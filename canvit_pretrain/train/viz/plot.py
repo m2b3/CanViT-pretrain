@@ -9,10 +9,10 @@ from matplotlib.patches import Rectangle
 from numpy.typing import NDArray
 from sklearn.decomposition import PCA
 
-from ..viewpoint import PixelBox
 from ..probe import TopKPrediction
-from .pca import fit_pca, pca_rgb
+from ..viewpoint import PixelBox
 from .metrics import cosine_dissimilarity
+from .pca import fit_pca, pca_rgb
 
 # Type alias for RGBA color tuple
 RGBA = tuple[float, float, float, float]

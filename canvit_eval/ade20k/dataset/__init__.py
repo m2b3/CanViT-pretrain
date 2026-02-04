@@ -6,13 +6,14 @@ import albumentations as A
 import numpy as np
 import torch
 from PIL import Image
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torch.utils.data import Dataset
 
 NUM_CLASSES = 150
 IGNORE_LABEL = 255
-IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
-IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
+_MEAN = torch.tensor(IMAGENET_DEFAULT_MEAN).view(3, 1, 1)
+_STD = torch.tensor(IMAGENET_DEFAULT_STD).view(3, 1, 1)
 
 
 class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
@@ -43,7 +44,7 @@ class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
             img, mask = out["image"], out["mask"]
 
         img_t = torch.from_numpy(img).float().permute(2, 0, 1) / 255.0
-        img_t = (img_t - IMAGENET_MEAN.view(3, 1, 1)) / IMAGENET_STD.view(3, 1, 1)
+        img_t = (img_t - _MEAN) / _STD
         mask_t = torch.from_numpy(mask.astype(np.int64))
         valid = (mask_t >= 1) & (mask_t <= 150)
         return img_t, torch.where(valid, mask_t - 1, IGNORE_LABEL)

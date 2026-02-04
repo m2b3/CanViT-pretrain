@@ -11,13 +11,6 @@ from canvit_pretrain.train.data import (
     create_loaders,
     scene_size_px,
 )
-from canvit_pretrain.train.transforms import (
-    IMAGENET_MEAN,
-    IMAGENET_STD,
-    imagenet_normalize,
-    train_transform,
-    val_transform,
-)
 from canvit_pretrain.train.probe import (
     IN1K_NUM_CLASSES,
     PROBE_REGISTRY,
@@ -31,6 +24,11 @@ from canvit_pretrain.train.probe import (
     load_probe,
 )
 from canvit_pretrain.train.scheduler import warmup_constant_scheduler
+from canvit_pretrain.train.transforms import (
+    imagenet_normalize,
+    train_transform,
+    val_transform,
+)
 from canvit_pretrain.train.viewpoint import (
     PixelBox,
     Viewpoint,
@@ -52,8 +50,6 @@ from canvit_pretrain.train.viz import (
 
 __all__ = [
     # Data
-    "IMAGENET_MEAN",
-    "IMAGENET_STD",
     "Batch",
     "InfiniteLoader",
     "Loaders",

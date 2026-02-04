@@ -38,7 +38,7 @@ fi
 log "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo 'N/A')"
 log "Args: $*"
 
-cd ~/scratch/avp-vit
+cd ~/scratch/CanViT-train
 source slurm/env.sh
 
 # Dependencies
@@ -52,7 +52,7 @@ mkdir -p logs
 log "Starting training..."
 RUN_NAME_ARG=()
 [ -n "$RUN_NAME" ] && RUN_NAME_ARG=(--run-name "$RUN_NAME")
-exec uv run python -m avp_vit.train \
+exec uv run python -m canvit_pretrain.train \
     "${RUN_NAME_ARG[@]}" \
     --feature-base-dir "$FEATURES_DIR/in21k" \
     --feature-image-root "$IN21K_DIR" \

@@ -2,6 +2,7 @@
 
 import torch
 from PIL import Image
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torchvision import transforms
 
@@ -9,22 +10,15 @@ from canvit_pretrain.train.data import (
     MAX_CONSECUTIVE_FAILURES,
     InfiniteLoader,
 )
-from canvit_pretrain.train.transforms import (
-    IMAGENET_MEAN,
-    IMAGENET_STD,
-    imagenet_normalize,
-    train_transform,
-    val_transform,
-)
 from canvit_pretrain.train.scheduler import warmup_constant_scheduler
+from canvit_pretrain.train.transforms import imagenet_normalize, train_transform, val_transform
 from canvit_pretrain.train.viewpoint import (
     PixelBox,
-    random_viewpoint,
     make_eval_viewpoints,
+    random_viewpoint,
     viewpoint_to_pixel_box,
 )
 from canvit_pretrain.train.viz import imagenet_denormalize, timestep_colors
-
 
 # === Data Tests ===
 
@@ -35,8 +29,8 @@ class TestImagenetNormalize:
 
     def test_uses_correct_constants(self) -> None:
         norm = imagenet_normalize()
-        assert tuple(norm.mean) == IMAGENET_MEAN
-        assert tuple(norm.std) == IMAGENET_STD
+        assert tuple(norm.mean) == IMAGENET_DEFAULT_MEAN
+        assert tuple(norm.std) == IMAGENET_DEFAULT_STD
 
 
 class TestTrainTransform:

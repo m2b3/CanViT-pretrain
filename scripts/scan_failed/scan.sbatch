@@ -20,7 +20,7 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 log "=== Scan Failed Indices ==="
 log "Job: $SLURM_JOB_ID on $(hostname), CPUs: $SLURM_CPUS_PER_TASK"
 
-cd ~/scratch/avp-vit
+cd ~/scratch/CanViT-train
 source slurm/env.sh
 
 mkdir -p logs

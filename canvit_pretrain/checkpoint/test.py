@@ -4,9 +4,9 @@ import tempfile
 from pathlib import Path
 
 import torch
+from canvit.backbone.dinov3 import DINOv3Backbone
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
-from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit_pretrain.checkpoint import CheckpointData, load, save
 
 

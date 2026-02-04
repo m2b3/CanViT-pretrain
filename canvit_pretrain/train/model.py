@@ -3,8 +3,8 @@
 import logging
 from typing import NamedTuple
 
-from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit import create_backbone
+from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit.policy import PolicyConfig, PolicyHead
 from canvit_utils.teacher import load_teacher as _load_teacher
 

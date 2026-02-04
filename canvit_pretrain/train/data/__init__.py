@@ -14,12 +14,12 @@ from torch.utils.data import DataLoader, Dataset
 
 from drac_imagenet import IndexedImageFolder
 
-from .shards import ShardedFeatureLoader
 from ..transforms import val_transform
+from .shards import ShardedFeatureLoader
 
 log = logging.getLogger(__name__)
 
-Batch: TypeAlias = tuple[Tensor, ...]  # Generic batch (images, labels, ...)
+type Batch = tuple[Tensor, ...]  # Generic batch (images, labels, ...)
 
 
 # IN21k contains corrupt images that cause DataLoader workers to fail.

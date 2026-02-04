@@ -7,7 +7,7 @@ Subsequent: loads from parquet (~8s for 13M files).
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 from torch.utils.data import Dataset
@@ -129,7 +129,7 @@ class IndexedImageFolder(Dataset):
             b"root_name": self.root.name.encode(),
             b"n_samples": str(n_samples).encode(),
             b"n_classes": str(len(self.classes)).encode(),
-            b"generated_at": datetime.now(timezone.utc).isoformat().encode(),
+            b"generated_at": datetime.now(UTC).isoformat().encode(),
         })
         pq.write_table(table, index_path, compression="zstd")
 

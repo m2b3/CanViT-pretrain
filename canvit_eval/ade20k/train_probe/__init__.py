@@ -21,6 +21,7 @@ from canvit import CanViTForPretrainingHFHub, sample_at_viewpoint
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit_utils.policies import random_viewpoints
 from canvit_utils.teacher import load_teacher
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -28,7 +29,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
 
-from canvit_eval.ade20k.dataset import IGNORE_LABEL, IMAGENET_MEAN, IMAGENET_STD, NUM_CLASSES, ADE20kDataset
+from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset
 from canvit_eval.ade20k.probe import ProbeHead
 
 log = logging.getLogger(__name__)
@@ -41,8 +42,8 @@ STATIC_FEATURES: set[FeatureType] = {"teacher_glimpse"}
 class Config:
     """ADE20K probe training configuration."""
 
-    model_repo: str
     ade20k_root: Path
+    model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
     features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"])
     n_timesteps: int = 10
     image_size: int = 512
@@ -131,8 +132,8 @@ def _upsample_preds(preds: Tensor, H: int, W: int) -> Tensor:
 
 
 def _imagenet_denormalize(img: Tensor) -> np.ndarray:
-    mean = IMAGENET_MEAN.to(img.device).view(3, 1, 1)
-    std = IMAGENET_STD.to(img.device).view(3, 1, 1)
+    mean = torch.tensor(IMAGENET_DEFAULT_MEAN, device=img.device).view(3, 1, 1)
+    std = torch.tensor(IMAGENET_DEFAULT_STD, device=img.device).view(3, 1, 1)
     img = (img * std + mean).clamp(0, 1)
     return (img.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
 

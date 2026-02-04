@@ -12,7 +12,7 @@ import subprocess
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 import polars as pl
@@ -147,7 +147,7 @@ def main(cfg: Config) -> None:
     df = pl.DataFrame(records).sort("global_idx")
 
     # Add metadata columns
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     git_commit = get_git_commit()
     df = df.with_columns(
         pl.lit(str(cfg.shards_dir)).alias("shards_dir"),

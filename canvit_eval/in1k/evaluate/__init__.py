@@ -33,9 +33,9 @@ class Config:
     """IN1k evaluation configuration."""
 
     val_dir: Path
-    model_repo: str
-    probe_repo: str
     output: Path = Path("outputs/in1k_predictions.parquet")
+    model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
+    probe_repo: str = "yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe"
     policies: list[PolicyName] = field(default_factory=lambda: ["coarse_to_fine"])
     n_trajectories: int = 1
     n_viewpoints: int = 10

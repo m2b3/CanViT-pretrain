@@ -7,6 +7,7 @@ from canvit import CanViTOutput
 from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining
+
 from .image import imagenet_denormalize
 
 

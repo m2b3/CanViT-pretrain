@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
@@ -170,7 +170,7 @@ def save(
         "model_config": asdict(model.cfg),
         "teacher_dim": model.cfg.teacher_dim,
         "backbone": backbone,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "git_commit": git_commit,
         "git_dirty": git_dirty,
         "step": step,

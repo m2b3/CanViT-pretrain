@@ -64,20 +64,20 @@ Target platforms: CUDA (primary), CPU, MPS (nice-to-have, may behave oddly).
 import logging
 import statistics
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import tyro
+from canvit import create_backbone
+from canvit.viewpoint import Viewpoint
 from rich.console import Console
 from rich.table import Table
 from tqdm import tqdm
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 from canvit_pretrain.train.config import Config as TrainConfig
-from canvit import create_backbone
-from canvit.viewpoint import Viewpoint
-
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)

@@ -8,18 +8,16 @@ import comet_ml
 import numpy as np
 import torch
 import torch.nn.functional as F
-from canvit import CanViTOutput, RecurrentState, sample_at_viewpoint
+from canvit import CanViTOutput, CLSStandardizer, PatchStandardizer, RecurrentState, sample_at_viewpoint
 from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
 from canvit.policy import PolicyHead
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
+from dinov3_in1k_probes import DINOv3LinearClassificationHead
 from torch import Tensor
-
-from dinov3_probes import DINOv3LinearClassificationHead
-
 from ytch.correctness import assert_shape
 
 from canvit_pretrain import CanViTForPretraining
-from canvit import CLSStandardizer, PatchStandardizer
+
 from ..probe import (
     compute_in1k_top1,
     get_imagenet_class_names,
@@ -29,9 +27,9 @@ from ..probe import (
 )
 from ..viewpoint import Viewpoint, make_eval_viewpoints
 from .comet import log_curve, log_figure
-from .policy import plot_policy_predictions
 from .image import imagenet_denormalize
 from .plot import TimestepPredictions, plot_multistep_pca
+from .policy import plot_policy_predictions
 from .sample import VizSampleData, extract_sample0_viz
 
 log = logging.getLogger(__name__)

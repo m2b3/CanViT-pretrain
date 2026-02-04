@@ -43,7 +43,7 @@ import sys
 import time
 import warnings
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from math import ceil
 from pathlib import Path
 
@@ -405,7 +405,7 @@ class FeatureExporter:
                 "n_patches": self.n_patches,
                 "batch_size": cfg.batch_size,
                 # Provenance
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "git_commit": self.git_commit,
             },
             tmp,

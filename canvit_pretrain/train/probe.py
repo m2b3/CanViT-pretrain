@@ -5,7 +5,7 @@ from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
-from dinov3_probes import DINOv3LinearClassificationHead
+from dinov3_in1k_probes import DINOv3LinearClassificationHead
 from torch import Tensor
 from torchvision.models import ResNet50_Weights
 
