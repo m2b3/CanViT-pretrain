@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "CanViT pretraining and evaluation"
 authors = [{ name = "Yohaï-Eliel BERREBY", email = "me@yberreby.com" }]
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "canvit",
     "dinov3",
