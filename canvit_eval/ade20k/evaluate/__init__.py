@@ -10,21 +10,15 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Literal
 
-import numpy as np
 import torch
 from canvit import CanViTForPretrainingHFHub
 from canvit_utils.teacher import load_teacher
-from PIL import Image
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torchmetrics.classification import MulticlassJaccardIndex
-from torchvision import transforms as tvt
 from tqdm import tqdm
 
-from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES
+from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, TransformMode
 from canvit_eval.ade20k.probe import ProbeHead
 from canvit_eval.ade20k.train_probe.config import FEATURE_NEEDS_LN, STATIC_FEATURES, FeatureType, get_feature_dims
 from canvit_eval.ade20k.train_probe.features import extract_features
@@ -32,8 +26,6 @@ from canvit_eval.ade20k.train_probe.loss import upsample_preds
 from canvit_eval.utils import PolicyName, collect_metadata, make_viewpoints
 
 log = logging.getLogger(__name__)
-
-TransformMode = Literal["center_crop", "squish"]
 
 
 # === Config ===
@@ -59,65 +51,15 @@ class EvalConfig:
     image_size: int = 512
     glimpse_px: int = 128
 
-    # Random policy params
+    # Random policy params (ignored for coarse_to_fine)
     min_scale: float = 0.05
     max_scale: float = 1.0
+    start_full: bool = True
 
     batch_size: int = 32
     num_workers: int = 8
     device: str = "cuda"
     amp: bool = True
-
-
-# === Dataset with transform mode ===
-
-
-class ADE20kValDataset(Dataset[tuple[Tensor, Tensor]]):
-    """ADE20K validation dataset with configurable transform."""
-
-    def __init__(self, root: Path, size: int, transform_mode: TransformMode) -> None:
-        self.size = size
-
-        if transform_mode == "center_crop":
-            self._img_transform = tvt.Compose([
-                tvt.Resize(size),
-                tvt.CenterCrop(size),
-                tvt.ToTensor(),
-                tvt.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
-            ])
-            self._mask_transform = tvt.Compose([
-                tvt.Resize(size, tvt.InterpolationMode.NEAREST),
-                tvt.CenterCrop(size),
-            ])
-        else:  # squish
-            self._img_transform = tvt.Compose([
-                tvt.Resize((size, size)),
-                tvt.ToTensor(),
-                tvt.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
-            ])
-            self._mask_transform = tvt.Resize((size, size), tvt.InterpolationMode.NEAREST)
-
-        img_dir = root / "images" / "validation"
-        ann_dir = root / "annotations" / "validation"
-        self.imgs = sorted(img_dir.glob("*.jpg"))
-        self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
-
-        assert len(self.imgs) > 0, f"No images in {img_dir}"
-        log.info(f"ADE20k val: {len(self.imgs)} images, size={size}, transform={transform_mode}")
-
-    def __len__(self) -> int:
-        return len(self.imgs)
-
-    def __getitem__(self, i: int) -> tuple[Tensor, Tensor]:
-        img = Image.open(self.imgs[i]).convert("RGB")
-        mask = Image.open(self.anns[i])
-
-        img_t = self._img_transform(img)
-        mask_t = torch.from_numpy(np.array(self._mask_transform(mask))).long()
-        # reduce_zero_label: 0→255, 1-150→0-149
-        mask_t = torch.where((mask_t >= 1) & (mask_t <= 150), mask_t - 1, IGNORE_LABEL)
-
-        return img_t, mask_t
 
 
 # === Checkpoint loading ===
@@ -184,7 +126,13 @@ def evaluate(cfg: EvalConfig) -> Path:
     log.info(f"Features: {feature_types}, need_canvit={need_canvit}")
 
     # Dataset
-    dataset = ADE20kValDataset(cfg.ade20k_root, cfg.image_size, cfg.transform)
+    dataset = ADE20kDataset(
+        root=cfg.ade20k_root,
+        split="validation",
+        size=cfg.image_size,
+        augment=False,
+        transform_mode=cfg.transform,
+    )
     loader = DataLoader(
         dataset, batch_size=cfg.batch_size, shuffle=False,
         num_workers=cfg.num_workers, pin_memory=True,
@@ -213,7 +161,7 @@ def evaluate(cfg: EvalConfig) -> Path:
         viewpoints = make_viewpoints(
             cfg.policy, B, device, T,
             min_scale=cfg.min_scale, max_scale=cfg.max_scale,
-            start_with_full_scene=True,
+            start_with_full_scene=cfg.start_full,
         ) if need_canvit else None
 
         with amp_ctx:

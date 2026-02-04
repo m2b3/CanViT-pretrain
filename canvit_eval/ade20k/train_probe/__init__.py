@@ -124,12 +124,18 @@ def train(cfg: Config) -> None:
 
     # Data
     train_ds = ADE20kDataset(
-        cfg.ade20k_root, "training", cfg.image_size,
-        augment=True, aug_scale_range=cfg.aug_scale_range, aug_flip_prob=cfg.aug_flip_prob,
+        root=cfg.ade20k_root,
+        split="training",
+        size=cfg.image_size,
+        augment=True,
+        aug_scale_range=cfg.aug_scale_range,
+        aug_flip_prob=cfg.aug_flip_prob,
     )
     val_ds = ADE20kDataset(
-        cfg.ade20k_root, "validation", cfg.image_size,
-        augment=False, aug_scale_range=cfg.aug_scale_range, aug_flip_prob=cfg.aug_flip_prob,
+        root=cfg.ade20k_root,
+        split="validation",
+        size=cfg.image_size,
+        augment=False,
     )
     train_loader = DataLoader(
         train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True
