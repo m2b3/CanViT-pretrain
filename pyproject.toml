@@ -48,7 +48,7 @@ select = ["E", "F", "I", "UP"]
 typeCheckingMode = "standard"
 
 [tool.uv.sources]
-canvit = { git = "ssh://git@github.com/yberreby/CanViT.git", branch = "policies" }
+canvit = { git = "ssh://git@github.com/yberreby/CanViT.git", branch = "main" }
 
 [dependency-groups]
 dev = [

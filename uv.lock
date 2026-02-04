@@ -94,7 +94,7 @@ wheels = [
 [[package]]
 name = "canvit"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/yberreby/CanViT.git?branch=policies#3b2435753503d66b995e52b41603a7a111c6759b" }
+source = { git = "ssh://git@github.com/yberreby/CanViT.git?branch=main#709d92a09957bf68dd331c8fb23a8913c729ba50" }
 dependencies = [
     { name = "dinov3" },
     { name = "huggingface-hub" },
@@ -144,7 +144,7 @@ dev = [
 requires-dist = [
     { name = "albumentations" },
     { name = "basedpyright", marker = "extra == 'dev'" },
-    { name = "canvit", git = "ssh://git@github.com/yberreby/CanViT.git?branch=policies" },
+    { name = "canvit", git = "ssh://git@github.com/yberreby/CanViT.git?branch=main" },
     { name = "comet-ml" },
     { name = "huggingface-hub" },
     { name = "matplotlib" },
