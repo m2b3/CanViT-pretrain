@@ -52,13 +52,13 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["canvit_eval", "train"]
+testpaths = ["canvit_eval", "canvit_pretrain"]
 python_files = ["test.py", "test_*.py"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-exclude = ["throwaway"]
+exclude = ["throwaway", "misc"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
