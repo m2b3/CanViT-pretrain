@@ -35,6 +35,9 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["canvit_pretrain", "canvit_eval", "drac_imagenet"]
+
 [tool.uv.sources]
 dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
 ybml = { git = "https://github.com/yberreby/ybml.git" }
