@@ -65,7 +65,7 @@ class Config:
     batch_size: int = 16  # DINOv3: 2 * 8 GPUs = 16
     eval_batch_size: int = 32
     num_workers: int = 4
-    peak_lr: float = 1e-3  # DINOv3: 1e-3
+    peak_lr: float = 3e-4  # DINOv3: 1e-3
     weight_decay: float = 1e-3  # DINOv3: 1e-3
     warmup_steps: int = 1500  # DINOv3: 1500
     warmup_lr_ratio: float = 1e-6  # DINOv3: start LR = peak_lr * 1e-6
