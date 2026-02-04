@@ -25,12 +25,33 @@ uv run -m canvit_eval.in1k --help
 uv run -m canvit_eval.ade20k --help
 ```
 
-## SLURM
+## SLURM (Nibi cluster)
 
+**Setup** (one-time):
 ```bash
-source slurm/env.sh
-sbatch slurm/train.sbatch
+# Clone to scratch
+cd ~/scratch
+git clone git@github.com:m2b3/CanViT-train.git
+
+# SSH config: add Host github.com-canvit-train with deploy key
+# gitconfig: rewrite git@github.com:m2b3/CanViT-train.git → use that host
 ```
+
+**Usage**:
+```bash
+cd ~/scratch/CanViT-train
+
+# All scripts source slurm/env.sh (sets $IN1K_VAL_DIR, $HF_HOME, etc.)
+sbatch slurm/eval_in1k.sbatch              # IN1k evaluation (~20min)
+sbatch slurm/eval_ade20k.sbatch            # ADE20k probe training (~2hr)
+sbatch slurm/train.sbatch                  # Pretraining (long)
+bash slurm/interactive.sh                  # Interactive GPU session
+```
+
+**Key files**:
+- `slurm/env.sh` - Environment setup (dataset paths, caches, Comet key)
+- `outputs/` - Evaluation results (parquet files)
+- `logs/` - Job stdout/stderr
 
 ## See Also
 
