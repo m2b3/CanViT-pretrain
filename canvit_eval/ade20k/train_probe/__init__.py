@@ -11,6 +11,7 @@ Note: We use whole-image inference, not sliding window (intentional simplificati
 
 import logging
 import math
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -62,16 +63,44 @@ def _make_probe(name: str, dim: int, cfg: Config, device: torch.device, *, use_l
     return ProbeState(name, head, opt, scheduler)
 
 
-def _save_checkpoint(path: Path, probes: dict[FeatureType, ProbeState], step: int, cfg: Config) -> None:
+def _save_checkpoint(
+    run_dir: Path,
+    probes: dict[FeatureType, ProbeState],
+    step: int,
+    cfg: Config,
+    *,
+    is_best: bool,
+) -> Path:
+    """Save checkpoint with descriptive filename.
+
+    Best: best_miou0.3245_step5000.pt
+    Final: final_step40000.pt
+    """
+    best_mious = {name: p.best_mean_miou for name, p in probes.items()}
+    mean_miou = sum(best_mious.values()) / len(best_mious)
+
+    if is_best:
+        filename = f"best_miou{mean_miou:.4f}_step{step}.pt"
+    else:
+        filename = f"final_step{step}.pt"
+
+    path = run_dir / filename
     data = {
         "step": step,
         "probe_state_dicts": {name: p.head.state_dict() for name, p in probes.items()},
-        "best_mean_mious": {name: p.best_mean_miou for name, p in probes.items()},
+        "best_mean_mious": best_mious,
         "config": asdict(cfg),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove old best checkpoint if saving new best
+    if is_best:
+        for old in run_dir.glob("best_*.pt"):
+            old.unlink()
+
     torch.save(data, path)
     log.info(f"Saved checkpoint: {path} ({path.stat().st_size / 1e6:.1f} MB)")
+    return path
 
 
 def train(cfg: Config) -> None:
@@ -148,7 +177,15 @@ def train(cfg: Config) -> None:
     # Comet
     exp = comet_ml.Experiment(project_name=cfg.comet_project, workspace=cfg.comet_workspace)
     exp.log_parameters(asdict(cfg))
-    log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}")
+    log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()}")
+
+    # Run directory: {base}/{timestamp}_{job_id}_{comet_key}/
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = cfg.probe_ckpt_dir / f"{timestamp}_{job_id}_{exp.get_key()[:8]}" if cfg.probe_ckpt_dir else None
+    if run_dir:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log.info(f"Checkpoints: {run_dir}")
 
     amp_dtype = torch.bfloat16 if cfg.amp else torch.float32
     amp_ctx = torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=cfg.amp)
@@ -222,8 +259,8 @@ def train(cfg: Config) -> None:
                     probes[feat_type].best_mean_miou = mean_miou
                     any_improved = True
 
-            if any_improved and cfg.probe_ckpt_dir:
-                _save_checkpoint(cfg.probe_ckpt_dir / "best.pt", probes, step, cfg)
+            if any_improved and run_dir:
+                _save_checkpoint(run_dir, probes, step, cfg, is_best=True)
 
             val_time = time.perf_counter() - val_start
             log.info(f"Step {step}: validation took {val_time:.1f}s")
@@ -319,8 +356,8 @@ def train(cfg: Config) -> None:
 
     pbar.close()
 
-    if cfg.probe_ckpt_dir:
-        _save_checkpoint(cfg.probe_ckpt_dir / "final.pt", probes, step, cfg)
+    if run_dir:
+        _save_checkpoint(run_dir, probes, step, cfg, is_best=False)
 
     log.info("=" * 60)
     log.info("Training complete. Best mean mIoU:")
