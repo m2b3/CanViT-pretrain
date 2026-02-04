@@ -64,7 +64,7 @@ class Config:
     save_logits: bool = True
     save_cls: bool = True
     # Random policy params (ignored for coarse_to_fine)
-    random_min_scale: float = 0.25
+    random_min_scale: float = 0.05
     random_max_scale: float = 1.0
     random_start_full: bool = True
 
