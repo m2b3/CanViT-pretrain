@@ -26,7 +26,4 @@ source slurm/env.sh
 mkdir -p logs outputs
 
 log "Running evaluation..."
-exec uv run python -m canvit_eval.in1k \
-    --val-dir "$IN1K_VAL_DIR" \
-    --output "outputs/in1k_${SLURM_JOB_ID}.parquet" \
-    "$@"
+exec uv run python -m canvit_eval.in1k "$@"
