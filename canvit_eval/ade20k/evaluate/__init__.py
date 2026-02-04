@@ -54,7 +54,7 @@ class EvalConfig:
     model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
     policy: PolicyName = "coarse_to_fine"
     resize_mode: ResizeMode = "squish"
-    n_timesteps: int = 10
+    n_timesteps: int = 16
     image_size: int = 512
     glimpse_px: int = 128
 
