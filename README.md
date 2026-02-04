@@ -35,6 +35,9 @@ git clone git@github.com:m2b3/CanViT-train.git
 
 # SSH config: add Host github.com-canvit-train with deploy key
 # gitconfig: rewrite git@github.com:m2b3/CanViT-train.git → use that host
+
+# HuggingFace auth (required for private model repos)
+uvx hf auth login
 ```
 
 **Usage**:
