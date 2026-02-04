@@ -261,6 +261,13 @@ def train(cfg: Config) -> None:
                     preds_up = upsample_preds(preds, masks.shape[1], masks.shape[2])
                     train_iou[feat_type][t].update(preds_up, masks)
 
+        # === Visualization (before increment, like val) ===
+        if step % cfg.viz_every == 0:
+            for p in probes.values():
+                p.head.eval()
+            with torch.no_grad():
+                log_viz(exp, step, probes, feats, images, masks, cfg.viz_samples, cfg.n_timesteps)
+
         step += 1
         pbar.update(1)
 
@@ -286,13 +293,6 @@ def train(cfg: Config) -> None:
                         m.reset()
 
             exp.log_metrics(log_dict, step=step)
-
-        # === Visualization ===
-        if step % cfg.viz_every == 0:
-            for p in probes.values():
-                p.head.eval()
-            with torch.no_grad():
-                log_viz(exp, step, probes, feats, images, masks, cfg.viz_samples, cfg.n_timesteps)
 
     pbar.close()
 
