@@ -20,6 +20,7 @@ import tyro
 from canvit import CanViTForPretrainingHFHub, sample_at_viewpoint
 from canvit.backbone.dinov3 import DINOv3Backbone
 from canvit_utils.policies import random_viewpoints
+from canvit_utils.teacher import load_teacher
 from torch import Tensor
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -45,6 +46,8 @@ class Config:
     features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"])
     n_timesteps: int = 10
     image_size: int = 512
+    glimpse_px: int = 128  # Glimpse size in pixels
+    min_vp_scale: float = 0.25  # Minimum viewpoint scale for random sampling
     batch_size: int = 64
     eval_batch_size: int = 32
     num_workers: int = 4
@@ -196,13 +199,13 @@ def train(cfg: Config) -> None:
         p.requires_grad_(False)
     log.info(f"  params: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 
-    teacher = model.backbone
-    assert isinstance(teacher, DINOv3Backbone)
+    # Load PRETRAINED teacher for baseline (NOT model.backbone which is trained from random init)
+    teacher = load_teacher(model.backbone_name, device)
 
     patch_size = model.backbone.patch_size_px
     canvas_grid = cfg.image_size // patch_size
-    glimpse_px = 8 * patch_size  # Default glimpse size
-    min_vp_scale = 0.25
+    glimpse_px = cfg.glimpse_px
+    min_vp_scale = cfg.min_vp_scale
 
     dims: dict[FeatureType, int] = {
         "hidden": model.canvas_dim,
