@@ -36,6 +36,7 @@ from canvit_eval.ade20k.probe import ProbeHead
 from canvit_eval.ade20k.viz import log_viz
 
 from .config import STATIC_FEATURES, Config, FeatureType
+from .features import ExtractedFeatures
 from .loss import ce_loss, focal_loss, upsample_preds
 from .state import ProbeState
 
@@ -84,16 +85,24 @@ def _extract_features(
     min_vp_scale: float,
     max_vp_scale: float,
     start_with_full_scene: bool,
-) -> dict[FeatureType, list[Tensor]]:
+    compute_teacher_full: bool,
+) -> ExtractedFeatures:
     """Extract features for all timesteps using random viewpoints."""
     B = images.shape[0]
-    feats: dict[FeatureType, list[Tensor]] = {"hidden": [], "predicted_norm": [], "teacher_glimpse": []}
+    hidden_list: list[Tensor] = []
+    predicted_list: list[Tensor] = []
     state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
 
+    # Static: teacher on downscaled image (glimpse resolution)
     glimpse_grid = glimpse_px // teacher.patch_size_px
     sz = glimpse_grid * teacher.patch_size_px
     small = F.interpolate(images, size=(sz, sz), mode="bilinear", align_corners=False)
-    teacher_feat = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
+    teacher_glimpse = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
+
+    # Static: teacher on full image (expensive, optional)
+    teacher_full: Tensor | None = None
+    if compute_teacher_full:
+        teacher_full = teacher.forward_norm_features(images).patches.view(B, canvas_grid, canvas_grid, -1)
 
     viewpoints = random_viewpoints(
         B, device, n_timesteps,
@@ -110,11 +119,15 @@ def _extract_features(
         hidden = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
         predicted = model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
 
-        feats["hidden"].append(hidden)
-        feats["predicted_norm"].append(predicted)
-        feats["teacher_glimpse"].append(teacher_feat)
+        hidden_list.append(hidden)
+        predicted_list.append(predicted)
 
-    return feats
+    return ExtractedFeatures(
+        hidden=hidden_list,
+        predicted_norm=predicted_list,
+        teacher_glimpse=teacher_glimpse,
+        teacher_full=teacher_full,
+    )
 
 
 def train(cfg: Config) -> None:
@@ -150,9 +163,16 @@ def train(cfg: Config) -> None:
         "hidden": model.canvas_dim,
         "predicted_norm": teacher.embed_dim,
         "teacher_glimpse": teacher.embed_dim,
+        "teacher_full": teacher.embed_dim,
     }
-    # Only raw canvas features need LN; predicted_norm and teacher_glimpse are already normalized
-    needs_ln: dict[FeatureType, bool] = {"hidden": True, "predicted_norm": False, "teacher_glimpse": False}
+    # Only raw canvas features need LN; others are already normalized
+    needs_ln: dict[FeatureType, bool] = {
+        "hidden": True, "predicted_norm": False, "teacher_glimpse": False, "teacher_full": False,
+    }
+
+    # Validate: teacher_full requires compute_teacher_full=True
+    if "teacher_full" in cfg.features and not cfg.compute_teacher_full:
+        raise ValueError("teacher_full in features requires compute_teacher_full=True")
     probes: dict[FeatureType, ProbeState] = {
         feat: _make_probe(feat, dims[feat], cfg, device, use_ln=needs_ln[feat]) for feat in cfg.features
     }
@@ -226,11 +246,12 @@ def train(cfg: Config) -> None:
                             canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, device=device,
                             min_vp_scale=cfg.min_vp_scale, max_vp_scale=cfg.max_vp_scale,
                             start_with_full_scene=True,  # Val ALWAYS starts full
+                            compute_teacher_full=cfg.compute_teacher_full,
                         )
                     for feat_type in cfg.features:
                         t_range = [0] if feat_type in STATIC_FEATURES else range(cfg.n_timesteps)
                         for t in t_range:
-                            logits = probes[feat_type].head(feats[feat_type][t].float())
+                            logits = probes[feat_type].head(feats.get(feat_type, t).float())
                             preds_up = upsample_preds(logits.argmax(1), vm.shape[1], vm.shape[2])
                             val_iou[feat_type][t].update(preds_up, vm)
 
@@ -269,13 +290,14 @@ def train(cfg: Config) -> None:
                 canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, device=device,
                 min_vp_scale=cfg.min_vp_scale, max_vp_scale=cfg.max_vp_scale,
                 start_with_full_scene=cfg.train_start_full,
+                compute_teacher_full=cfg.compute_teacher_full,
             )
 
         for feat_type in cfg.features:
             probe = probes[feat_type]
             probe.optimizer.zero_grad()
             t_range = [0] if feat_type in STATIC_FEATURES else range(cfg.n_timesteps)
-            logits_list = [probe.head(feats[feat_type][t].float()) for t in t_range]
+            logits_list = [probe.head(feats.get(feat_type, t).float()) for t in t_range]
             if cfg.loss_type == "ce":
                 losses = [ce_loss(logits, masks) for logits in logits_list]
             else:
