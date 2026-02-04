@@ -57,6 +57,20 @@ else
     echo "[env] No comet_api_key.txt (optional)"
 fi
 
+# ==============================================================================
+# HUGGINGFACE (required for private model repos)
+# ==============================================================================
+
+if [ -f ~/hf_token.txt ]; then
+    export HF_TOKEN=$(cat ~/hf_token.txt)
+    echo "[env] Loaded HF_TOKEN"
+elif [ -f "$HF_HOME/token" ]; then
+    export HF_TOKEN=$(cat "$HF_HOME/token")
+    echo "[env] Loaded HF_TOKEN from $HF_HOME/token"
+else
+    echo "[env] No HF token found (may fail on private repos)"
+fi
+
 # Sync then activate venv just in case we forget to use `uv run`
 uv sync
 source "$UV_PROJECT_ENVIRONMENT/bin/activate"
