@@ -1,5 +1,6 @@
 """ADE20K dataset for segmentation."""
 
+import logging
 from pathlib import Path
 
 import albumentations as A
@@ -10,6 +11,8 @@ from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
 from torch.utils.data import Dataset
 
+log = logging.getLogger(__name__)
+
 NUM_CLASSES = 150
 IGNORE_LABEL = 255
 _MEAN = torch.tensor(IMAGENET_DEFAULT_MEAN).view(3, 1, 1)
@@ -19,16 +22,23 @@ _STD = torch.tensor(IMAGENET_DEFAULT_STD).view(3, 1, 1)
 class ADE20kDataset(Dataset[tuple[Tensor, Tensor]]):
     """ADE20K segmentation dataset."""
 
-    def __init__(self, root: Path, split: str, size: int, augment: bool) -> None:
+    def __init__(self, root: Path, split: str, size: int, *, augment: bool) -> None:
         self.size = size
-        self.load_size = size * 2 if augment else size
-        self.transform = A.Compose([A.HorizontalFlip(p=0.5), A.RandomCrop(size, size)]) if augment else None
+
+        if augment:
+            self.load_size = size * 2
+            self.transform = A.Compose([A.HorizontalFlip(p=0.5), A.RandomCrop(size, size)])
+        else:
+            self.load_size = size
+            self.transform = None
 
         img_dir = root / "images" / split
         ann_dir = root / "annotations" / split
         self.imgs = sorted(img_dir.glob("*.jpg"))
         self.anns = [ann_dir / (p.stem + ".png") for p in self.imgs]
+
         assert len(self.imgs) > 0, f"No images in {img_dir}"
+        log.info(f"ADE20k {split}: {len(self.imgs)} images, size={size}, augment={augment}")
 
     def __len__(self) -> int:
         return len(self.imgs)
