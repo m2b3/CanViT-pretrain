@@ -16,7 +16,12 @@ def _make_tiny_model(device: torch.device) -> CanViTForPretraining:
 
     backbone = DINOv3Backbone(dinov3_vits16(pretrained=False).to(device))
     cfg = CanViTForPretrainingConfig(teacher_dim=384)
-    return CanViTForPretraining(backbone=backbone, cfg=cfg).to(device)
+    return CanViTForPretraining(
+        backbone=backbone,
+        cfg=cfg,
+        backbone_name="dinov3_vits16",
+        grid_sizes=[8, 16, 32],
+    ).to(device)
 
 
 def test_save_load_roundtrip() -> None:
