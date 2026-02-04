@@ -18,11 +18,8 @@ from pathlib import Path
 import comet_ml
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import tyro
-from canvit import CanViTForPretrainingHFHub, sample_at_viewpoint
-from canvit.backbone.dinov3 import DINOv3Backbone
-from canvit_utils.policies import random_viewpoints
+from canvit import CanViTForPretrainingHFHub
 from canvit_utils.teacher import load_teacher
 from dinov3.eval.segmentation.schedulers import WarmupOneCycleLR
 from torch import Tensor
@@ -34,9 +31,10 @@ from tqdm import tqdm
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset
 from canvit_eval.ade20k.probe import ProbeHead
 from canvit_eval.ade20k.viz import log_viz
+from canvit_eval.utils import make_viewpoints
 
 from .config import STATIC_FEATURES, Config, FeatureType
-from .features import ExtractedFeatures
+from .features import ExtractedFeatures, extract_features
 from .loss import ce_loss, focal_loss, upsample_preds
 from .state import ProbeState
 
@@ -71,66 +69,6 @@ def _save_checkpoint(path: Path, probes: dict[FeatureType, ProbeState], step: in
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(data, path)
     log.info(f"Saved checkpoint: {path} ({path.stat().st_size / 1e6:.1f} MB)")
-
-
-def _extract_features(
-    *,
-    model: CanViTForPretrainingHFHub,
-    teacher: DINOv3Backbone,
-    images: Tensor,
-    n_timesteps: int,
-    canvas_grid: int,
-    glimpse_px: int,
-    device: torch.device,
-    min_vp_scale: float,
-    max_vp_scale: float,
-    start_with_full_scene: bool,
-    compute_teacher_full: bool,
-    need_canvit: bool,
-) -> ExtractedFeatures:
-    """Extract features for all timesteps using random viewpoints."""
-    B = images.shape[0]
-    hidden_list: list[Tensor] = []
-    predicted_list: list[Tensor] = []
-
-    # Static: teacher on downscaled image (glimpse resolution)
-    glimpse_grid = glimpse_px // teacher.patch_size_px
-    sz = glimpse_grid * teacher.patch_size_px
-    small = F.interpolate(images, size=(sz, sz), mode="bilinear", align_corners=False)
-    teacher_glimpse = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
-
-    # Static: teacher on full image (expensive, optional)
-    teacher_full: Tensor | None = None
-    if compute_teacher_full:
-        teacher_full = teacher.forward_norm_features(images).patches.view(B, canvas_grid, canvas_grid, -1)
-
-    # Skip CanViT loop if only static features needed
-    if need_canvit:
-        state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
-        viewpoints = random_viewpoints(
-            B, device, n_timesteps,
-            min_scale=min_vp_scale,
-            max_scale=max_vp_scale,
-            start_with_full_scene=start_with_full_scene,
-        )
-
-        for vp in viewpoints:
-            glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_px)
-            out = model(glimpse=glimpse, state=state, viewpoint=vp)
-            state = out.state
-
-            hidden = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
-            predicted = model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
-
-            hidden_list.append(hidden)
-            predicted_list.append(predicted)
-
-    return ExtractedFeatures(
-        hidden=hidden_list,
-        predicted_norm=predicted_list,
-        teacher_glimpse=teacher_glimpse,
-        teacher_full=teacher_full,
-    )
 
 
 def train(cfg: Config) -> None:
@@ -244,13 +182,17 @@ def train(cfg: Config) -> None:
             with torch.no_grad():
                 for vi, vm in val_loader:
                     vi, vm = vi.to(device), vm.to(device)
+                    B = vi.shape[0]
+                    viewpoints = make_viewpoints(
+                        "random", B, device, cfg.n_timesteps,
+                        min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
+                        start_with_full_scene=True,  # Val ALWAYS starts full
+                    ) if need_canvit else None
                     with amp_ctx:
-                        val_feats = _extract_features(
-                            model=model, teacher=teacher, images=vi, n_timesteps=cfg.n_timesteps,
-                            canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, device=device,
-                            min_vp_scale=cfg.min_vp_scale, max_vp_scale=cfg.max_vp_scale,
-                            start_with_full_scene=True,  # Val ALWAYS starts full
-                            compute_teacher_full=compute_teacher_full, need_canvit=need_canvit,
+                        val_feats = extract_features(
+                            model=model, teacher=teacher, images=vi,
+                            canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px,
+                            viewpoints=viewpoints, compute_teacher_full=compute_teacher_full,
                         )
                     if first_val_batch:
                         val_viz_batch = (vi, vm, val_feats)
@@ -291,13 +233,17 @@ def train(cfg: Config) -> None:
         for p in probes.values():
             p.head.train()
 
+        B = images.shape[0]
+        viewpoints = make_viewpoints(
+            "random", B, device, cfg.n_timesteps,
+            min_scale=cfg.min_vp_scale, max_scale=cfg.max_vp_scale,
+            start_with_full_scene=cfg.train_start_full,
+        ) if need_canvit else None
         with amp_ctx:
-            feats = _extract_features(
-                model=model, teacher=teacher, images=images, n_timesteps=cfg.n_timesteps,
-                canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, device=device,
-                min_vp_scale=cfg.min_vp_scale, max_vp_scale=cfg.max_vp_scale,
-                start_with_full_scene=cfg.train_start_full,
-                compute_teacher_full=compute_teacher_full, need_canvit=need_canvit,
+            feats = extract_features(
+                model=model, teacher=teacher, images=images,
+                canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px,
+                viewpoints=viewpoints, compute_teacher_full=compute_teacher_full,
             )
 
         for feat_type in cfg.features:

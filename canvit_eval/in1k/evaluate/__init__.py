@@ -10,17 +10,14 @@ Design:
 import json
 import logging
 import os
-import subprocess
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
 import tyro
 from canvit import CanViTForPretrainingHFHub, Viewpoint, sample_at_viewpoint
-from canvit_utils.policies import coarse_to_fine_viewpoints, random_viewpoints
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
@@ -30,9 +27,9 @@ from torchvision import transforms
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
-log = logging.getLogger(__name__)
+from canvit_eval.utils import PolicyName, collect_metadata, make_viewpoints
 
-PolicyName = Literal["coarse_to_fine", "random"]
+log = logging.getLogger(__name__)
 TOP_K = 5
 
 
@@ -72,50 +69,12 @@ class Config:
 # === Pure helpers ===
 
 
-def get_git_commit() -> str | None:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
-        ).strip()
-    except Exception:
-        return None
-
-
-def collect_metadata(cfg: Config) -> dict:
-    return {
-        "config": asdict(cfg),
-        "timestamp": datetime.now(UTC).isoformat(),
-        "git_commit": get_git_commit(),
-        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
-        "hostname": os.environ.get("HOSTNAME") or os.environ.get("SLURMD_NODENAME"),
-        "cuda_device": torch.cuda.get_device_name() if torch.cuda.is_available() else None,
-    }
-
-
 def load_probe(repo: str, device: torch.device) -> nn.Linear:
     with open(hf_hub_download(repo, "config.json")) as f:
         probe_cfg = json.load(f)
     probe = nn.Linear(probe_cfg["in_features"], probe_cfg["out_features"])
     probe.load_state_dict(load_file(hf_hub_download(repo, "model.safetensors")))
     return probe.to(device).eval()
-
-
-def make_viewpoints(
-    policy: PolicyName,
-    batch_size: int,
-    device: torch.device,
-    n_viewpoints: int,
-    **kwargs,
-) -> list[Viewpoint]:
-    """Create viewpoints for given policy.
-
-    For 'random' policy, kwargs are passed to random_viewpoints (min_scale, max_scale, start_with_full_scene).
-    """
-    if policy == "coarse_to_fine":
-        return coarse_to_fine_viewpoints(batch_size, device, n_viewpoints)
-    if policy == "random":
-        return random_viewpoints(batch_size, device, n_viewpoints, **kwargs)
-    raise ValueError(f"Unknown policy: {policy}")
 
 
 def make_transform(img_size: int) -> transforms.Compose:
