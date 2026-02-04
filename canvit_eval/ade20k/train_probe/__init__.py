@@ -7,6 +7,7 @@ Trains segmentation probes on frozen CanViT features:
 """
 
 import logging
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -185,6 +186,7 @@ def train(cfg: Config) -> None:
 
         # === Validation ===
         if step % cfg.val_every == 0:
+            val_start = time.perf_counter()
             for p in probes.values():
                 p.head.eval()
             for feat in cfg.features:
@@ -229,6 +231,10 @@ def train(cfg: Config) -> None:
             if any_improved and cfg.probe_ckpt_dir:
                 _save_checkpoint(cfg.probe_ckpt_dir / "best.pt", probes, step)
 
+            val_time = time.perf_counter() - val_start
+            log.info(f"Step {step}: validation took {val_time:.1f}s")
+            exp.log_metric("timing/val_seconds", val_time, step=step)
+
         # === Training step ===
         for p in probes.values():
             p.head.train()
@@ -263,10 +269,14 @@ def train(cfg: Config) -> None:
 
         # === Visualization (before increment, like val) ===
         if step % cfg.viz_every == 0:
+            viz_start = time.perf_counter()
             for p in probes.values():
                 p.head.eval()
             with torch.no_grad():
                 log_viz(exp, step, probes, feats, images, masks, cfg.viz_samples, cfg.n_timesteps)
+            viz_time = time.perf_counter() - viz_start
+            log.info(f"Step {step}: viz took {viz_time:.1f}s")
+            exp.log_metric("timing/viz_seconds", viz_time, step=step)
 
         step += 1
         pbar.update(1)
