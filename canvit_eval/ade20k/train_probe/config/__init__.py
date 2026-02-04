@@ -19,7 +19,6 @@ class Config:
     ade20k_root: Path
     model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
     features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"])
-    compute_teacher_full: bool = False  # Expensive: runs teacher on full 512px image
     n_timesteps: int = 10
     image_size: int = 512
     glimpse_px: int = 128

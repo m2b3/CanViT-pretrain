@@ -170,9 +170,7 @@ def train(cfg: Config) -> None:
         "hidden": True, "predicted_norm": False, "teacher_glimpse": False, "teacher_full": False,
     }
 
-    # Validate: teacher_full requires compute_teacher_full=True
-    if "teacher_full" in cfg.features and not cfg.compute_teacher_full:
-        raise ValueError("teacher_full in features requires compute_teacher_full=True")
+    compute_teacher_full = "teacher_full" in cfg.features
     probes: dict[FeatureType, ProbeState] = {
         feat: _make_probe(feat, dims[feat], cfg, device, use_ln=needs_ln[feat]) for feat in cfg.features
     }
@@ -248,7 +246,7 @@ def train(cfg: Config) -> None:
                             canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, device=device,
                             min_vp_scale=cfg.min_vp_scale, max_vp_scale=cfg.max_vp_scale,
                             start_with_full_scene=True,  # Val ALWAYS starts full
-                            compute_teacher_full=cfg.compute_teacher_full,
+                            compute_teacher_full=compute_teacher_full,
                         )
                     if first_val_batch:
                         val_viz_batch = (vi, vm, val_feats)
@@ -295,7 +293,7 @@ def train(cfg: Config) -> None:
                 canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, device=device,
                 min_vp_scale=cfg.min_vp_scale, max_vp_scale=cfg.max_vp_scale,
                 start_with_full_scene=cfg.train_start_full,
-                compute_teacher_full=cfg.compute_teacher_full,
+                compute_teacher_full=compute_teacher_full,
             )
 
         for feat_type in cfg.features:
