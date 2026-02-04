@@ -28,7 +28,9 @@ from torch.utils.data import DataLoader
 from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
 
-from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset
+from dinov3.eval.segmentation.transforms import make_segmentation_train_transforms
+
+from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transform
 from canvit_eval.ade20k.probe import ProbeHead
 from canvit_eval.ade20k.viz import log_viz
 from canvit_eval.utils import make_viewpoints
@@ -122,21 +124,21 @@ def train(cfg: Config) -> None:
         for feat in cfg.features
     }
 
-    # Data
-    train_ds = ADE20kDataset(
-        root=cfg.ade20k_root,
-        split="training",
-        size=cfg.image_size,
-        augment=True,
-        aug_scale_range=cfg.aug_scale_range,
-        aug_flip_prob=cfg.aug_flip_prob,
+    # Data transforms
+    _train_aug = make_segmentation_train_transforms(
+        img_size=cfg.image_size,
+        random_img_size_ratio_range=list(cfg.aug_scale_range),
+        crop_size=(cfg.image_size, cfg.image_size),
+        flip_prob=cfg.aug_flip_prob,
+        reduce_zero_label=True,
     )
-    val_ds = ADE20kDataset(
-        root=cfg.ade20k_root,
-        split="validation",
-        size=cfg.image_size,
-        augment=False,
-    )
+
+    def train_transform(img, mask):
+        img_t, mask_t = _train_aug(img, mask)
+        return img_t, mask_t.squeeze(0)  # (1, H, W) → (H, W)
+
+    train_ds = ADE20kDataset(root=cfg.ade20k_root, split="training", transform=train_transform)
+    val_ds = ADE20kDataset(root=cfg.ade20k_root, split="validation", transform=make_val_transform(cfg.image_size, "center_crop"))
     train_loader = DataLoader(
         train_ds, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True
     )

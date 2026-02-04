@@ -32,7 +32,6 @@ if [ ! -d "$ADE20K_ROOT" ]; then
     unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
 fi
 
-log "Running probe training..."
-exec uv run python -m canvit_eval.ade20k \
-    --ade20k-root "$ADE20K_ROOT" \
-    "$@"
+log "Running..."
+exec uv run python -m canvit_eval.ade20k "$@" \
+    --ade20k-root "$ADE20K_ROOT"
