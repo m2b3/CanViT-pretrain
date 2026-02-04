@@ -78,7 +78,8 @@ class Config:
     crop_scale_min: float = 0.8
     image_resolution: int = 512
     # Logging
-    comet_project: str = "avp-vit-scene-match"
+    comet_project: str = "canvit-pretrain"
+    comet_workspace: str = "m2b3-ava"
     log_every: int = 20
     val_every: int = 250
     n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)

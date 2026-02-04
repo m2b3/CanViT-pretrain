@@ -186,6 +186,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         exp = comet_ml.start(
             experiment_key=prev_comet_id,
             project_name=cfg.comet_project,
+            workspace=cfg.comet_workspace,
             experiment_config=comet_cfg,
         )
     else:
@@ -195,6 +196,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             log.info("Creating NEW Comet experiment")
         exp = comet_ml.start(
             project_name=cfg.comet_project,
+            workspace=cfg.comet_workspace,
             experiment_config=comet_cfg,
         )
 
