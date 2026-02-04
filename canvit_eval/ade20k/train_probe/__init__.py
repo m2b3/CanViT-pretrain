@@ -86,12 +86,12 @@ def _extract_features(
     max_vp_scale: float,
     start_with_full_scene: bool,
     compute_teacher_full: bool,
+    need_canvit: bool,
 ) -> ExtractedFeatures:
     """Extract features for all timesteps using random viewpoints."""
     B = images.shape[0]
     hidden_list: list[Tensor] = []
     predicted_list: list[Tensor] = []
-    state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
 
     # Static: teacher on downscaled image (glimpse resolution)
     glimpse_grid = glimpse_px // teacher.patch_size_px
@@ -104,23 +104,26 @@ def _extract_features(
     if compute_teacher_full:
         teacher_full = teacher.forward_norm_features(images).patches.view(B, canvas_grid, canvas_grid, -1)
 
-    viewpoints = random_viewpoints(
-        B, device, n_timesteps,
-        min_scale=min_vp_scale,
-        max_scale=max_vp_scale,
-        start_with_full_scene=start_with_full_scene,
-    )
+    # Skip CanViT loop if only static features needed
+    if need_canvit:
+        state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid)
+        viewpoints = random_viewpoints(
+            B, device, n_timesteps,
+            min_scale=min_vp_scale,
+            max_scale=max_vp_scale,
+            start_with_full_scene=start_with_full_scene,
+        )
 
-    for vp in viewpoints:
-        glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_px)
-        out = model(glimpse=glimpse, state=state, viewpoint=vp)
-        state = out.state
+        for vp in viewpoints:
+            glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_px)
+            out = model(glimpse=glimpse, state=state, viewpoint=vp)
+            state = out.state
 
-        hidden = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
-        predicted = model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+            hidden = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
+            predicted = model.predict_teacher_scene(state.canvas).view(B, canvas_grid, canvas_grid, -1)
 
-        hidden_list.append(hidden)
-        predicted_list.append(predicted)
+            hidden_list.append(hidden)
+            predicted_list.append(predicted)
 
     return ExtractedFeatures(
         hidden=hidden_list,
@@ -171,6 +174,7 @@ def train(cfg: Config) -> None:
     }
 
     compute_teacher_full = "teacher_full" in cfg.features
+    need_canvit = any(f not in STATIC_FEATURES for f in cfg.features)
     probes: dict[FeatureType, ProbeState] = {
         feat: _make_probe(feat, dims[feat], cfg, device, use_ln=needs_ln[feat]) for feat in cfg.features
     }
@@ -246,7 +250,7 @@ def train(cfg: Config) -> None:
                             canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, device=device,
                             min_vp_scale=cfg.min_vp_scale, max_vp_scale=cfg.max_vp_scale,
                             start_with_full_scene=True,  # Val ALWAYS starts full
-                            compute_teacher_full=compute_teacher_full,
+                            compute_teacher_full=compute_teacher_full, need_canvit=need_canvit,
                         )
                     if first_val_batch:
                         val_viz_batch = (vi, vm, val_feats)
@@ -293,7 +297,7 @@ def train(cfg: Config) -> None:
                 canvas_grid=canvas_grid, glimpse_px=cfg.glimpse_px, device=device,
                 min_vp_scale=cfg.min_vp_scale, max_vp_scale=cfg.max_vp_scale,
                 start_with_full_scene=cfg.train_start_full,
-                compute_teacher_full=compute_teacher_full,
+                compute_teacher_full=compute_teacher_full, need_canvit=need_canvit,
             )
 
         for feat_type in cfg.features:
