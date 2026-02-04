@@ -450,7 +450,7 @@ dependencies = [
 [[package]]
 name = "dinov3-in1k-probes"
 version = "0.1.0"
-source = { git = "https://github.com/yberreby/dinov3-in1k-probes.git#63ead66a041398413b7d1afcff6df695b0695178" }
+source = { git = "https://github.com/yberreby/dinov3-in1k-probes.git#77712710cd52c88b4a9d93bbeb8d3ed9ffd31b05" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },
