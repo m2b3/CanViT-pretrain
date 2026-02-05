@@ -1,23 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=canvit-in1k-sweep
+#SBATCH --job-name=in1k-policy
 #SBATCH --account=rrg-skrishna_gpu
 #SBATCH --time=00:15:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --output=logs/eval-in1k-sweep-%A_%a.out
-#SBATCH --error=logs/eval-in1k-sweep-%A_%a.err
+#SBATCH --output=logs/in1k-policy-%A_%a.out
+#SBATCH --error=logs/in1k-policy-%A_%a.err
 
-# IN1k evaluation sweep: N rollouts of a given policy
+# IN1k evaluation: run a policy with array jobs for variance
 #
 # Usage:
-#   sbatch --array=0-1 slurm/eval_in1k_sweep.sbatch c2f
-#   sbatch --array=0-1 slurm/eval_in1k_sweep.sbatch fullrand
-#   sbatch --array=0-1 slurm/eval_in1k_sweep.sbatch iid
+#   sbatch --array=0-4 slurm/eval_in1k_policy.sbatch c2f
+#   sbatch --array=0-4 slurm/eval_in1k_policy.sbatch fullrand
+#   sbatch --array=0-4 slurm/eval_in1k_policy.sbatch iid
 
 set -eux
 
-NAME="${1:?Usage: sbatch --array=0-N eval_in1k_sweep.sbatch <c2f|fullrand|iid>}"
+NAME="${1:?Usage: sbatch --array=0-N eval_in1k_policy.sbatch <c2f|fullrand|iid>}"
 
 cd ~/scratch/CanViT-train
 source slurm/env.sh
@@ -41,7 +41,7 @@ case "$NAME" in
         ;;
 esac
 
-# Build output path: outputs/in1k_eval/{policy}_{timestamp}_{git}_{jobid}_{taskid}.pt
+# Output path
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 GIT_SHORT=$(git rev-parse --short HEAD)
 OUTPUT_DIR="outputs/in1k_eval"
