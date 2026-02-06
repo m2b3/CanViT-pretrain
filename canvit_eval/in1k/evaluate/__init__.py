@@ -51,7 +51,7 @@ class Config:
     model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
     probe_repo: str = "yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe"
     policy: PolicyName = "coarse_to_fine"
-    n_viewpoints: int = 10
+    n_viewpoints: int = 16
     canvas_grid: int = 32
     glimpse_px: int = 128
     batch_size: int = 64

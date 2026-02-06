@@ -12,7 +12,7 @@ def test_config_requires_paths() -> None:
         model_repo="canvit/model",
         probe_repo="user/probe",
     )
-    assert cfg.n_viewpoints == 10
+    assert cfg.n_viewpoints == 16
     assert cfg.canvas_grid == 32
 
 
