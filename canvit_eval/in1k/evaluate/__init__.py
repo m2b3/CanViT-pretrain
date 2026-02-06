@@ -244,6 +244,8 @@ def evaluate(cfg: Config) -> Path:
     # Dataset
     patch_size = model.backbone.patch_size_px
     img_size = cfg.canvas_grid * patch_size
+    # CRITICAL: must use the canonical preprocess() (Resize shortest edge + CenterCrop).
+    # A previous bug used Resize((H,W)) which squishes non-square images and costs ~2% accuracy.
     transform = preprocess(img_size)
     dataset = ImageFolder(str(cfg.val_dir), transform=transform)
     loader = DataLoader(
