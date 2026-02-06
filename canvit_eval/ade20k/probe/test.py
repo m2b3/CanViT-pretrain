@@ -32,6 +32,3 @@ def test_predict_no_dropout() -> None:
     assert torch.allclose(out1, out2)
 
 
-def test_output_shape() -> None:
-    """Backward compat alias."""
-    test_forward_shape()
