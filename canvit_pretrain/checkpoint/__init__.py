@@ -28,27 +28,36 @@ BACKBONE_NAME_MAP: dict[str, str] = {
 
 
 class CheckpointData(TypedDict):
-    """Checkpoint structure. All fields required for model reconstruction."""
+    """Checkpoint structure. All fields present; None where not applicable."""
 
+    # --- Model reconstruction (required) ---
     state_dict: dict[str, Tensor]
     model_config: dict
-    teacher_dim: int
     backbone: str
+    grid_sizes: list[int]
+    teacher_dim: int
+    teacher_repo_id: str
+
+    # --- Training context ---
+    glimpse_grid_size: int
+    image_resolution: int
+    step: int | None
+    train_loss: float | None
+
+    # --- Normalizer stats (required for correct inference) ---
+    scene_norm_state: dict[str, Tensor] | None
+    cls_norm_state: dict[str, Tensor] | None
+
+    # --- Optimizer/scheduler state for resuming training ---
+    optimizer_state: dict | None
+    scheduler_state: dict | None
+    training_config_history: dict[str, dict] | None
+
+    # --- Provenance ---
     timestamp: str
     git_commit: str | None
     git_dirty: bool
-    step: int | None
-    train_loss: float | None
     comet_id: str | None
-    # Normalizer stats (required for correct inference)
-    scene_norm_state: dict[str, Tensor] | None
-    cls_norm_state: dict[str, Tensor] | None
-    # Optimizer/scheduler state for resuming training
-    optimizer_state: dict | None
-    scheduler_state: dict | None
-    # Training config history: {timestamp: config_dict} - tracks config across resumes
-    training_config_history: dict[str, dict] | None
-    # Environment metadata for debugging
     hostname: str | None
     slurm_job_id: str | None
     slurm_array_task_id: str | None
@@ -154,6 +163,9 @@ def save(
     model: CanViTForPretraining,
     backbone: str,
     *,
+    teacher_repo_id: str,
+    glimpse_grid_size: int,
+    image_resolution: int,
     step: int | None = None,
     train_loss: float | None = None,
     comet_id: str | None = None,
@@ -174,19 +186,23 @@ def save(
     data: CheckpointData = {
         "state_dict": model.state_dict(),
         "model_config": asdict(model.cfg),
-        "teacher_dim": model.cfg.teacher_dim,
         "backbone": backbone,
-        "timestamp": datetime.now(UTC).isoformat(),
-        "git_commit": git_commit,
-        "git_dirty": git_dirty,
+        "grid_sizes": model.grid_sizes,
+        "teacher_dim": model.cfg.teacher_dim,
+        "teacher_repo_id": teacher_repo_id,
+        "glimpse_grid_size": glimpse_grid_size,
+        "image_resolution": image_resolution,
         "step": step,
         "train_loss": train_loss,
-        "comet_id": comet_id,
         "scene_norm_state": scene_norm_state,
         "cls_norm_state": cls_norm_state,
         "optimizer_state": optimizer_state,
         "scheduler_state": scheduler_state,
         "training_config_history": training_config_history,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+        "comet_id": comet_id,
         "hostname": hostname,
         "slurm_job_id": slurm_job_id,
         "slurm_array_task_id": slurm_array_task_id,
@@ -197,7 +213,10 @@ def save(
     size_mb = path.stat().st_size / (1024 * 1024)
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
-    log.info(f"  backbone={backbone}, teacher_dim={model.cfg.teacher_dim}")
+    log.info(
+        f"  backbone={backbone}, grid_sizes={model.grid_sizes},"
+        f" teacher={teacher_repo_id}, glimpse={glimpse_grid_size}, res={image_resolution}px"
+    )
     if step is not None:
         log.info(f"  step={step}, train_loss={train_loss:.4e}" if train_loss else f"  step={step}")
     if git_commit:
@@ -205,62 +224,61 @@ def save(
 
 
 def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
-    """Load checkpoint data. Caller creates model with returned config."""
+    """Load checkpoint data. All fields are required — no silent fallbacks."""
     log.info(f"Loading checkpoint: {path}")
-
     raw = torch.load(path, weights_only=False, map_location=device)
+
+    # Required model fields — fail loudly if missing
+    for key in ("state_dict", "model_config", "backbone", "grid_sizes", "teacher_dim", "teacher_repo_id"):
+        assert key in raw, f"Checkpoint {path.name} missing required field: {key!r}"
 
     data: CheckpointData = {
         "state_dict": _strip_orig_mod(raw["state_dict"]),
         "model_config": raw["model_config"],
-        "teacher_dim": raw["teacher_dim"],
         "backbone": _map_backbone_name(raw["backbone"]),
-        "timestamp": raw.get("timestamp", "unknown"),
-        "git_commit": raw.get("git_commit"),
-        "git_dirty": raw.get("git_dirty", False),
-        "step": raw.get("step"),
-        "train_loss": raw.get("train_loss"),
-        "comet_id": raw.get("comet_id"),
-        "scene_norm_state": raw.get("scene_norm_state"),
-        "cls_norm_state": raw.get("cls_norm_state"),
-        "optimizer_state": raw.get("optimizer_state"),
-        "scheduler_state": raw.get("scheduler_state"),
-        "training_config_history": raw.get("training_config_history"),
-        "hostname": raw.get("hostname"),
-        "slurm_job_id": raw.get("slurm_job_id"),
-        "slurm_array_task_id": raw.get("slurm_array_task_id"),
-        "cmdline": raw.get("cmdline"),
+        "grid_sizes": raw["grid_sizes"],
+        "teacher_dim": raw["teacher_dim"],
+        "teacher_repo_id": raw["teacher_repo_id"],
+        "glimpse_grid_size": raw["glimpse_grid_size"],
+        "image_resolution": raw["image_resolution"],
+        "step": raw["step"],
+        "train_loss": raw["train_loss"],
+        "scene_norm_state": raw["scene_norm_state"],
+        "cls_norm_state": raw["cls_norm_state"],
+        "optimizer_state": raw["optimizer_state"],
+        "scheduler_state": raw["scheduler_state"],
+        "training_config_history": raw["training_config_history"],
+        "timestamp": raw["timestamp"],
+        "git_commit": raw["git_commit"],
+        "git_dirty": raw["git_dirty"],
+        "comet_id": raw["comet_id"],
+        "hostname": raw["hostname"],
+        "slurm_job_id": raw["slurm_job_id"],
+        "slurm_array_task_id": raw["slurm_array_task_id"],
+        "cmdline": raw["cmdline"],
     }
 
-    log.info(f"  backbone={data['backbone']}, teacher_dim={data['teacher_dim']}")
+    log.info(
+        f"  backbone={data['backbone']}, grid_sizes={data['grid_sizes']},"
+        f" teacher={data['teacher_repo_id']}, res={data['image_resolution']}px"
+    )
     if data["step"] is not None:
         step = data["step"]
         msg = f"  step={step}, train_loss={data['train_loss']:.4e}" if data["train_loss"] else f"  step={step}"
         log.info(msg)
     if data["git_commit"]:
         log.info(f"  git={data['git_commit'][:8]}{'*' if data['git_dirty'] else ''}")
-    if data["comet_id"]:
-        log.info(f"  comet={data['comet_id']}")
-    if data["hostname"]:
-        log.info(f"  host={data['hostname']}")
 
     return data
 
 
 def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = False) -> CanViTForPretraining:
-    """Load CanViTForPretraining from checkpoint.
-
-    Handles old checkpoints with legacy backbone names (dinov3_vitb16 → canvitb16).
-    Strips legacy policy.* keys from state_dict.
-    """
+    """Load CanViTForPretraining from checkpoint."""
     from canvit import create_backbone
 
     ckpt = load(path, device)
 
-    for key in ("backbone", "model_config", "teacher_dim", "state_dict"):
-        assert key in ckpt, f"Checkpoint missing required field: {key!r}"
-
-    backbone_name = ckpt["backbone"]  # already mapped by load()
+    backbone_name = ckpt["backbone"]
     backbone = create_backbone(backbone_name)
 
     model_config = ckpt["model_config"]
@@ -272,7 +290,7 @@ def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = Fa
         backbone=backbone,
         cfg=cfg,
         backbone_name=backbone_name,
-        grid_sizes=[32],
+        grid_sizes=ckpt["grid_sizes"],
     )
 
     # Strip legacy policy keys and filter shape mismatches

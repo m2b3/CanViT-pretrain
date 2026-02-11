@@ -9,6 +9,8 @@ from canvit import create_backbone
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 from canvit_pretrain.checkpoint import CheckpointData, load, save
 
+_TEACHER_REPO = "facebook/dinov3-vits16-pretrain"
+
 
 def _make_tiny_model(device: torch.device) -> CanViTForPretraining:
     """Create minimal CanViTForPretraining for testing (no pretrained weights needed)."""
@@ -28,12 +30,20 @@ def test_save_load_roundtrip() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "test.pt"
-        save(path, model, backbone="canvits16", step=100, train_loss=0.5)
+        save(
+            path, model, backbone="canvits16",
+            teacher_repo_id=_TEACHER_REPO, glimpse_grid_size=8, image_resolution=512,
+            step=100, train_loss=0.5,
+        )
 
         data = load(path, device)
 
         assert data["backbone"] == "canvits16"
+        assert data["grid_sizes"] == [8, 16, 32]
         assert data["teacher_dim"] == 384
+        assert data["teacher_repo_id"] == _TEACHER_REPO
+        assert data["glimpse_grid_size"] == 8
+        assert data["image_resolution"] == 512
         assert data["step"] == 100
         assert data["train_loss"] == 0.5
 
@@ -55,19 +65,23 @@ def test_strips_orig_mod() -> None:
         raw: CheckpointData = {
             "state_dict": state_dict,
             "model_config": {},
-            "teacher_dim": 384,
             "backbone": "canvits16",
-            "timestamp": "test",
-            "git_commit": None,
-            "git_dirty": False,
+            "grid_sizes": [8, 16, 32],
+            "teacher_dim": 384,
+            "teacher_repo_id": _TEACHER_REPO,
+            "glimpse_grid_size": 8,
+            "image_resolution": 512,
             "step": None,
             "train_loss": None,
-            "comet_id": None,
             "scene_norm_state": None,
             "cls_norm_state": None,
             "optimizer_state": None,
             "scheduler_state": None,
             "training_config_history": None,
+            "timestamp": "test",
+            "git_commit": None,
+            "git_dirty": False,
+            "comet_id": None,
             "hostname": None,
             "slurm_job_id": None,
             "slurm_array_task_id": None,

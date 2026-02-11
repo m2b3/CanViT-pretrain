@@ -451,6 +451,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             ckpt_path = make_ckpt_path(step)
             save_checkpoint(
                 ckpt_path, model, cfg.backbone_name,
+                teacher_repo_id=cfg.teacher_repo_id,
+                glimpse_grid_size=cfg.glimpse_grid_size,
+                image_resolution=cfg.image_resolution,
                 step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
                 comet_id=exp.get_key(),
                 scene_norm_state=scene_norm.state_dict(),
@@ -575,6 +578,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         ckpt_path = make_ckpt_path(end_step)
         save_checkpoint(
             ckpt_path, model, cfg.backbone_name,
+            teacher_repo_id=cfg.teacher_repo_id,
+            glimpse_grid_size=cfg.glimpse_grid_size,
+            image_resolution=cfg.image_resolution,
             step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
             comet_id=exp.get_key(),
             scene_norm_state=scene_norm.state_dict(),
