@@ -11,7 +11,6 @@ import torch
 import torch.nn.functional as F
 from canvit import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 from torch import Tensor
-from torch.utils.checkpoint import checkpoint
 
 from canvit_pretrain import CanViTForPretraining
 
@@ -108,7 +107,6 @@ def training_step(
     continue_prob: float,
     min_viewpoint_scale: float,
     amp_ctx: AbstractContextManager,
-    use_checkpointing: bool,
     collect_viz: bool = False,
 ) -> StepMetrics:
     """Training with truncated BPTT and independent branches.
@@ -152,21 +150,9 @@ def training_step(
     def to_canvit_vp(vp: NamedViewpoint) -> Viewpoint:
         return Viewpoint(centers=vp.centers, scales=vp.scales)
 
-    def forward_glimpse(*, state: RecurrentState, vp: Viewpoint, use_ckpt: bool) -> StepOutput:
+    def forward_glimpse(*, state: RecurrentState, vp: Viewpoint) -> StepOutput:
         glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_size_px)
-        if use_ckpt:
-            out = checkpoint(
-                lambda g, cv, cl, ctr, sc: model.forward(
-                    glimpse=g,
-                    state=RecurrentState(canvas=cv, recurrent_cls=cl),
-                    viewpoint=Viewpoint(centers=ctr, scales=sc),
-                ),
-                glimpse, state.canvas, state.recurrent_cls, vp.centers, vp.scales,
-                use_reentrant=False,
-            )
-            assert isinstance(out, CanViTOutput)
-            return StepOutput(out=out, glimpse=glimpse)
-        out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
+        out = model(glimpse=glimpse, state=state, viewpoint=vp)
         return StepOutput(out=out, glimpse=glimpse)
 
     def compute_loss(out: CanViTOutput) -> LossOutput:
@@ -218,7 +204,7 @@ def training_step(
         with amp_ctx:
             vp0_named = make_named_vp(t0_type)
             vp0 = to_canvit_vp(vp0_named)
-            step_out = forward_glimpse(state=state_init, vp=vp0, use_ckpt=False)
+            step_out = forward_glimpse(state=state_init, vp=vp0)
             out, glimpse = step_out.out, step_out.glimpse
             L = compute_loss(out)
 
@@ -246,8 +232,7 @@ def training_step(
             vp = to_canvit_vp(vp_named)
 
             with amp_ctx:
-                use_ckpt = use_checkpointing and (t % 2 == 1)
-                step_out = forward_glimpse(state=chunk.state, vp=vp, use_ckpt=use_ckpt)
+                step_out = forward_glimpse(state=chunk.state, vp=vp)
                 out, glimpse = step_out.out, step_out.glimpse
                 L = compute_loss(out)
 

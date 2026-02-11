@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import subprocess
+import time
 import traceback
 from contextlib import nullcontext
 from datetime import UTC, datetime
@@ -442,6 +443,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 batch = load_train_batch()
 
             optimizer.zero_grad()
+            t_step_start = time.perf_counter()
 
             step_metrics = training_step(
                 model=model,
@@ -462,9 +464,12 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 continue_prob=cfg.continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 amp_ctx=amp_ctx,
-                use_checkpointing=cfg.use_checkpointing,
+
                 collect_viz=do_pca,
             )
+
+            if step == start_step:
+                log.info(f"First training_step took {time.perf_counter() - t_step_start:.1f}s (includes compile)")
 
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
             optimizer.step()

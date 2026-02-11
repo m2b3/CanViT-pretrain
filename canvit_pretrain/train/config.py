@@ -28,7 +28,6 @@ class Config:
     )
     # Glimpse/canvas sizes (runtime, not in model config)
     glimpse_grid_size: int = 8  # tokens per glimpse side
-    use_checkpointing: bool = False  # checkpoint odd steps in TBPTT chunks
     canvas_patch_grid_size: int = 32  # canvas spatial grid side length in tokens
     # Training
     batch_size: int = 64

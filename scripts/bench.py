@@ -374,10 +374,10 @@ def main(cfg: BenchConfig) -> None:
         return teacher.forward_norm_features(glimpse)
 
     def canvit_forward_fn() -> Any:
-        return model.forward(glimpse=glimpse, state=state, viewpoint=viewpoint)
+        return model(glimpse=glimpse, state=state, viewpoint=viewpoint)
 
     def canvit_full_fn() -> Any:
-        out = model.forward(glimpse=glimpse, state=state, viewpoint=viewpoint)
+        out = model(glimpse=glimpse, state=state, viewpoint=viewpoint)
         return model.predict_teacher_scene(out.state.canvas)
 
     benchmarks = [
