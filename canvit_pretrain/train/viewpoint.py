@@ -30,7 +30,6 @@ class ViewpointType(Enum):
 
     RANDOM = auto()
     FULL = auto()
-    POLICY = auto()
 
 
 class PixelBox(NamedTuple):

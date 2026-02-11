@@ -10,54 +10,6 @@ Usage:
     uv run python scripts/bench.py --no-compile                 # Compare eager vs compiled
     uv run python scripts/bench.py --time-budget-s 2            # Longer runs
 
-Design Decisions:
-
-1. CONFIG INHERITANCE (not hardcoding):
-   All config values (batch_size, glimpse_grid, canvas_grid, teacher_model)
-   default to None and inherit from TrainConfig() in __post_init__. This ensures
-   the benchmark uses THE SAME config as training - if training config changes,
-   benchmark automatically picks it up. Hardcoded values would drift silently.
-
-2. THROUGHPUT vs LATENCY SYNC STRATEGY:
-   - Throughput (default): Sync only at boundaries (before warmup, after all iters).
-     Per-iter sync would kill GPU async pipelining and give misleading results.
-     We only get accurate mean (total_time / n_iters), not individual iter times.
-
-   - Latency (--latency): Sync before AND after each iteration. This is correct
-     for latency measurement - in generation, you WAIT for each output before
-     proceeding. Gives accurate min/max/mean/std for individual iterations.
-
-3. TIME BUDGET (not fixed iter count):
-   Run each benchmark for N seconds (default 1.0s) rather than fixed iterations.
-   This keeps total wallclock predictable regardless of how fast/slow the model is.
-   Useful when iterating quickly and you might Ctrl-C.
-
-4. TQDM EVERYWHERE:
-   All loops (warmup and timed) have tqdm progress bars. Your wallclock time is
-   valuable - you should always see what's happening. Latency mode shows last_ms
-   in the progress bar for immediate feedback.
-
-5. OPTIONAL STATS (no lying to data structures):
-   BenchStats has Optional[float] for min/max/std. In throughput mode these are
-   None because we genuinely don't have per-iter times. Previous scripts would
-   set min=max=mean which is misleading.
-
-6. TRY-EXCEPT SAFETY:
-   Each benchmark is wrapped in try-except. If one fails (e.g., CUDAGraph
-   incompatibility during iteration), others still run. Useful when experimenting
-   with compile modes that might break.
-
-7. LOGGING FROM ACTUAL VALUES:
-   All torch options are stored in variables, then applied, then logged with
-   f-strings referencing those variables. This prevents the brittle pattern of:
-       torch.set_foo(True)
-       log.info("foo = True")  # Can go out of sync if you change the first line
-
-8. LATENCY BS=1 BY DEFINITION:
-   When --latency is passed, batch_size is FORCED to 1 in __post_init__.
-   Latency with BS>1 is meaningless - you're measuring something else.
-   This is not configurable to prevent user error.
-
 Target platforms: CUDA (primary), CPU, MPS (nice-to-have, may behave oddly).
 """
 
@@ -140,7 +92,7 @@ class BenchConfig:
     batch_size: int | None = None
     glimpse_grid: int | None = None
     canvas_grid: int | None = None
-    teacher_model: str | None = None
+    backbone_name: str | None = None
 
     # Model config - exposed for ablations
     model: CanViTForPretrainingConfig = field(default_factory=_default_model_config)
@@ -164,8 +116,8 @@ class BenchConfig:
             self.glimpse_grid = train_cfg.glimpse_grid_size
         if self.canvas_grid is None:
             self.canvas_grid = train_cfg.grid_size
-        if self.teacher_model is None:
-            self.teacher_model = train_cfg.teacher_model
+        if self.backbone_name is None:
+            self.backbone_name = train_cfg.backbone_name
 
         # Latency mode: BS=1 by DEFINITION
         if self.latency:
@@ -351,7 +303,7 @@ def main(cfg: BenchConfig) -> None:
     log.info(f"Batch size:   {cfg.batch_size}")
     log.info(f"Glimpse:      {cfg.glimpse_grid}x{cfg.glimpse_grid}")
     log.info(f"Canvas:       {cfg.canvas_grid}x{cfg.canvas_grid}")
-    log.info(f"Teacher:      {cfg.teacher_model}")
+    log.info(f"Backbone:     {cfg.backbone_name}")
     log.info(f"Time budget:  {cfg.time_budget_s}s per benchmark")
     log.info(f"Warmup:       {cfg.warmup_iters} iters")
     log.info(f"Compiled:     {not cfg.no_compile}")
@@ -361,20 +313,25 @@ def main(cfg: BenchConfig) -> None:
     console.rule("[bold]MODEL SETUP[/bold]")
 
     # These are guaranteed non-None after __post_init__
-    assert cfg.teacher_model is not None
+    assert cfg.backbone_name is not None
     assert cfg.batch_size is not None
     assert cfg.glimpse_grid is not None
     assert cfg.canvas_grid is not None
 
-    log.info("Creating teacher...")
-    teacher = create_backbone(cfg.teacher_model, pretrained=False).to(device).eval()
+    log.info("Creating teacher (ViT backbone for throughput comparison)...")
+    teacher = create_backbone(cfg.backbone_name).to(device).eval()
     log.info(f"  {teacher.n_blocks} blocks, dim={teacher.embed_dim}")
 
     log.info("Creating CanViT...")
-    backbone = create_backbone(cfg.teacher_model, pretrained=False)
+    backbone = create_backbone(cfg.backbone_name)
     # Update teacher_dim to match actual teacher (in case default 768 differs)
     cfg.model.teacher_dim = teacher.embed_dim
-    model = CanViTForPretraining(backbone=backbone, cfg=cfg.model, policy=None).to(device).eval()
+    model = CanViTForPretraining(
+        backbone=backbone,
+        cfg=cfg.model,
+        backbone_name=cfg.backbone_name,
+        grid_sizes=[cfg.canvas_grid],
+    ).to(device).eval()
     log.info(f"  canvas_dim={cfg.model.canvas_dim}, read_after={model.read_after_blocks}")
 
     # Log model config (highlight non-defaults, recurse into nested dataclasses)

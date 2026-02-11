@@ -130,17 +130,11 @@ def training_step(
     while random.random() < continue_prob:
         n_glimpses += chunk_size
 
-    has_policy = model.policy is not None
-
     # t1_schedule[t-1][branch_idx] = viewpoint type for timestep t, branch branch_idx
-    t1_schedule: list[list[ViewpointType]] = []
-    for _ in range(1, n_glimpses):
-        if has_policy:
-            types = [ViewpointType.RANDOM] * (n_branches // 2) + [ViewpointType.POLICY] * (n_branches - n_branches // 2)
-        else:
-            types = [ViewpointType.RANDOM] * n_branches
-        random.shuffle(types)
-        t1_schedule.append(types)
+    # t>=1 is always all-RANDOM
+    t1_schedule: list[list[ViewpointType]] = [
+        [ViewpointType.RANDOM] * n_branches for _ in range(1, n_glimpses)
+    ]
 
     full_metrics: list[BranchMetrics] = []
     random_metrics: list[BranchMetrics] = []
@@ -148,15 +142,12 @@ def training_step(
     # Viz collection for first branch only (when enabled)
     viz_data: TrainVizData | None = None
 
-    def make_named_vp(vp_type: ViewpointType, vpe: Tensor | None) -> NamedViewpoint:
+    def make_named_vp(vp_type: ViewpointType) -> NamedViewpoint:
         """Create a NamedViewpoint (has .name for viz, convertible to canvit Viewpoint)."""
         if vp_type == ViewpointType.RANDOM:
             return NamedViewpoint.random(batch_size=B, device=device, min_scale=min_viewpoint_scale)
-        if vp_type == ViewpointType.FULL:
-            return NamedViewpoint.full_scene(batch_size=B, device=device)
-        assert model.policy is not None and vpe is not None
-        p = model.policy(vpe)
-        return NamedViewpoint(name="policy", centers=p.position, scales=p.scale)
+        assert vp_type == ViewpointType.FULL
+        return NamedViewpoint.full_scene(batch_size=B, device=device)
 
     def to_canvit_vp(vp: NamedViewpoint) -> Viewpoint:
         return Viewpoint(centers=vp.centers, scales=vp.scales)
@@ -225,7 +216,7 @@ def training_step(
 
         # t0 forward
         with amp_ctx:
-            vp0_named = make_named_vp(t0_type, None)
+            vp0_named = make_named_vp(t0_type)
             vp0 = to_canvit_vp(vp0_named)
             step_out = forward_glimpse(state=state_init, vp=vp0, use_ckpt=False)
             out, glimpse = step_out.out, step_out.glimpse
@@ -251,7 +242,7 @@ def training_step(
         for t in range(1, n_glimpses):
             # t>=1: use pre-computed schedule (half RANDOM, half POLICY, shuffled)
             vp_type = t1_schedule[t - 1][branch_idx]
-            vp_named = make_named_vp(vp_type, chunk.vpe)
+            vp_named = make_named_vp(vp_type)
             vp = to_canvit_vp(vp_named)
 
             with amp_ctx:

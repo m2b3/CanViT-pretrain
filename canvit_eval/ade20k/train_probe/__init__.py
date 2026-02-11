@@ -22,18 +22,16 @@ import tyro
 from canvit import CanViTForPretrainingHFHub
 from canvit_utils.teacher import load_teacher
 from dinov3.eval.segmentation.schedulers import WarmupOneCycleLR
+from dinov3.eval.segmentation.transforms import make_segmentation_train_transforms
 from torch import Tensor
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from canvit_eval.metrics import IoUAccumulator
-
-from dinov3.eval.segmentation.transforms import make_segmentation_train_transforms
-
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, make_val_transform
 from canvit_eval.ade20k.probe import ProbeHead
 from canvit_eval.ade20k.viz import log_viz
+from canvit_eval.metrics import IoUAccumulator
 from canvit_eval.utils import make_viewpoints
 
 from .config import FEATURE_NEEDS_LN, STATIC_FEATURES, Config, FeatureType, get_feature_dims
@@ -119,7 +117,7 @@ def train(cfg: Config) -> None:
     log.info(f"Timesteps: {cfg.n_timesteps}")
     log.info(f"Viewpoint: scale=[{cfg.min_vp_scale}, {cfg.max_vp_scale}], train_start_full={cfg.train_start_full}")
     log.info(f"Training: BS={cfg.batch_size}, steps={cfg.max_steps}, LR={cfg.peak_lr}")
-    log.info(f"Val: resize_mode=squish")
+    log.info("Val: resize_mode=squish")
 
     # Model
     log.info("Loading model...")
@@ -128,8 +126,8 @@ def train(cfg: Config) -> None:
         p.requires_grad_(False)
     log.info(f"  params: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 
-    teacher = load_teacher(model.backbone_name, device)
-    log.info(f"  teacher: {model.backbone_name}, dim={teacher.embed_dim}")
+    teacher = load_teacher(cfg.teacher_repo, device)
+    log.info(f"  teacher: {cfg.teacher_repo}, dim={teacher.embed_dim}")
 
     patch_size = model.backbone.patch_size_px
     canvas_grid = cfg.image_size // patch_size

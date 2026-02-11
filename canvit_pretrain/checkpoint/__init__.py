@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
@@ -18,6 +18,13 @@ from torch import Tensor
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 
 log = logging.getLogger(__name__)
+
+# Old backbone names from pre-refactor checkpoints → new registry names
+BACKBONE_NAME_MAP: dict[str, str] = {
+    "dinov3_vits16": "canvits16",
+    "dinov3_vitb16": "canvitb16",
+    "dinov3_vitl16": "canvitl16",
+}
 
 
 class CheckpointData(TypedDict):
@@ -36,8 +43,6 @@ class CheckpointData(TypedDict):
     # Normalizer stats (required for correct inference)
     scene_norm_state: dict[str, Tensor] | None
     cls_norm_state: dict[str, Tensor] | None
-    # Policy config (None if no policy, or legacy checkpoint before policy support)
-    policy_config: dict | None
     # Optimizer/scheduler state for resuming training
     optimizer_state: dict | None
     scheduler_state: dict | None
@@ -136,6 +141,14 @@ def _strip_orig_mod(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
     return result
 
 
+def _map_backbone_name(name: str) -> str:
+    """Map old backbone names to new registry names for backward compat."""
+    mapped = BACKBONE_NAME_MAP.get(name, name)
+    if mapped != name:
+        log.info(f"Mapped backbone name: {name!r} -> {mapped!r}")
+    return mapped
+
+
 def save(
     path: Path,
     model: CanViTForPretraining,
@@ -154,16 +167,9 @@ def save(
 
     Uses atomic write (tmp file + rename) to prevent corruption.
     """
-    from canvit.policy import PolicyHead
-
     assert isinstance(model.cfg, CanViTForPretrainingConfig)
     git_commit, git_dirty = _git_info()
     hostname, slurm_job_id, slurm_array_task_id, cmdline = get_env_metadata()
-
-    # Save policy config if model has policy
-    policy_config: dict | None = None
-    if isinstance(model.policy, PolicyHead):
-        policy_config = asdict(model.policy.cfg)
 
     data: CheckpointData = {
         "state_dict": model.state_dict(),
@@ -178,7 +184,6 @@ def save(
         "comet_id": comet_id,
         "scene_norm_state": scene_norm_state,
         "cls_norm_state": cls_norm_state,
-        "policy_config": policy_config,
         "optimizer_state": optimizer_state,
         "scheduler_state": scheduler_state,
         "training_config_history": training_config_history,
@@ -192,7 +197,7 @@ def save(
     size_mb = path.stat().st_size / (1024 * 1024)
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
-    log.info(f"  backbone={backbone}, teacher_dim={model.cfg.teacher_dim}, policy={policy_config is not None}")
+    log.info(f"  backbone={backbone}, teacher_dim={model.cfg.teacher_dim}")
     if step is not None:
         log.info(f"  step={step}, train_loss={train_loss:.4e}" if train_loss else f"  step={step}")
     if git_commit:
@@ -209,7 +214,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "state_dict": _strip_orig_mod(raw["state_dict"]),
         "model_config": raw["model_config"],
         "teacher_dim": raw["teacher_dim"],
-        "backbone": raw["backbone"],
+        "backbone": _map_backbone_name(raw["backbone"]),
         "timestamp": raw.get("timestamp", "unknown"),
         "git_commit": raw.get("git_commit"),
         "git_dirty": raw.get("git_dirty", False),
@@ -218,7 +223,6 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "comet_id": raw.get("comet_id"),
         "scene_norm_state": raw.get("scene_norm_state"),
         "cls_norm_state": raw.get("cls_norm_state"),
-        "policy_config": raw.get("policy_config"),
         "optimizer_state": raw.get("optimizer_state"),
         "scheduler_state": raw.get("scheduler_state"),
         "training_config_history": raw.get("training_config_history"),
@@ -228,10 +232,11 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "cmdline": raw.get("cmdline"),
     }
 
-    has_policy = data["policy_config"] is not None
-    log.info(f"  backbone={data['backbone']}, teacher_dim={data['teacher_dim']}, policy={has_policy}")
+    log.info(f"  backbone={data['backbone']}, teacher_dim={data['teacher_dim']}")
     if data["step"] is not None:
-        log.info(f"  step={data['step']}, train_loss={data['train_loss']:.4e}" if data["train_loss"] else f"  step={data['step']}")
+        step = data["step"]
+        msg = f"  step={step}, train_loss={data['train_loss']:.4e}" if data["train_loss"] else f"  step={step}"
+        log.info(msg)
     if data["git_commit"]:
         log.info(f"  git={data['git_commit'][:8]}{'*' if data['git_dirty'] else ''}")
     if data["comet_id"]:
@@ -242,58 +247,36 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     return data
 
 
-def _has_policy_keys(state_dict: dict[str, Tensor]) -> bool:
-    """Check if state_dict contains policy.* keys."""
-    return any(k.startswith("policy.") for k in state_dict)
-
-
 def load_model(path: Path, device: torch.device | str = "cpu", strict: bool = False) -> CanViTForPretraining:
     """Load CanViTForPretraining from checkpoint.
 
-    Policy handling:
-    - If checkpoint has policy_config: create PolicyHead with that config
-    - If checkpoint has policy.* keys but no policy_config (legacy): use default PolicyConfig + warn
-    - Otherwise: no policy
+    Handles old checkpoints with legacy backbone names (dinov3_vitb16 → canvitb16).
+    Strips legacy policy.* keys from state_dict.
     """
     from canvit import create_backbone
-    from canvit.policy import PolicyConfig, PolicyHead
 
     ckpt = load(path, device)
 
     for key in ("backbone", "model_config", "teacher_dim", "state_dict"):
-        if key not in ckpt:
-            raise ValueError(f"Checkpoint missing required field: {key!r}")
+        assert key in ckpt, f"Checkpoint missing required field: {key!r}"
 
-    backbone = create_backbone(ckpt["backbone"], pretrained=False)
+    backbone_name = ckpt["backbone"]  # already mapped by load()
+    backbone = create_backbone(backbone_name)
 
     model_config = ckpt["model_config"]
     if "teacher_dim" not in model_config:
         model_config = {**model_config, "teacher_dim": ckpt["teacher_dim"]}
     cfg = dacite.from_dict(CanViTForPretrainingConfig, model_config)
 
-    # Create policy if checkpoint has policy config or policy weights
-    policy: PolicyHead | None = None
-    policy_config = ckpt.get("policy_config")
-    has_policy_weights = _has_policy_keys(ckpt["state_dict"])
+    model = CanViTForPretraining(
+        backbone=backbone,
+        cfg=cfg,
+        backbone_name=backbone_name,
+        grid_sizes=[32],
+    )
 
-    if policy_config is not None:
-        # New checkpoint with explicit policy config
-        policy_cfg = dacite.from_dict(PolicyConfig, policy_config)
-        policy = PolicyHead(embed_dim=backbone.embed_dim, cfg=policy_cfg)
-        log.info("Policy created from checkpoint config")
-    elif has_policy_weights:
-        # Legacy checkpoint: has policy weights but no config (use defaults)
-        policy_cfg = PolicyConfig()
-        policy = PolicyHead(embed_dim=backbone.embed_dim, cfg=policy_cfg)
-        log.warning(
-            "Checkpoint has policy weights but no policy_config (legacy). "
-            "Using default PolicyConfig. Re-save checkpoint to fix."
-        )
-
-    model = CanViTForPretraining(backbone=backbone, cfg=cfg, policy=policy)
-
-    # Filter state_dict to avoid size mismatches (e.g., architectural changes)
-    state_dict = ckpt["state_dict"]
+    # Strip legacy policy keys and filter shape mismatches
+    state_dict = {k: v for k, v in ckpt["state_dict"].items() if not k.startswith("policy.")}
     model_state = model.state_dict()
     filtered = {}
     skipped = []

@@ -8,15 +8,19 @@ from ytch.device import get_sensible_device
 
 from canvit_pretrain import CanViTForPretrainingConfig
 
+# Default HF repo for the teacher model
+TEACHER_REPO_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+# Short name used for shard paths and probe lookup (matches precomputed feature directories)
+TEACHER_NAME = "dinov3_vitb16"
+
 
 @dataclass
 class Config:
     # Teacher
-    teacher_model: str = "dinov3_vitb16"
-    teacher_ckpt: Path = Path("dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth")
+    teacher_repo_id: str = TEACHER_REPO_ID
+    teacher_name: str = TEACHER_NAME
     # Student
-    student_model: str = "dinov3_vitb16"
-    student_ckpt: Path | None = None  # None = random init
+    backbone_name: str = "canvitb16"
     # Model config (PretrainingConfig via alias)
     # teacher_dim placeholder - overridden by create_model based on actual teacher
     model: CanViTForPretrainingConfig = field(
@@ -40,14 +44,11 @@ class Config:
     n_full_start_branches: int = 1  # branches starting with FULL viewpoint at t0
     n_random_start_branches: int = 1  # branches starting with RANDOM viewpoint at t0
     chunk_size: int = 2  # BPTT chunk size (glimpses per chunk, gradient flows within)
-    continue_prob: float = 0.5  # peak prob of adding another chunk to trajectory
-    continue_prob_warmup_steps: int = 0 # preliminary ablations: this seems unnecessary. TODO remove associated logic
-    enable_policy: bool = False  # Enable policy branch (t=1 POLICY viewpoint type)
+    continue_prob: float = 0.5  # prob of adding another chunk to trajectory
     enable_scene_patches_loss: bool = True  # Scene (canvas) patch reconstruction loss
     enable_scene_cls_loss: bool = True  # Scene (global) CLS reconstruction loss
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
-    policy_grad_clip: float = 1.0  # Separate clip for policy (applied first)
     # Must be multiple of batches_per_shard (shard_size // batch_size) for clean resume
     steps_per_job: int = 4_992  # Steps this job does before exiting (for SLURM arrays)
     # Data
@@ -57,7 +58,7 @@ class Config:
     val_index_dir: Path | None = None  # Required for validation
     # Precomputed features (skips teacher inference on train images)
     # If feature_base_dir is set, shards path is auto-constructed:
-    #   {feature_base_dir}/{teacher_model}/{image_resolution}/shards/
+    #   {feature_base_dir}/{teacher_name}/{image_resolution}/shards/
     feature_base_dir: Path | None = None
     feature_image_root: Path | None = None  # Required with feature_base_dir
     # Run identification and checkpointing
@@ -68,8 +69,6 @@ class Config:
     seed_ckpt: Path | None = None
     """Seed model weights from external checkpoint. Starts fresh (new experiment, step=0).
     Only used if no checkpoint exists in run_dir. For forking runs with different config."""
-    reset_policy: bool = False
-    """Reinitialize policy weights when loading any checkpoint."""
     reset_normalizer: bool = False
     """Re-warmup normalizer stats when loading any checkpoint."""
     # Training

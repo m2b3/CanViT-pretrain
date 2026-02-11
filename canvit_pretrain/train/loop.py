@@ -32,12 +32,12 @@ torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
 from canvit import CLSStandardizer, PatchStandardizer  # noqa: E402
-from canvit.backbone.dinov3 import NormFeatures  # noqa: E402
+from canvit.backbone.vit import NormFeatures  # noqa: E402
 from ytch.model import count_parameters  # noqa: E402
 
 from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
 from canvit_pretrain.checkpoint import CheckpointData, find_latest, update_symlink  # noqa: E402
-from canvit_pretrain.checkpoint import load as load_checkpoint
+from canvit_pretrain.checkpoint import load as load_checkpoint  # noqa: E402
 from canvit_pretrain.checkpoint import save as save_checkpoint  # noqa: E402
 
 from .config import Config  # noqa: E402
@@ -208,9 +208,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     teacher = load_teacher(cfg)
     log.info(f"Teacher params: {count_parameters(teacher):,}")
 
-    probe = load_probe(cfg.teacher_model, cfg.device)
+    probe = load_probe(cfg.teacher_name, cfg.device)
     if probe is not None:
-        log.info(f"Loaded IN1k probe for {cfg.teacher_model}")
+        log.info(f"Loaded IN1k probe for {cfg.teacher_name}")
 
     student_backbone = load_student_backbone(cfg)
     log.info(f"Student backbone params: {count_parameters(student_backbone):,}")
@@ -218,19 +218,13 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     bundle = create_model(student_backbone, teacher.embed_dim, cfg)
     model, glimpse_size_px = bundle.model, bundle.glimpse_size_px
 
-    if cfg.enable_policy and not cfg.model.enable_vpe:
-        raise ValueError("enable_policy=True requires cfg.model.enable_vpe=True (VPE provides policy input)")
-
-    if cfg.enable_policy:
-        log.info("Policy training enabled - VPE token will be used for policy input")
-
     if cfg.compile:
         log.info("Compiling teacher and model")
         compile_teacher(teacher)
         compile_model(model)
 
     G = cfg.grid_size
-    patch_size = teacher.patch_size_px
+    patch_size = teacher.model.config.patch_size
     scene_size = scene_size_px(G, patch_size)
     log.info(f"Grid size: {G}, scene size: {scene_size}px")
 
@@ -286,11 +280,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             log.warning(f"  Checkpoint: {ckpt_cfg}")
             log.warning(f"  Current:    {cfg.model}")
         state_dict = ckpt_data["state_dict"]
-        if cfg.reset_policy:
-            n_before = len(state_dict)
-            state_dict = {k: v for k, v in state_dict.items() if not k.startswith("policy.")}
-            n_removed = n_before - len(state_dict)
-            log.info(f"Reset policy: removed {n_removed} policy keys, will use fresh init")
+        # Strip legacy policy keys from old checkpoints
+        state_dict = {k: v for k, v in state_dict.items() if not k.startswith("policy.")}
 
         # Filter out shape-incompatible weights (e.g., when changing canvas_num_heads)
         model_state = model.state_dict()
@@ -366,12 +357,15 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     if not norm_loaded:
         assert cfg.feature_base_dir is not None, "feature_base_dir required for normalizer init"
-        shards_dir = cfg.feature_base_dir / cfg.teacher_model / str(cfg.image_resolution) / "shards"
+        shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.image_resolution) / "shards"
         shard_files = sorted(shards_dir.glob("*.pt"))
         assert shard_files, f"No shards in {shards_dir}"
         init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device)
 
-    log.info(f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches, chunk_size={cfg.chunk_size}, continue_prob={cfg.continue_prob}")
+    log.info(
+        f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches,"
+        f" chunk_size={cfg.chunk_size}, continue_prob={cfg.continue_prob}"
+    )
 
     # EMA tracking for all metrics
     ema = EMATracker(alpha=cfg.ema_alpha)
@@ -440,7 +434,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                         log_pca=do_pca,
                         teacher=teacher,
                         log_spatial_stats=cfg.log_spatial_stats,
-                        backbone=cfg.teacher_model,
+                        backbone=cfg.teacher_name,
                     )
             except Exception:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
@@ -456,7 +450,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             ema_loss = ema.get("total_loss")
             ckpt_path = make_ckpt_path(step)
             save_checkpoint(
-                ckpt_path, model, cfg.student_model,
+                ckpt_path, model, cfg.backbone_name,
                 step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
                 comet_id=exp.get_key(),
                 scene_norm_state=scene_norm.state_dict(),
@@ -477,12 +471,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
             optimizer.zero_grad()
 
-            # Warmup continue_prob: 0 → peak over warmup steps
-            if cfg.continue_prob_warmup_steps > 0:
-                continue_prob = cfg.continue_prob * min(step / cfg.continue_prob_warmup_steps, 1.0)
-            else:
-                continue_prob = cfg.continue_prob
-
             step_metrics = training_step(
                 model=model,
                 images=batch.images,
@@ -499,16 +487,13 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 n_full_start_branches=cfg.n_full_start_branches,
                 n_random_start_branches=cfg.n_random_start_branches,
                 chunk_size=cfg.chunk_size,
-                continue_prob=continue_prob,
+                continue_prob=cfg.continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 amp_ctx=amp_ctx,
                 use_checkpointing=cfg.use_checkpointing,
                 collect_viz=do_pca,
             )
 
-            # Clip policy grads first (if present), then whole model
-            if model.policy is not None:
-                torch.nn.utils.clip_grad_norm_(model.policy.parameters(), cfg.policy_grad_clip)
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
             optimizer.step()
             scheduler.step()
@@ -537,7 +522,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 metrics = {f"train/{k}": v.item() for k, v in ema.items()}
                 metrics["train/lr"] = lr
                 metrics["train/grad_norm"] = grad_norm
-                metrics["train/continue_prob"] = continue_prob
+                metrics["train/continue_prob"] = cfg.continue_prob
                 exp.log_metrics(metrics, step=step)
 
                 ema_loss = ema.get("total_loss")
@@ -589,7 +574,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         ema_loss = ema.get("total_loss")
         ckpt_path = make_ckpt_path(end_step)
         save_checkpoint(
-            ckpt_path, model, cfg.student_model,
+            ckpt_path, model, cfg.backbone_name,
             step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
             comet_id=exp.get_key(),
             scene_norm_state=scene_norm.state_dict(),

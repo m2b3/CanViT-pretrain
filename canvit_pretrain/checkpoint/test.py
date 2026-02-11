@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 import torch
-from canvit.backbone.dinov3 import DINOv3Backbone
+from canvit import create_backbone
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 from canvit_pretrain.checkpoint import CheckpointData, load, save
@@ -12,14 +12,12 @@ from canvit_pretrain.checkpoint import CheckpointData, load, save
 
 def _make_tiny_model(device: torch.device) -> CanViTForPretraining:
     """Create minimal CanViTForPretraining for testing (no pretrained weights needed)."""
-    from dinov3.hub.backbones import dinov3_vits16
-
-    backbone = DINOv3Backbone(dinov3_vits16(pretrained=False).to(device))
+    backbone = create_backbone("canvits16").to(device)
     cfg = CanViTForPretrainingConfig(teacher_dim=384)
     return CanViTForPretraining(
         backbone=backbone,
         cfg=cfg,
-        backbone_name="dinov3_vits16",
+        backbone_name="canvits16",
         grid_sizes=[8, 16, 32],
     ).to(device)
 
@@ -30,11 +28,11 @@ def test_save_load_roundtrip() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "test.pt"
-        save(path, model, backbone="dinov3_vits16", step=100, train_loss=0.5)
+        save(path, model, backbone="canvits16", step=100, train_loss=0.5)
 
         data = load(path, device)
 
-        assert data["backbone"] == "dinov3_vits16"
+        assert data["backbone"] == "canvits16"
         assert data["teacher_dim"] == 384
         assert data["step"] == 100
         assert data["train_loss"] == 0.5
@@ -58,7 +56,7 @@ def test_strips_orig_mod() -> None:
             "state_dict": state_dict,
             "model_config": {},
             "teacher_dim": 384,
-            "backbone": "dinov3_vits16",
+            "backbone": "canvits16",
             "timestamp": "test",
             "git_commit": None,
             "git_dirty": False,
@@ -67,7 +65,6 @@ def test_strips_orig_mod() -> None:
             "comet_id": None,
             "scene_norm_state": None,
             "cls_norm_state": None,
-            "policy_config": None,
             "optimizer_state": None,
             "scheduler_state": None,
             "training_config_history": None,

@@ -8,10 +8,10 @@ import comet_ml
 import numpy as np
 import torch
 import torch.nn.functional as F
-from canvit import CanViTOutput, CLSStandardizer, PatchStandardizer, RecurrentState, sample_at_viewpoint
-from canvit.backbone.dinov3 import DINOv3Backbone, NormFeatures
-from canvit.policy import PolicyHead
+from canvit import CanViTOutput, CLSStandardizer, PatchStandardizer, RecurrentState
+from canvit.backbone.vit import NormFeatures
 from canvit.viewpoint import Viewpoint as CanvitViewpoint
+from canvit_utils.teacher import DINOv3Teacher
 from dinov3_in1k_probes import DINOv3LinearClassificationHead
 from torch import Tensor
 from ytch.correctness import assert_shape
@@ -25,11 +25,10 @@ from ..probe import (
     get_top_k_predictions,
     labels_are_in1k,
 )
-from ..viewpoint import Viewpoint, make_eval_viewpoints
+from ..viewpoint import make_eval_viewpoints
 from .comet import log_curve, log_figure
 from .image import imagenet_denormalize
 from .plot import TimestepPredictions, plot_multistep_pca
-from .policy import plot_policy_predictions
 from .sample import VizSampleData, extract_sample0_viz
 
 log = logging.getLogger(__name__)
@@ -51,17 +50,6 @@ class ValAccumulator:
     in1k_accs: list[float] = field(default_factory=list)
     pca_predictions: list[TimestepPredictions] = field(default_factory=list)
     viz_samples: list[VizSampleData] = field(default_factory=list)
-    initial_scene: np.ndarray | None = None
-    initial_canvas_spatial: np.ndarray | None = None
-
-
-@dataclass
-class PolicyRolloutResult:
-    """Result from policy rollout validation."""
-
-    in1k_accs: list[float]
-    viewpoints: list[Viewpoint]
-    viz_samples: list[VizSampleData] | None = None
     initial_scene: np.ndarray | None = None
     initial_canvas_spatial: np.ndarray | None = None
 
@@ -145,161 +133,6 @@ def _log_pca(
                 )
 
 
-def _log_policy_viz(
-    *,
-    exp: comet_ml.CometExperiment,
-    step: int,
-    prefix: str,
-    model: "CanViTForPretraining",
-    images: Tensor,
-    canvas_grid_size: int,
-    glimpse_size_px: int,
-    min_viewpoint_scale: float,
-) -> None:
-    """Log policy prediction visualization (positions + scales)."""
-    assert isinstance(model.policy, PolicyHead)
-
-    B = images.shape[0]
-    state_init = model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
-
-    # Full scene context
-    vp_full = Viewpoint.full_scene(batch_size=B, device=images.device)
-    glimpse_full = sample_at_viewpoint(spatial=images, viewpoint=vp_full, glimpse_size_px=glimpse_size_px)
-    out_full = model.forward(glimpse=glimpse_full, state=state_init, viewpoint=vp_full)
-    assert out_full.vpe is not None
-    preds_full = model.policy(out_full.vpe)
-
-    # Random context
-    vp_rand = Viewpoint.random(
-        batch_size=B, device=images.device, min_scale=min_viewpoint_scale
-    )
-    glimpse_rand = sample_at_viewpoint(spatial=images, viewpoint=vp_rand, glimpse_size_px=glimpse_size_px)
-    out_rand = model.forward(glimpse=glimpse_rand, state=state_init, viewpoint=vp_rand)
-    assert out_rand.vpe is not None
-    preds_rand = model.policy(out_rand.vpe)
-
-    fig_policy = plot_policy_predictions(
-        starts_full=vp_full.centers,
-        starts_random=vp_rand.centers,
-        preds_full=preds_full,
-        preds_random=preds_rand,
-        min_scale=min_viewpoint_scale,
-    )
-    log_figure(exp, fig_policy, f"{prefix}/policy_viz", step)
-
-
-def _validate_policy_rollout(
-    *,
-    model: "CanViTForPretraining",
-    images: Tensor,
-    canvas_grid_size: int,
-    glimpse_size_px: int,
-    n_steps: int,
-    probe: DINOv3LinearClassificationHead,
-    labels: Tensor,
-    cls_normalizer: CLSStandardizer,
-    collect_viz: bool = False,
-) -> PolicyRolloutResult:
-    """Run policy rollout: full scene → policy → policy → ...
-
-    Returns IN1K accuracy at each timestep, plus optional viz data for PCA.
-    """
-    assert isinstance(model.policy, PolicyHead)
-
-    B = images.shape[0]
-    state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
-
-    # Collect initial state for viz
-    initial_scene = None
-    initial_canvas_spatial = None
-    if collect_viz:
-        n_canvas_tokens = model.n_canvas_registers + canvas_grid_size ** 2
-        assert_shape(state.canvas, (B, n_canvas_tokens, model.canvas_dim))
-        initial_scene = model.predict_teacher_scene(state.canvas)[0].cpu().float().numpy()
-        initial_canvas_spatial = model.get_spatial(state.canvas[0:1])[0].cpu().float().numpy()
-
-    vp = Viewpoint.full_scene(batch_size=B, device=images.device)
-    accs: list[float] = []
-    viewpoints: list[Viewpoint] = []
-    viz_samples: list[VizSampleData] = []
-
-    for t in range(n_steps):
-        viewpoints.append(vp)
-
-        glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_size_px)
-        out = model.forward(glimpse=glimpse, state=state, viewpoint=vp)
-        state = out.state
-
-        # Compute IN1K accuracy
-        predicted_cls = model.predict_scene_teacher_cls(state.recurrent_cls)
-        cls_raw = cls_normalizer.destandardize(predicted_cls)
-        logits = probe(cls_raw)
-        accs.append(compute_in1k_top1(logits, labels))
-
-        # Collect viz sample
-        if collect_viz:
-            predicted_scene = model.predict_teacher_scene(state.canvas)
-            viz_samples.append(extract_sample0_viz(out, glimpse, predicted_scene, model))
-
-        # Policy predicts next viewpoint (except at last step)
-        if t < n_steps - 1:
-            assert out.vpe is not None
-            policy_out = model.policy(out.vpe)
-            vp = Viewpoint(
-                name=f"pol_t{t+1}",
-                centers=policy_out.position,
-                scales=policy_out.scale,
-            )
-
-    return PolicyRolloutResult(
-        in1k_accs=accs,
-        viewpoints=viewpoints,
-        viz_samples=viz_samples if collect_viz else None,
-        initial_scene=initial_scene,
-        initial_canvas_spatial=initial_canvas_spatial,
-    )
-
-
-def _log_policy_pca(
-    *,
-    exp: comet_ml.CometExperiment,
-    step: int,
-    prefix: str,
-    result: PolicyRolloutResult,
-    full_img: np.ndarray,
-    teacher_np: np.ndarray,
-    canvas_grid_size: int,
-    glimpse_grid_size: int,
-    H: int,
-    W: int,
-) -> None:
-    """Log PCA visualization for policy rollout trajectory."""
-    assert result.viz_samples is not None
-    assert result.initial_scene is not None
-
-    boxes = [vp.to_pixel_box(0, H, W) for vp in result.viewpoints]
-    names = [vp.name for vp in result.viewpoints]
-    scenes = [vs.predicted_scene for vs in result.viz_samples]
-    glimpses = [vs.glimpse for vs in result.viz_samples]
-    canvas_spatials = [vs.canvas_spatial for vs in result.viz_samples]
-
-    fig = plot_multistep_pca(
-        full_img=full_img,
-        teacher=teacher_np,
-        scenes=scenes,
-        glimpses=glimpses,
-        boxes=boxes,
-        names=names,
-        scene_grid_size=canvas_grid_size,
-        glimpse_grid_size=glimpse_grid_size,
-        initial_scene=result.initial_scene,
-        hidden_spatials=canvas_spatials if canvas_spatials[0] is not None else None,
-        initial_hidden_spatial=result.initial_canvas_spatial,
-        timestep_predictions=None,
-    )
-    log_figure(exp, fig, f"{prefix}/policy_pca", step)
-
-
 def validate(
     *,
     exp: comet_ml.CometExperiment,
@@ -319,7 +152,7 @@ def validate(
     labels: Tensor | None = None,
     log_curves: bool = False,
     log_pca: bool = False,
-    teacher: DINOv3Backbone | None = None,
+    teacher: DINOv3Teacher | None = None,
     log_spatial_stats: bool = False,
     backbone: str | None = None,
 ) -> float:
@@ -450,32 +283,6 @@ def validate(
                         step=step,
                     )
 
-            # Policy rollout (IN1K + optional viz)
-            policy_result: PolicyRolloutResult | None = None
-            if has_probe and isinstance(model.policy, PolicyHead):
-                assert probe is not None and labels is not None
-                policy_result = _validate_policy_rollout(
-                    model=model,
-                    images=images,
-                    canvas_grid_size=canvas_grid_size,
-                    glimpse_size_px=glimpse_size_px,
-                    n_steps=n_eval_viewpoints,
-                    probe=probe,
-                    labels=labels,
-                    cls_normalizer=cls_normalizer,
-                    collect_viz=log_pca,
-                )
-                for t, pa in enumerate(policy_result.in1k_accs):
-                    exp.log_metric(f"{prefix}/in1k_policy_top1_t{t}", pa, step=step)
-                if log_curves:
-                    log_curve(
-                        exp,
-                        f"{prefix}/in1k_policy_top1_vs_timestep",
-                        x=list(range(len(policy_result.in1k_accs))),
-                        y=policy_result.in1k_accs,
-                        step=step,
-                    )
-
             if log_pca:
                 assert target_sample0 is not None
                 H, W = images.shape[-2], images.shape[-1]
@@ -498,33 +305,6 @@ def validate(
                     log_spatial_stats=log_spatial_stats,
                     log_curves=log_curves,
                 )
-
-                if isinstance(model.policy, PolicyHead):
-                    _log_policy_viz(
-                        exp=exp,
-                        step=step,
-                        prefix=prefix,
-                        model=model,
-                        images=images,
-                        canvas_grid_size=canvas_grid_size,
-                        glimpse_size_px=glimpse_size_px,
-                        min_viewpoint_scale=min_viewpoint_scale,
-                    )
-
-                    # Policy trajectory PCA
-                    if policy_result is not None and policy_result.viz_samples:
-                        _log_policy_pca(
-                            exp=exp,
-                            step=step,
-                            prefix=prefix,
-                            result=policy_result,
-                            full_img=full_img,
-                            teacher_np=target_sample0,
-                            canvas_grid_size=canvas_grid_size,
-                            glimpse_grid_size=glimpse_grid_size,
-                            H=H,
-                            W=W,
-                        )
 
             return acc.scene_cos_raw[-1]
     finally:
