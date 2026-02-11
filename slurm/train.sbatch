@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cvit-pt-in21k
+#SBATCH --job-name=canvit-in21k-pretrain
 #SBATCH --account=rrg-skrishna_gpu
 #SBATCH --time=00:30:00
 #SBATCH --array=0-400%1
