@@ -1,5 +1,9 @@
 """Export teacher features for IN21k.
 
+Successfully used to export ~19TB of DINOv3 ViT-B/16 features on ImageNet-21k
+(January 2026, Narval cluster). The data is exported and in use — do not modify
+this script's behavior.
+
 Precomputes DINOv3 features for all images, stores as sharded .pt files.
 This eliminates expensive 512px teacher inference during training.
 
