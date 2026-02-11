@@ -83,7 +83,6 @@ class Config:
     n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
     viz_every_n_vals: int = 5  # Log viz every N validation runs
     curve_every_n_vals: int = 5  # Log curves every N validation runs
-    ckpt_every: int = 4_992  # Match steps_per_job for clean shard boundaries
     log_spatial_stats: bool = True
     # Compilation and precision
     compile: bool = True

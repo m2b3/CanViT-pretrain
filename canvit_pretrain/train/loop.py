@@ -412,14 +412,11 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             except Exception:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
 
-        # === CHECKPOINT PHASE ===
+        # === SIGUSR1 CHECKPOINT ===
         global _checkpoint_requested
-        at_ckpt_interval = step % cfg.ckpt_every == 0
-        is_resume_start = step == start_step and start_step > 0  # skip duplicate on resume
-        if (at_ckpt_interval and not is_resume_start) or _checkpoint_requested:
-            if _checkpoint_requested:
-                log.info(f"Saving signal-triggered checkpoint at step {step}")
-                _checkpoint_requested = False
+        if _checkpoint_requested:
+            log.info(f"Saving signal-triggered checkpoint at step {step}")
+            _checkpoint_requested = False
             ema_loss = ema.get("total_loss")
             ckpt_path = make_ckpt_path(step)
             save_checkpoint(
@@ -438,9 +435,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 training_config_history=training_config_history,
             )
             update_symlink(run_dir / "latest.pt", ckpt_path)
-            exp.log_metric("norm/scene_mean_norm", scene_norm.mean.norm().item(), step=step)
-            exp.log_metric("norm/cls_mean_norm", cls_norm.mean.norm().item(), step=step)
-            exp.log_metric("data/start_shard", train_loader.start_shard, step=step)
 
         # === TRAINING PHASE (only for step < end_step) ===
         if step < end_step:
@@ -547,26 +541,25 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 )
                 log_figure(exp, fig, "train/pca", step)
 
-    # Final checkpoint for this job (if not already saved at end_step)
-    if end_step % cfg.ckpt_every != 0:
-        ema_loss = ema.get("total_loss")
-        ckpt_path = make_ckpt_path(end_step)
-        save_checkpoint(
-            ckpt_path, model, cfg.backbone_name,
-            teacher_repo_id=cfg.teacher_repo_id,
-            teacher_name=cfg.teacher_name,
-            dataset=cfg.dataset,
-            glimpse_grid_size=cfg.glimpse_grid_size,
-            scene_resolution=cfg.scene_resolution,
-            step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
-            comet_id=exp.get_key(),
-            scene_norm_state=scene_norm.state_dict(),
-            cls_norm_state=cls_norm.state_dict(),
-            optimizer_state=optimizer.state_dict(),
-            scheduler_state=scheduler.state_dict(),
-            training_config_history=training_config_history,
-        )
-        update_symlink(run_dir / "latest.pt", ckpt_path)
+    # End-of-job checkpoint (always saved)
+    ema_loss = ema.get("total_loss")
+    ckpt_path = make_ckpt_path(end_step)
+    save_checkpoint(
+        ckpt_path, model, cfg.backbone_name,
+        teacher_repo_id=cfg.teacher_repo_id,
+        teacher_name=cfg.teacher_name,
+        dataset=cfg.dataset,
+        glimpse_grid_size=cfg.glimpse_grid_size,
+        scene_resolution=cfg.scene_resolution,
+        step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
+        comet_id=exp.get_key(),
+        scene_norm_state=scene_norm.state_dict(),
+        cls_norm_state=cls_norm.state_dict(),
+        optimizer_state=optimizer.state_dict(),
+        scheduler_state=scheduler.state_dict(),
+        training_config_history=training_config_history,
+    )
+    update_symlink(run_dir / "latest.pt", ckpt_path)
 
     ema_loss = ema.get("total_loss")
     final_loss = ema_loss.item() if ema_loss is not None else float("inf")
