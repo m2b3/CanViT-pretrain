@@ -174,9 +174,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     prev_comet_id: str | None = None
     if ckpt_path_to_load is not None:
         ckpt_data = load_checkpoint(ckpt_path_to_load, cfg.device)
-        prev_comet_id = ckpt_data.get("comet_id")
-        if prev_comet_id is None:
-            log.warning("Checkpoint has no comet_id - will create NEW experiment")
+        prev_comet_id = ckpt_data["comet_id"]
 
     # === COMET EXPERIMENT ===
     # RESUME mode: continue existing experiment. SEED/FRESH mode: new experiment.
@@ -233,8 +231,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     # training step, so last_epoch == number of gradient updates == our "step"
     # SEED mode always starts at step=0 (fresh training run)
     if ckpt_data is not None and not is_seeding:
-        sched_state = ckpt_data.get("scheduler_state")
-        assert sched_state is not None, "CORRUPT CHECKPOINT: missing scheduler_state"
+        sched_state = ckpt_data["scheduler_state"]
+        assert sched_state is not None, "Checkpoint has no scheduler_state — cannot determine start_step"
         start_step = sched_state["last_epoch"]  # PyTorch API: last_epoch = num scheduler.step() calls
         log.info("=" * 60)
         log.info(f"RESUME: start_step={start_step}")
@@ -307,21 +305,18 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         if is_seeding:
             log.info("SEED mode: fresh optimizer+scheduler (step=0)")
         else:
-            opt_state = ckpt_data.get("optimizer_state")
-            sched_state = ckpt_data.get("scheduler_state")
-            if opt_state is not None and sched_state is not None:
-                optimizer.load_state_dict(opt_state)
-                scheduler.load_state_dict(sched_state)
-                log.info(f"RESUME mode: restored optimizer+scheduler (step={sched_state.get('last_epoch', '?')})")
-            elif opt_state is not None or sched_state is not None:
-                log.error("!!! Checkpoint has only one of optimizer/scheduler - using fresh init (STEP WILL BE 0) !!!")
-            else:
-                log.error("!!! Checkpoint has no optimizer/scheduler state - using fresh init (STEP WILL BE 0) !!!")
+            opt_state = ckpt_data["optimizer_state"]
+            sched_state = ckpt_data["scheduler_state"]
+            assert opt_state is not None, "Checkpoint missing optimizer_state — cannot resume"
+            assert sched_state is not None, "Checkpoint missing scheduler_state — cannot resume"
+            optimizer.load_state_dict(opt_state)
+            scheduler.load_state_dict(sched_state)
+            log.info(f"RESUME mode: restored optimizer+scheduler (step={sched_state['last_epoch']})")
 
     # Build training config history (tracks config across resumes)
     training_config_history: dict[str, dict] = {}
     if ckpt_data is not None:
-        training_config_history = ckpt_data.get("training_config_history") or {}
+        training_config_history = ckpt_data["training_config_history"] or {}
     training_config_history[datetime.now(UTC).isoformat()] = flatten_dict(asdict(cfg))
 
     def make_ckpt_path(step: int) -> Path:
@@ -343,15 +338,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     norm_loaded = False
     if ckpt_data is not None and not cfg.reset_normalizer:
-        scene_norm_state = ckpt_data.get("scene_norm_state")
-        cls_norm_state = ckpt_data.get("cls_norm_state")
-        if scene_norm_state is not None and cls_norm_state is not None:
-            scene_norm.load_state_dict(scene_norm_state)
-            cls_norm.load_state_dict(cls_norm_state)
-            norm_loaded = True
-            log.info("Loaded scene/cls normalizer states from checkpoint")
-        else:
-            log.warning("Checkpoint has no normalizer states")
+        scene_norm_state = ckpt_data["scene_norm_state"]
+        cls_norm_state = ckpt_data["cls_norm_state"]
+        assert scene_norm_state is not None, "Checkpoint missing scene_norm_state"
+        assert cls_norm_state is not None, "Checkpoint missing cls_norm_state"
+        scene_norm.load_state_dict(scene_norm_state)
+        cls_norm.load_state_dict(cls_norm_state)
+        norm_loaded = True
+        log.info("Loaded scene/cls normalizer states from checkpoint")
     elif cfg.reset_normalizer:
         log.info("Reset normalizer: will re-init stats")
 
