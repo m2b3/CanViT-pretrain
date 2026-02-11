@@ -85,6 +85,7 @@ class Config:
     log_spatial_stats: bool = True
     # Compilation and precision
     compile: bool = True
+    combo_kernels: bool = False  # torch._inductor.config.combo_kernels (experimental)
     amp: bool = True
     non_blocking_transfer: bool = True  # Ablation: async CPU→GPU transfers
     # Optuna

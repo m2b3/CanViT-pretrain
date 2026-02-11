@@ -42,7 +42,7 @@ packages = ["canvit_pretrain", "canvit_eval", "drac_imagenet"]
 [tool.uv.sources]
 dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
 ybml = { git = "https://github.com/yberreby/ybml.git", rev = "133cc9b" }
-canvit = { git = "ssh://git@github.com/yberreby/CanViT.git", rev = "cc8280b" }
+canvit = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch.git", rev = "cc8280b" }
 dinov3-in1k-probes = { git = "https://github.com/yberreby/dinov3-in1k-probes.git" }
 
 [dependency-groups]

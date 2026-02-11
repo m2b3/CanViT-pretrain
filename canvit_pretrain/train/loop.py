@@ -218,7 +218,11 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     model, glimpse_size_px = bundle.model, bundle.glimpse_size_px
 
     if cfg.compile:
-        log.info("Compiling teacher and model")
+        if cfg.combo_kernels:
+            torch._inductor.config.combo_kernels = True  # type: ignore[attr-defined]
+            log.info("Compiling teacher and model (combo_kernels=True)")
+        else:
+            log.info("Compiling teacher and model")
         compile_teacher(teacher)
         compile_model(model)
 
