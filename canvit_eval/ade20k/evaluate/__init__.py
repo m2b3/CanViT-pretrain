@@ -55,6 +55,7 @@ class EvalConfig:
     output: Path = field(default_factory=_default_output)
 
     model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
+    teacher_repo: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     policy: PolicyName = "coarse_to_fine"
     resize_mode: ResizeMode = "squish"
     n_timesteps: int = 16
@@ -123,7 +124,7 @@ def evaluate(cfg: EvalConfig) -> Path:
     # Load model
     log.info(f"Loading model: {cfg.model_repo}")
     model = CanViTForPretrainingHFHub.from_pretrained(cfg.model_repo).to(device).eval()
-    teacher = load_teacher(model.backbone_name, device)
+    teacher = load_teacher(cfg.teacher_repo, device)
     log.info(f"  canvas_dim={model.canvas_dim}, teacher_dim={teacher.embed_dim}")
 
     patch_size = model.backbone.patch_size_px

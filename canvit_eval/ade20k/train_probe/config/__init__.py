@@ -51,6 +51,7 @@ class Config:
 
     ade20k_root: Path = field(default_factory=_default_ade20k_root)
     model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
+    teacher_repo: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     features: list[FeatureType] = field(default_factory=lambda: ["hidden", "predicted_norm", "teacher_glimpse"])
     n_timesteps: int = 10
     image_size: int = 512

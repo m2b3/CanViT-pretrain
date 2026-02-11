@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch.nn.functional as F
 from canvit import CanViTForPretrainingHFHub, Viewpoint, sample_at_viewpoint
-from canvit.backbone.dinov3 import DINOv3Backbone
+from canvit_utils.teacher import DINOv3Teacher
 from torch import Tensor
 
 from .config import FeatureType
@@ -50,7 +50,7 @@ class ExtractedFeatures:
 def extract_features(
     *,
     model: CanViTForPretrainingHFHub,
-    teacher: DINOv3Backbone,
+    teacher: DINOv3Teacher,
     images: Tensor,
     canvas_grid: int,
     glimpse_px: int,
@@ -73,8 +73,8 @@ def extract_features(
     predicted_list: list[Tensor] = []
 
     # Static: teacher on downscaled image (glimpse resolution)
-    glimpse_grid = glimpse_px // teacher.patch_size_px
-    sz = glimpse_grid * teacher.patch_size_px
+    glimpse_grid = glimpse_px // teacher.model.config.patch_size
+    sz = glimpse_grid * teacher.model.config.patch_size
     small = F.interpolate(images, size=(sz, sz), mode="bilinear", align_corners=False)
     teacher_glimpse = teacher.forward_norm_features(small).patches.view(B, glimpse_grid, glimpse_grid, -1)
 

@@ -110,9 +110,9 @@ def create_loaders(cfg: "Config", start_step: int) -> Loaders:
     assert cfg.feature_base_dir is not None, "feature_base_dir required"
     assert cfg.feature_image_root is not None, "feature_image_root required"
     log.info("Train: using PRECOMPUTED FEATURES (ShardedFeatureLoader)")
-    shards_dir = cfg.feature_base_dir / cfg.teacher_model / str(sz) / "shards"
+    shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(sz) / "shards"
     log.info(f"  feature_base_dir: {cfg.feature_base_dir}")
-    log.info(f"  teacher_model: {cfg.teacher_model}")
+    log.info(f"  teacher_name: {cfg.teacher_name}")
     log.info(f"  resolution: {sz}")
     log.info(f"  → shards_dir: {shards_dir}")
     log.info(f"  image_root: {cfg.feature_image_root}")
