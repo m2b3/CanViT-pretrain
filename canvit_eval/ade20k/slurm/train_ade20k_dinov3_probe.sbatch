@@ -10,9 +10,9 @@
 
 # DINOv3 baseline probe training at a given resolution
 # Usage:
-#   sbatch slurm/train_ade20k_dinov3_probe.sbatch 128
-#   sbatch slurm/train_ade20k_dinov3_probe.sbatch 256
-#   sbatch slurm/train_ade20k_dinov3_probe.sbatch 128 --model facebook/dinov3-vits16-pretrain
+#   sbatch canvit_eval/ade20k/slurm/train_ade20k_dinov3_probe.sbatch 128
+#   sbatch canvit_eval/ade20k/slurm/train_ade20k_dinov3_probe.sbatch 256
+#   sbatch canvit_eval/ade20k/slurm/train_ade20k_dinov3_probe.sbatch 128 --model facebook/dinov3-vits16-pretrain
 
 set -eux
 
@@ -20,15 +20,11 @@ RESOLUTION="${1:?Usage: sbatch train_ade20k_dinov3_probe.sbatch <resolution> [ex
 shift
 
 cd ~/scratch/CanViT-train
-source slurm/env.sh
+source canvit_eval/ade20k/slurm/setup.sh
 mkdir -p logs
 
 echo "=== DINOv3 Probe Training ==="
 echo "Resolution: ${RESOLUTION}px"
 echo "Job: $SLURM_JOB_ID on $(hostname)"
-
-# Extract ADE20K
-export ADE20K_ROOT="$SLURM_TMPDIR/ADEChallengeData2016"
-[ ! -d "$ADE20K_ROOT" ] && unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
 
 exec uv run python -m canvit_eval.ade20k train-dinov3-probe --resolution "$RESOLUTION" "$@"

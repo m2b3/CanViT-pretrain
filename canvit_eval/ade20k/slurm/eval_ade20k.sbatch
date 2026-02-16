@@ -8,20 +8,14 @@
 #SBATCH --output=logs/ade20k-eval-%j.out
 #SBATCH --error=logs/ade20k-eval-%j.err
 
-# ADE20K probe evaluation (single run)
-# Usage: sbatch slurm/eval_ade20k.sbatch --probe-ckpt /path/to/best.pt [--policy random] [...]
+# Usage: sbatch canvit_eval/ade20k/slurm/eval_ade20k.sbatch --probe-ckpt /path/to/best.pt [...]
 
 set -eux
-
 cd ~/scratch/CanViT-train
-source slurm/env.sh
+source canvit_eval/ade20k/slurm/setup.sh
 mkdir -p logs
 
-echo "=== ADE20K Probe Evaluation ==="
+echo "=== ADE20K Canvas Probe Evaluation ==="
 echo "Job: $SLURM_JOB_ID on $(hostname)"
-
-# Extract ADE20K
-export ADE20K_ROOT="$SLURM_TMPDIR/ADEChallengeData2016"
-[ ! -d "$ADE20K_ROOT" ] && unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
 
 exec uv run python -m canvit_eval.ade20k evaluate "$@"

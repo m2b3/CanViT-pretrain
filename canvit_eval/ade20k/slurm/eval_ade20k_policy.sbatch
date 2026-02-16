@@ -11,9 +11,9 @@
 # ADE20K probe evaluation: run a policy with array jobs for variance
 #
 # Usage:
-#   sbatch --array=0-4 slurm/eval_ade20k_policy.sbatch c2f /path/to/probe.pt
-#   sbatch --array=0-4 slurm/eval_ade20k_policy.sbatch fullrand /path/to/probe.pt
-#   sbatch --array=0-4 slurm/eval_ade20k_policy.sbatch iid /path/to/probe.pt
+#   sbatch --array=0-4 canvit_eval/ade20k/slurm/eval_ade20k_policy.sbatch c2f /path/to/probe.pt
+#   sbatch --array=0-4 canvit_eval/ade20k/slurm/eval_ade20k_policy.sbatch fullrand /path/to/probe.pt
+#   sbatch --array=0-4 canvit_eval/ade20k/slurm/eval_ade20k_policy.sbatch iid /path/to/probe.pt
 
 set -eux
 
@@ -21,7 +21,7 @@ NAME="${1:?Usage: sbatch --array=0-N eval_ade20k_policy.sbatch <c2f|fullrand|iid
 PROBE_CKPT="${2:?Missing probe checkpoint path}"
 
 cd ~/scratch/CanViT-train
-source slurm/env.sh
+source canvit_eval/ade20k/slurm/setup.sh
 
 case "$NAME" in
     c2f)
@@ -41,10 +41,6 @@ case "$NAME" in
         exit 1
         ;;
 esac
-
-# Extract ADE20K
-export ADE20K_ROOT="$SLURM_TMPDIR/ADEChallengeData2016"
-[ ! -d "$ADE20K_ROOT" ] && unzip -q "$ADE20K_ZIP" -d "$SLURM_TMPDIR"
 
 # Output path
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
