@@ -13,12 +13,11 @@ This module uses GLOBAL mIoU from data['mious'], NOT per-image averages.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import torch
 
-FeatureType = Literal["hidden", "predicted_norm", "teacher_glimpse", "teacher_full"]
+from canvit_eval.ade20k.train_probe.config import FeatureType
 
 
 @dataclass
