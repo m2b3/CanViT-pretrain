@@ -37,7 +37,7 @@ from canvit.backbone.vit import NormFeatures  # noqa: E402
 from ytch.model import count_parameters  # noqa: E402
 
 from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
-from canvit_pretrain.checkpoint import CheckpointData, find_latest, update_symlink  # noqa: E402
+from canvit_pretrain.checkpoint import CheckpointData, current_provenance, find_latest, update_symlink  # noqa: E402
 from canvit_pretrain.checkpoint import load as load_checkpoint  # noqa: E402
 from canvit_pretrain.checkpoint import save as save_checkpoint  # noqa: E402
 
@@ -301,7 +301,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     training_config_history: dict[str, dict] = {}
     if ckpt_data is not None:
         training_config_history = ckpt_data["training_config_history"] or {}
-    training_config_history[datetime.now(UTC).isoformat()] = flatten_dict(asdict(cfg))
+    now = datetime.now(UTC).isoformat()
+    training_config_history[now] = flatten_dict(asdict(cfg))
+
+    # Build provenance history (tracks git/host/slurm across resumes)
+    provenance_history: dict[str, dict] = {}
+    if ckpt_data is not None:
+        provenance_history = ckpt_data.get("provenance_history") or {}
+    provenance_history[now] = current_provenance()
 
     def make_ckpt_path(step: int) -> Path:
         """Generate versioned checkpoint path: {run_dir}/step-{step}.pt"""
@@ -438,6 +445,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
                 training_config_history=training_config_history,
+                provenance_history=provenance_history,
             )
             update_symlink(run_dir / "latest.pt", ckpt_path)
 
@@ -567,6 +575,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         optimizer_state=optimizer.state_dict(),
         scheduler_state=scheduler.state_dict(),
         training_config_history=training_config_history,
+        provenance_history=provenance_history,
     )
     update_symlink(run_dir / "latest.pt", ckpt_path)
 

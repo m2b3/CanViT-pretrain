@@ -36,20 +36,40 @@ def print_info(path: Path) -> None:
     print(f"glimpse:    {ckpt['glimpse_grid_size']}")
     print(f"grids:      {ckpt['canvas_patch_grid_sizes']}")
     print()
-    print(f"timestamp:  {ckpt.get('timestamp', 'n/a')}")
-    print(f"hostname:   {ckpt.get('hostname', 'n/a')}")
-    print(f"git:        {git_str}")
+    print(f"last_save:  {ckpt.get('timestamp', 'n/a')}")
     print(f"comet:      {ckpt.get('comet_id', 'n/a')}")
-    print(f"slurm_job:  {ckpt.get('slurm_job_id', 'n/a')}")
-    print(f"slurm_task: {ckpt.get('slurm_array_task_id', 'n/a')}")
 
-    history = ckpt.get("training_config_history")
-    if history:
-        timestamps = sorted(history)
+    prov_history = ckpt.get("provenance_history")
+    if prov_history:
+        print(f"\nprovenance history: {len(prov_history)} entries")
+        prev = None
+        for ts in sorted(prov_history):
+            p = prov_history[ts]
+            git = p.get("git_commit")
+            git_s = f"{git[:8]}{'*' if p.get('git_dirty') else ''}" if git else "n/a"
+            host = p.get("hostname", "n/a")
+            task = p.get("slurm_array_task_id", "n/a")
+            changed = prev is not None and (
+                p.get("git_commit") != prev.get("git_commit")
+                or p.get("hostname") != prev.get("hostname")
+            )
+            marker = "  CHANGED" if changed else ""
+            print(f"  {ts}  git={git_s}  host={host}  task={task}{marker}")
+            prev = p
+    else:
+        # Old checkpoint without provenance_history — show last-save fields
+        print(f"hostname:   {ckpt.get('hostname', 'n/a')}")
+        print(f"git:        {git_str}")
+        print(f"slurm_job:  {ckpt.get('slurm_job_id', 'n/a')}")
+        print(f"slurm_task: {ckpt.get('slurm_array_task_id', 'n/a')}")
+
+    config_history = ckpt.get("training_config_history")
+    if config_history:
+        timestamps = sorted(config_history)
         print(f"\nconfig history: {len(timestamps)} entries")
         prev = None
         for ts in timestamps:
-            cfg = history[ts]
+            cfg = config_history[ts]
             if prev is None:
                 print(f"  {ts}  (initial)")
             else:

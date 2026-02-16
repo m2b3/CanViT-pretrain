@@ -47,7 +47,7 @@ class CheckpointData(TypedDict):
     scheduler_state: dict | None
     training_config_history: dict[str, dict] | None
 
-    # --- Provenance ---
+    # --- Provenance (last save only — see provenance_history for full trail) ---
     timestamp: str
     git_commit: str | None
     git_dirty: bool
@@ -56,6 +56,9 @@ class CheckpointData(TypedDict):
     slurm_job_id: str | None
     slurm_array_task_id: str | None
     cmdline: list[str] | None
+
+    # --- Provenance history (accumulated across resumes) ---
+    provenance_history: dict[str, dict] | None
 
 
 def _git_info() -> tuple[str | None, bool]:
@@ -87,6 +90,20 @@ def get_env_metadata() -> tuple[str | None, str | None, str | None, list[str] | 
         os.environ.get("SLURM_ARRAY_TASK_ID"),
         cmdline,
     )
+
+
+def current_provenance() -> dict:
+    """Snapshot of current environment provenance (git, host, slurm, cmdline)."""
+    git_commit, git_dirty = _git_info()
+    hostname, slurm_job_id, slurm_array_task_id, cmdline = get_env_metadata()
+    return {
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+        "hostname": hostname,
+        "slurm_job_id": slurm_job_id,
+        "slurm_array_task_id": slurm_array_task_id,
+        "cmdline": cmdline,
+    }
 
 
 def atomic_torch_save(data: CheckpointData, path: Path) -> None:
@@ -149,6 +166,7 @@ def save(
     optimizer_state: dict | None = None,
     scheduler_state: dict | None = None,
     training_config_history: dict[str, dict] | None = None,
+    provenance_history: dict[str, dict] | None = None,
 ) -> None:
     """Save checkpoint with all info needed to reconstruct model and push to hub."""
     assert isinstance(model.cfg, CanViTForPretrainingConfig)
@@ -173,6 +191,7 @@ def save(
         "optimizer_state": optimizer_state,
         "scheduler_state": scheduler_state,
         "training_config_history": training_config_history,
+        "provenance_history": provenance_history,
         "timestamp": datetime.now(UTC).isoformat(),
         "git_commit": git_commit,
         "git_dirty": git_dirty,
@@ -228,6 +247,7 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
         "optimizer_state": raw["optimizer_state"],
         "scheduler_state": raw["scheduler_state"],
         "training_config_history": raw["training_config_history"],
+        "provenance_history": raw.get("provenance_history"),
         "timestamp": raw["timestamp"],
         "git_commit": raw["git_commit"],
         "git_dirty": raw["git_dirty"],

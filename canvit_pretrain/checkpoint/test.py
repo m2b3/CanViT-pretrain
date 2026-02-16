@@ -85,6 +85,7 @@ def test_strips_orig_mod() -> None:
             "optimizer_state": None,
             "scheduler_state": None,
             "training_config_history": None,
+            "provenance_history": None,
             "timestamp": "test",
             "git_commit": None,
             "git_dirty": False,
