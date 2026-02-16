@@ -1,4 +1,4 @@
-"""Visualization for ADE20K canvas probe training."""
+"""Visualization for ADE20K probe training (canvas and single-probe)."""
 
 from pathlib import Path
 from typing import Protocol
@@ -149,6 +149,86 @@ def log_viz(
     split: str = "train",
 ) -> None:
     fig = make_viz_figure(probes, feats, images, masks, n_samples, n_timesteps)
+    exp.log_figure(figure_name=f"viz_{split}_{step}", figure=fig, step=step)
+    plt.close(fig)
+
+
+def make_probe_viz_figure(
+    probe: torch.nn.Module,
+    features: Tensor,
+    images: Tensor,
+    masks: Tensor,
+    n_samples: int,
+) -> Figure:
+    """Single-probe viz: [Image | GT | Pred | Correctness | PCA] per sample."""
+    n_samples = min(n_samples, images.shape[0])
+    n_cols = 5
+
+    fig, axes = plt.subplots(n_samples, n_cols, figsize=(2.5 * n_cols, 2.5 * n_samples))
+    if n_samples == 1:
+        axes = axes[np.newaxis, :]
+
+    for i in range(n_samples):
+        col = 0
+        img_np = (imagenet_denormalize(images[i]).cpu().numpy() * 255).astype(np.uint8)
+        axes[i, col].imshow(img_np)
+        axes[i, col].set_title("Image" if i == 0 else "")
+        axes[i, col].axis("off")
+        col += 1
+
+        gt = masks[i].cpu().numpy()
+        axes[i, col].imshow(colorize_mask(gt))
+        axes[i, col].set_title("GT" if i == 0 else "")
+        axes[i, col].axis("off")
+        col += 1
+
+        feat_i = features[i]
+        H, W, D = feat_i.shape
+        with torch.no_grad():
+            logits = probe(feat_i.unsqueeze(0).float())
+            pred = logits[0].argmax(0).cpu().numpy()
+        pred_up = F.interpolate(
+            torch.from_numpy(pred).unsqueeze(0).unsqueeze(0).float(),
+            size=gt.shape, mode="nearest",
+        ).squeeze().numpy().astype(np.int64)
+
+        axes[i, col].imshow(colorize_mask(pred_up))
+        axes[i, col].set_title("Pred" if i == 0 else "")
+        axes[i, col].axis("off")
+        col += 1
+
+        axes[i, col].imshow(correctness_map(pred_up, gt))
+        axes[i, col].set_title("Correct" if i == 0 else "")
+        axes[i, col].axis("off")
+        col += 1
+
+        feat_np = feat_i.cpu().float().numpy()
+        pca = _fit_pca(feat_np.reshape(-1, D))
+        pca_img = _pca_to_rgb(pca, feat_np.reshape(-1, D), H, W)
+        pca_up = F.interpolate(
+            torch.from_numpy(pca_img).permute(2, 0, 1).unsqueeze(0),
+            size=gt.shape, mode="bilinear", align_corners=False,
+        ).squeeze().permute(1, 2, 0).numpy()
+        axes[i, col].imshow(pca_up)
+        axes[i, col].set_title("PCA" if i == 0 else "")
+        axes[i, col].axis("off")
+        col += 1
+
+    plt.tight_layout()
+    return fig
+
+
+def log_probe_viz(
+    exp: comet_ml.Experiment,
+    step: int,
+    probe: torch.nn.Module,
+    features: Tensor,
+    images: Tensor,
+    masks: Tensor,
+    n_samples: int,
+    split: str = "val",
+) -> None:
+    fig = make_probe_viz_figure(probe, features, images, masks, n_samples)
     exp.log_figure(figure_name=f"viz_{split}_{step}", figure=fig, step=step)
     plt.close(fig)
 

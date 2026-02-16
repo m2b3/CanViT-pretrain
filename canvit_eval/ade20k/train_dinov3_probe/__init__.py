@@ -27,6 +27,7 @@ from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset,
 from canvit_eval.ade20k.probe import ProbeHead, eval_probe_on_batch
 from canvit_eval.ade20k.train_probe.config import ProbeTrainBase
 from canvit_eval.ade20k.train_probe.loss import ce_loss, upsample_preds
+from canvit_eval.ade20k.viz import log_probe_viz
 from canvit_eval.metrics import IoUAccumulator
 
 log = logging.getLogger(__name__)
@@ -116,9 +117,12 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
 
     # Comet
     exp = comet_ml.Experiment(project_name=cfg.comet_project, workspace=cfg.comet_workspace)
+    model_short = cfg.model.split("/")[-1].replace("-pretrain-lvd1689m", "").replace("-pretrain", "")
+    exp_name = f"{model_short}_{cfg.resolution}px_{time.strftime('%Y-%m-%d-%H%M%S-%Z')}"
+    exp.set_name(exp_name)
     exp.log_parameters(asdict(cfg))
     exp.add_tag("dinov3-baseline")
-    log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()}")
+    log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()} ({exp_name})")
 
     job_id = os.environ.get("SLURM_JOB_ID", "local")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -156,12 +160,20 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
             probe.eval()
             val_iou.reset()
 
+            viz_feats = viz_images = viz_masks = None
+            do_viz = step % cfg.viz_every == 0
+
             with torch.no_grad():
                 for vi, vm in val_loader:
                     vi, vm = vi.to(device), vm.to(device)
                     with amp_ctx:
                         feats = _extract_features(teacher, vi, cfg.resolution)
                     eval_probe_on_batch(probe, feats, vm, val_iou)
+                    if do_viz and viz_feats is None:
+                        viz_feats, viz_images, viz_masks = feats, vi, vm
+
+            if do_viz and viz_feats is not None:
+                log_probe_viz(exp, step, probe, viz_feats, viz_images, viz_masks, cfg.viz_samples)
 
             miou = val_iou.compute()
             exp.log_metric("val_miou", miou, step=step)

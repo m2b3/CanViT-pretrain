@@ -162,8 +162,11 @@ def train(cfg: Config) -> None:
 
     # Comet
     exp = comet_ml.Experiment(project_name=cfg.comet_project, workspace=cfg.comet_workspace)
+    feats_str = "+".join(cfg.features)
+    exp_name = f"canvas_{feats_str}_{cfg.n_timesteps}t_{cfg.glimpse_px}g_{time.strftime('%Y-%m-%d-%H%M%S-%Z')}"
+    exp.set_name(exp_name)
     exp.log_parameters(asdict(cfg))
-    log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()}")
+    log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()} ({exp_name})")
 
     job_id = os.environ.get("SLURM_JOB_ID", "local")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
