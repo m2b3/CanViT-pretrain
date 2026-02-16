@@ -1,4 +1,9 @@
-"""Inspect a training checkpoint. Usage: uv run python scripts/inspect_ckpt.py <path>"""
+"""Inspect a training checkpoint.
+
+Usage:
+    uv run python scripts/inspect_ckpt.py <checkpoint.pt>
+    uv run python scripts/inspect_ckpt.py <checkpoint.pt> --smoke-test
+"""
 
 import sys
 from pathlib import Path
@@ -6,9 +11,7 @@ from pathlib import Path
 import torch
 
 
-def main() -> None:
-    assert len(sys.argv) > 1, "Usage: uv run python scripts/inspect_ckpt.py <checkpoint.pt>"
-    path = Path(sys.argv[1])
+def print_info(path: Path) -> None:
     resolved = path.resolve() if path.is_symlink() else path
     ckpt = torch.load(resolved, weights_only=False, map_location="cpu")
 
@@ -58,6 +61,40 @@ def main() -> None:
                 else:
                     print(f"  {ts}  (no changes)")
             prev = cfg
+
+
+def smoke_test(path: Path) -> None:
+    """Load model from checkpoint, run one forward pass with dummy input."""
+    from canvit.viewpoint import Viewpoint
+    from canvit_pretrain.checkpoint import load_model
+
+    print("\n--- smoke test ---")
+    print("loading model...", end=" ", flush=True)
+    model, ckpt = load_model(path)
+    print("ok")
+
+    glimpse_px = ckpt["glimpse_grid_size"] * model.backbone.patch_size_px
+    canvas_grid = model.canvas_patch_grid_sizes[0]
+
+    print(f"forward (glimpse={glimpse_px}px, canvas_grid={canvas_grid})...", end=" ", flush=True)
+    with torch.no_grad():
+        state = model.init_state(batch_size=1, canvas_grid_size=canvas_grid)
+        vp = Viewpoint(centers=torch.zeros(1, 2), scales=torch.ones(1, 1))
+        dummy = torch.randn(1, 3, glimpse_px, glimpse_px)
+        out = model.forward(glimpse=dummy, state=state, viewpoint=vp, canvas_grid_size=canvas_grid)
+    print("ok")
+    print(f"output canvas: {out.state.canvas.shape}")
+
+
+def main() -> None:
+    assert len(sys.argv) > 1, __doc__
+    path = Path(sys.argv[1])
+    resolved = path.resolve() if path.is_symlink() else path
+
+    print_info(path)
+
+    if "--smoke-test" in sys.argv[2:]:
+        smoke_test(resolved)
 
 
 if __name__ == "__main__":

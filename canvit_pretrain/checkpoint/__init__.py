@@ -253,8 +253,10 @@ def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
     return data
 
 
-def load_model(path: Path, device: torch.device | str = "cpu") -> CanViTForPretraining:
-    """Load CanViTForPretraining from checkpoint. Strict — no fallbacks."""
+def load_model(
+    path: Path, device: torch.device | str = "cpu",
+) -> tuple[CanViTForPretraining, CheckpointData]:
+    """Load CanViTForPretraining from checkpoint. Returns (model, checkpoint_data)."""
     from canvit import create_backbone
 
     ckpt = load(path, device)
@@ -272,4 +274,4 @@ def load_model(path: Path, device: torch.device | str = "cpu") -> CanViTForPretr
 
     if isinstance(device, str):
         device = torch.device(device)
-    return model.to(device).eval()
+    return model.to(device).eval(), ckpt
