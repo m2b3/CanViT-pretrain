@@ -145,8 +145,9 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
     step = 0
     train_iter = iter(train_loader)
     pbar = tqdm(total=cfg.max_steps, desc="Training")
-    loss_sum = 0.0
-    loss_count = 0
+    loss_acc: torch.Tensor | None = None
+    grad_acc: torch.Tensor | None = None
+    acc_count = 0
 
     while step < cfg.max_steps:
         try:
@@ -215,8 +216,9 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
         optimizer.step()
         scheduler.step()
 
-        loss_sum += loss.detach().item()
-        loss_count += 1
+        loss_acc = loss.detach() if loss_acc is None else loss_acc + loss.detach()
+        grad_acc = grad_norm.detach() if grad_acc is None else grad_acc + grad_norm.detach()
+        acc_count += 1
 
         # Train IoU
         with torch.no_grad():
@@ -227,18 +229,20 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
         step += 1
         pbar.update(1)
 
-        # === Logging ===
+        # === Logging (GPU sync only here) ===
         if step % cfg.log_every == 0:
-            avg_loss = loss_sum / loss_count
+            assert loss_acc is not None and grad_acc is not None
+            avg_loss = (loss_acc / acc_count).item()
+            avg_grad = (grad_acc / acc_count).item()
             train_miou = train_iou.compute()
             exp.log_metrics({
                 f"{metric_prefix}/loss": avg_loss,
-                f"{metric_prefix}/grad_norm": grad_norm.item(),
+                f"{metric_prefix}/grad_norm": avg_grad,
                 f"{metric_prefix}/lr": scheduler.get_last_lr()[0],
                 f"{metric_prefix}/train_miou": train_miou,
             }, step=step)
-            loss_sum = 0.0
-            loss_count = 0
+            loss_acc = grad_acc = None
+            acc_count = 0
             train_iou.reset()
 
     pbar.close()
