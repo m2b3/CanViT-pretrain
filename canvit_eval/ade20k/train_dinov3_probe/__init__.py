@@ -122,12 +122,13 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
     exp.set_name(exp_name)
     exp.log_parameters(asdict(cfg))
     exp.add_tag("dinov3-baseline")
+    metric_prefix = f"{model_short}_{cfg.resolution}px"
     log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()} ({exp_name})")
 
     job_id = os.environ.get("SLURM_JOB_ID", "local")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     run_dir = (
-        cfg.probe_ckpt_dir / f"dinov3_{cfg.resolution}px_{timestamp}_{job_id}_{exp.get_key()[:8]}"
+        cfg.probe_ckpt_dir / f"{model_short}_{cfg.resolution}px_{timestamp}_{job_id}_{exp.get_key()[:8]}"
         if cfg.probe_ckpt_dir else None
     )
     if run_dir:
@@ -176,7 +177,7 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
                 log_probe_viz(exp, step, probe, viz_feats, viz_images, viz_masks, cfg.viz_samples)
 
             miou = val_iou.compute()
-            exp.log_metric("val_miou", miou, step=step)
+            exp.log_metric(f"{metric_prefix}/val_miou", miou, step=step)
             log.info(f"Step {step}: val mIoU={100*miou:.2f}% (best={100*best_miou:.2f}%)")
 
             if miou > best_miou and run_dir:
@@ -229,10 +230,10 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
             avg_loss = loss_sum / loss_count
             train_miou = train_iou.compute()
             exp.log_metrics({
-                "loss": avg_loss,
-                "grad_norm": grad_norm.item(),
-                "lr": scheduler.get_last_lr()[0],
-                "train_miou": train_miou,
+                f"{metric_prefix}/loss": avg_loss,
+                f"{metric_prefix}/grad_norm": grad_norm.item(),
+                f"{metric_prefix}/lr": scheduler.get_last_lr()[0],
+                f"{metric_prefix}/train_miou": train_miou,
             }, step=step)
             loss_sum = 0.0
             loss_count = 0
@@ -255,7 +256,7 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
 
     log.info("=" * 60)
     log.info(f"Training complete. Best mIoU: {100*best_miou:.2f}%")
-    exp.log_metric("best/miou", best_miou)
+    exp.log_metric(f"{metric_prefix}/best_miou", best_miou)
     log.info("=" * 60)
 
 
