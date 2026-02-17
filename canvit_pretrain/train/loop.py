@@ -1,5 +1,10 @@
 """Main training loop."""
 
+# backward() runs outside autocast (as PyTorch recommends). torch.compile's default
+# "same_as_forward" assumption silently corrupts gradients when that's the case.
+import torch._functorch.config
+torch._functorch.config.backward_pass_autocast = "off"  # type: ignore[attr-defined]
+
 import logging
 import os
 import signal
@@ -220,9 +225,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     if cfg.compile:
         if cfg.combo_kernels:
             torch._inductor.config.combo_kernels = True  # type: ignore[attr-defined]
-            log.info("Compiling teacher and model (combo_kernels=True)")
+            log.info("Compiling teacher and model (combo_kernels=True, backward_pass_autocast=off)")
         else:
-            log.info("Compiling teacher and model")
+            log.info("Compiling teacher and model (backward_pass_autocast=off)")
         compile_teacher(teacher)
         compile_model(model)
 
