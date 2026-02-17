@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -29,7 +30,8 @@ log = logging.getLogger(__name__)
 def _default_output() -> Path:
     job_id = os.environ.get("SLURM_ARRAY_JOB_ID", os.environ.get("SLURM_JOB_ID", "local"))
     task_id = os.environ.get("SLURM_ARRAY_TASK_ID", "0")
-    return Path(f"outputs/ade20k_eval_{job_id}_{task_id}.pt")
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    return Path(f"outputs/ade20k_canvas_eval_{ts}_{job_id}_{task_id}.pt")
 
 
 @dataclass

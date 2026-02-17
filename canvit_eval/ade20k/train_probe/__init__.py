@@ -167,11 +167,14 @@ def train(cfg: Config) -> None:
     exp_name = f"canvit_{model_slug}_{feats_str}_{cfg.n_timesteps}t_{cfg.glimpse_px}g_{ts}"
     exp.set_name(exp_name)
     exp.log_parameters(asdict(cfg))
+    exp.add_tag("canvas-probe")
+    exp.add_tag(model_slug)
     log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()} ({exp_name})")
 
     job_id = os.environ.get("SLURM_JOB_ID", "local")
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    run_dir = cfg.probe_ckpt_dir / f"{timestamp}_{job_id}_{exp.get_key()[:8]}" if cfg.probe_ckpt_dir else None
+    dirname = f"{model_slug}_{timestamp}_{job_id}_{exp.get_key()[:8]}"
+    run_dir = cfg.probe_ckpt_dir / dirname if cfg.probe_ckpt_dir else None
     if run_dir:
         run_dir.mkdir(parents=True, exist_ok=True)
         log.info(f"Checkpoints: {run_dir}")

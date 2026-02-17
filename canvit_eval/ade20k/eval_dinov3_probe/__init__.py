@@ -5,6 +5,7 @@ Deterministic — no viewpoint policy, no variance. Single run is sufficient.
 
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -25,7 +26,8 @@ log = logging.getLogger(__name__)
 
 def _default_output() -> Path:
     job_id = os.environ.get("SLURM_JOB_ID", "local")
-    return Path(f"outputs/ade20k_dinov3_eval_{job_id}.pt")
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    return Path(f"outputs/ade20k_dinov3_eval_{ts}_{job_id}.pt")
 
 
 @dataclass

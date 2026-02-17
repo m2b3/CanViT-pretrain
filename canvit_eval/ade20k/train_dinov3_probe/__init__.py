@@ -122,6 +122,7 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
     exp.set_name(exp_name)
     exp.log_parameters(asdict(cfg))
     exp.add_tag("dinov3-baseline")
+    exp.add_tag(model_short)
     metric_prefix = f"{model_short}_{cfg.resolution}px"
     log.info(f"Comet: {cfg.comet_workspace}/{cfg.comet_project}/{exp.get_key()} ({exp_name})")
 
