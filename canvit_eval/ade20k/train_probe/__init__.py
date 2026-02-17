@@ -67,16 +67,17 @@ def _save_checkpoint(
     *,
     is_best: bool,
 ) -> Path:
-    best_mious = {name: p.best_mean_miou for name, p in probes.items()}
-    mean_miou = sum(best_mious.values()) / len(best_mious)
+    best_last = {name: p.best_last_miou for name, p in probes.items()}
+    best_last_avg = sum(best_last.values()) / len(best_last)
 
-    filename = f"best_miou{mean_miou:.4f}_step{step}.pt" if is_best else f"final_step{step}.pt"
+    t_last = cfg.n_timesteps - 1
+    filename = f"best_t{t_last}_miou{best_last_avg:.4f}_step{step}.pt" if is_best else f"final_step{step}.pt"
     path = run_dir / filename
     tmp_path = run_dir / f".{filename}.tmp"
     data = {
         "step": step,
         "probe_state_dicts": {name: p.head.state_dict() for name, p in probes.items()},
-        "best_mean_mious": best_mious,
+        "best_mious_per_t": {name: p.best_mious for name, p in probes.items()},
         "config": asdict(cfg),
     }
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -126,6 +127,7 @@ def train(cfg: Config) -> None:
         for feat in cfg.features
     }
     for feat, probe in probes.items():
+        probe.init_best_mious(cfg.n_timesteps)
         log.info(f"  probe[{feat}]: dim={dims[feat]}, params={sum(p.numel() for p in probe.head.parameters()):,}")
 
     # IoU metrics
@@ -236,15 +238,13 @@ def train(cfg: Config) -> None:
             any_improved = False
             for feat_type in cfg.features:
                 mious = [val_iou[feat_type][t].compute() for t in range(cfg.n_timesteps)]
-                mean_miou = sum(mious) / len(mious)
+                improved = probes[feat_type].update_best(mious)
+                any_improved = any_improved or improved
+
                 for t, miou in enumerate(mious):
                     exp.log_metric(f"{feat_type}/val_miou_t{t}", miou, step=step)
-                exp.log_metric(f"{feat_type}/val_miou_mean", mean_miou, step=step)
+                    exp.log_metric(f"{feat_type}/best_val_miou_t{t}", probes[feat_type].best_mious[t], step=step)
                 exp.log_curve(f"{feat_type}/val_miou_curve", x=list(range(cfg.n_timesteps)), y=mious, step=step)
-
-                if mean_miou > probes[feat_type].best_mean_miou:
-                    probes[feat_type].best_mean_miou = mean_miou
-                    any_improved = True
 
             if any_improved and run_dir:
                 _save_checkpoint(run_dir, probes, step, cfg, is_best=True)
@@ -333,10 +333,11 @@ def train(cfg: Config) -> None:
         _save_checkpoint(run_dir, probes, step, cfg, is_best=False)
 
     log.info("=" * 60)
-    log.info("Training complete. Best mean mIoU:")
+    log.info("Training complete. Best val mIoU per timestep:")
     for name, p in probes.items():
-        log.info(f"  {name}: {p.best_mean_miou:.4f}")
-        exp.log_metric(f"best/{name}", p.best_mean_miou)
+        for t, v in enumerate(p.best_mious):
+            exp.log_metric(f"best/{name}_t{t}", v)
+        log.info(f"  {name}: t0={p.best_mious[0]:.4f} ... t{p.n_timesteps-1}={p.best_last_miou:.4f}")
     log.info("=" * 60)
 
 

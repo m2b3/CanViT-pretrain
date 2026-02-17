@@ -78,7 +78,13 @@ def load_probes(
         probe.load_state_dict(state_dict)
         probe.eval()
         probes[name] = probe
-        log.info(f"  {name}: loaded (best mIoU={ckpt['best_mean_mious'].get(name, 'N/A')})")
+        best_per_t = ckpt.get("best_mious_per_t", {}).get(name)
+        if best_per_t:
+            best_str = f"best per-t={best_per_t}"
+        else:
+            old = ckpt.get("best_mean_mious", {}).get(name, "N/A")
+            best_str = f"best(legacy)={old}"
+        log.info(f"  {name}: loaded ({best_str})")
 
     return probes
 

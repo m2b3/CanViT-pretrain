@@ -17,10 +17,33 @@ class ProbeState:
     head: ProbeHead
     optimizer: AdamW
     scheduler: Any  # WarmupOneCycleLR or other LR scheduler
-    best_mean_miou: float = 0.0
+    n_timesteps: int = 0
+    _best_mious: list[float] | None = None
     _loss_sum: Tensor | None = None
     _grad_norm_sum: Tensor | None = None
     _count: int = 0
+
+    def init_best_mious(self, n_timesteps: int) -> None:
+        self.n_timesteps = n_timesteps
+        self._best_mious = [0.0] * n_timesteps
+
+    @property
+    def best_mious(self) -> list[float]:
+        assert self._best_mious is not None, "call init_best_mious first"
+        return self._best_mious
+
+    @property
+    def best_last_miou(self) -> float:
+        return self.best_mious[-1]
+
+    def update_best(self, mious: list[float]) -> bool:
+        """Update per-timestep bests. Returns True if last timestep improved."""
+        assert len(mious) == self.n_timesteps
+        old_last = self.best_last_miou
+        for t, v in enumerate(mious):
+            if v > self.best_mious[t]:
+                self.best_mious[t] = v
+        return self.best_last_miou > old_last
 
     def accumulate(self, loss: Tensor, grad_norm: Tensor) -> None:
         """Accumulate loss/grad_norm. NO GPU sync."""

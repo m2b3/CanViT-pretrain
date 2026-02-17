@@ -178,11 +178,14 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
                 log_probe_viz(exp, step, probe, viz_feats, viz_images, viz_masks, cfg.viz_samples)
 
             miou = val_iou.compute()
+            improved = miou > best_miou
+            if improved:
+                best_miou = miou
             exp.log_metric(f"{metric_prefix}/val_miou", miou, step=step)
+            exp.log_metric(f"{metric_prefix}/best_val_miou", best_miou, step=step)
             log.info(f"Step {step}: val mIoU={100*miou:.2f}% (best={100*best_miou:.2f}%)")
 
-            if miou > best_miou and run_dir:
-                best_miou = miou
+            if improved and run_dir:
                 path = run_dir / f"best_miou{miou:.4f}_step{step}.pt"
                 for old in run_dir.glob("best_*.pt"):
                     old.unlink()
@@ -195,8 +198,6 @@ def train(cfg: DINOv3ProbeTrainConfig) -> None:
                     "config": asdict(cfg),
                 }, path)
                 log.info(f"  Saved best: {path}")
-            elif miou > best_miou:
-                best_miou = miou
 
             val_time = time.perf_counter() - val_start
             exp.log_metric("timing/val_seconds", val_time, step=step)
