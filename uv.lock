@@ -117,7 +117,7 @@ wheels = [
 [[package]]
 name = "canvit"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch.git?branch=main#e978ccd7882220fe1412a7f0abb8eaed17f0c492" }
+source = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch.git?branch=main#c4f9186d5dad465afdb9a29501cffb84a86c951a" }
 dependencies = [
     { name = "dinov3-in1k-probes" },
     { name = "huggingface-hub" },
