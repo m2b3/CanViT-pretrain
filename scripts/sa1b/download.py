@@ -129,12 +129,18 @@ def main() -> None:
                     print(f"[skip] sa_images_ids.txt (already exists)")
                 break
 
+    # --- Cleanup: remove orphaned temp files from interrupted runs ---
+    for suffix in (".downloading", ".decompressing"):
+        for orphan in tar_dir.glob(f"*{suffix}"):
+            print(f"[cleanup] removing orphan {orphan.name}")
+            orphan.unlink()
+
     # --- Pass 1: decompress any previously-downloaded gzipped tars ---
     n_decompressed = 0
     for row in rows:
         dest = tar_dir / row["file_name"]
         if dest.exists() and is_gzipped(dest):
-            print(f"[recompress] {dest.name} is gzipped, decompressing...")
+            print(f"[decompress] {dest.name} is gzipped, decompressing...")
             decompress_in_place(dest)
             n_decompressed += 1
     if n_decompressed:
