@@ -101,18 +101,25 @@ def get_git_commit() -> str:
         return "unknown"
 
 
-def extract_tar(tar: Path, dest: Path) -> int:
-    """Extract tar to dest, return number of JPEGs extracted."""
+def extract_tar(tar: Path, dest: Path) -> None:
+    """Extract only JPEGs from tar to dest."""
     dest.mkdir(parents=True, exist_ok=True)
-    t0 = time.perf_counter()
-    subprocess.run(["tar", "xf", str(tar), "-C", str(dest)], check=True)
-    elapsed = time.perf_counter() - t0
-    jpgs = sorted(dest.glob("*.jpg"))
-    log.info(f"Extracted {tar.name}: {len(jpgs)} JPEGs in {elapsed:.1f}s")
-    return len(jpgs)
+    # List tar contents, filter to .jpg, extract only those.
+    # This avoids extracting ~11k JSON mask files we don't need.
+    listing = subprocess.check_output(
+        ["tar", "tf", str(tar)], text=True
+    )
+    jpg_members = [line for line in listing.splitlines() if line.endswith(".jpg")]
+    assert jpg_members, f"No .jpg entries in {tar.name}"
+
+    subprocess.run(
+        ["tar", "xf", str(tar), "-C", str(dest)] + jpg_members,
+        check=True,
+    )
 
 
 def main(cfg: Config) -> None:
+    t_start = time.perf_counter()
     device = torch.device("cuda")
     tar_stem = cfg.tar.stem  # e.g. "sa_000020"
     shard_path = cfg.out_dir / f"{tar_stem}.pt"
@@ -130,25 +137,30 @@ def main(cfg: Config) -> None:
     log.info(f"image_size: {cfg.image_size}")
     log.info(f"teacher_repo_id: {cfg.teacher_repo_id}")
 
-    # Step 1: Extract
+    # --- Phase 1: Extract ---
+    t0 = time.perf_counter()
     extract_tar(cfg.tar, cfg.extract_dir)
     jpg_paths = sorted(cfg.extract_dir.glob("*.jpg"))
     n = len(jpg_paths)
     assert n > 0, f"No JPEGs found in {cfg.extract_dir}"
-    log.info(f"{n} images to process")
+    t_extract = time.perf_counter() - t0
+    log.info(f"Extract: {n} JPEGs in {t_extract:.1f}s")
 
-    # Step 2: Load teacher
+    # --- Phase 2: Load teacher ---
+    t0 = time.perf_counter()
     teacher = load_teacher(cfg.teacher_repo_id, device)
     patch_size = teacher.model.config.patch_size
     embed_dim = teacher.embed_dim
     n_patches = (cfg.image_size // patch_size) ** 2
     assert cfg.image_size % patch_size == 0
-    log.info(f"Teacher: {embed_dim}d, {n_patches} patches, patch_size={patch_size}")
-    log.info(f"GPU: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    t_teacher = time.perf_counter() - t0
+    log.info(f"Teacher: {embed_dim}d, {n_patches} patches, patch_size={patch_size} (loaded in {t_teacher:.1f}s)")
+    log.info(f"GPU after teacher: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # Step 3: Inference
-    patches_buf = torch.empty(n, n_patches, embed_dim, dtype=STORAGE_DTYPE, device=device)
-    cls_buf = torch.empty(n, embed_dim, dtype=STORAGE_DTYPE, device=device)
+    # --- Phase 3: Inference ---
+    # Accumulate on CPU — full shard is ~66 GB in fp16, won't fit on GPU.
+    patches_buf = torch.empty(n, n_patches, embed_dim, dtype=STORAGE_DTYPE)
+    cls_buf = torch.empty(n, embed_dim, dtype=STORAGE_DTYPE)
     hashes: list[str] = [""] * n
     failed: list[int] = []
 
@@ -161,38 +173,55 @@ def main(cfg: Config) -> None:
     )
 
     t0 = time.perf_counter()
+    n_batches = 0
+    t_data_total = 0.0
+    t_infer_total = 0.0
     write_idx = 0
 
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        t_batch_start = time.perf_counter()
         for imgs, indices, ok, batch_hashes in tqdm(loader, desc=tar_stem):
+            t_data = time.perf_counter() - t_batch_start
+            t_data_total += t_data
+
             for i, success, h in zip(indices.tolist(), ok.tolist(), batch_hashes):
                 hashes[i] = h
                 if not success:
                     failed.append(i)
 
+            t_infer_start = time.perf_counter()
             imgs = imgs.to(device)
             feats = teacher.forward_norm_features(imgs)
             bs = imgs.shape[0]
             patches_buf[write_idx : write_idx + bs] = feats.patches.to(STORAGE_DTYPE)
             cls_buf[write_idx : write_idx + bs] = feats.cls.to(STORAGE_DTYPE)
             write_idx += bs
+            t_infer_total += time.perf_counter() - t_infer_start
+            n_batches += 1
+
+            t_batch_start = time.perf_counter()
 
     assert write_idx == n, f"Expected {n}, wrote {write_idx}"
-    elapsed = time.perf_counter() - t0
-    log.info(f"Inference: {n} images in {elapsed:.1f}s ({n / elapsed:.0f} img/s)")
+    t_inference = time.perf_counter() - t0
 
+    log.info(
+        f"Inference: {n} images in {t_inference:.1f}s ({n / t_inference:.0f} img/s) | "
+        f"data: {t_data_total:.1f}s ({t_data_total / t_inference * 100:.0f}%) | "
+        f"compute: {t_infer_total:.1f}s ({t_infer_total / t_inference * 100:.0f}%)"
+    )
     if failed:
         log.warning(f"{len(failed)} failed images")
 
-    # Step 4: Save shard
+    # --- Phase 4: Save ---
+    t0 = time.perf_counter()
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     filenames = [p.name for p in jpg_paths]
 
     tmp = shard_path.with_suffix(".tmp")
     torch.save(
         {
-            "patches": patches_buf.cpu(),
-            "cls": cls_buf.cpu(),
+            "patches": patches_buf,
+            "cls": cls_buf,
             "paths": filenames,
             "class_idxs": torch.zeros(n, dtype=torch.int32),
             "image_hashes": hashes,
@@ -211,9 +240,16 @@ def main(cfg: Config) -> None:
         tmp,
     )
     tmp.rename(shard_path)
+    t_save = time.perf_counter() - t0
 
     shard_mb = shard_path.stat().st_size / 1e6
-    log.info(f"Saved {shard_path} ({shard_mb:.0f} MB, {n} images)")
+    t_total = time.perf_counter() - t_start
+
+    log.info(f"Saved {shard_path.name} ({shard_mb:.0f} MB, {n} images)")
+    log.info(
+        f"Timing: extract={t_extract:.0f}s teacher={t_teacher:.0f}s "
+        f"inference={t_inference:.0f}s save={t_save:.0f}s total={t_total:.0f}s"
+    )
 
 
 if __name__ == "__main__":
