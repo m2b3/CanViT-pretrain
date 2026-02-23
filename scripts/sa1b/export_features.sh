@@ -76,10 +76,12 @@ echo "Found ${#TARS[@]} tars"
 mkdir -p "$LOCAL_IMAGE_DIR"
 START_TIME=$(date +%s)
 
+# Tars are stored uncompressed on NFS — extract in parallel (NFS-bound, not CPU-bound).
 for tar in "${TARS[@]}"; do
     echo "Extracting $(basename "$tar") ..."
-    tar xzf "$tar" --wildcards '*/sa_*.jpg' --strip-components=1 -C "$LOCAL_IMAGE_DIR"
+    tar xf "$tar" --wildcards '*/sa_*.jpg' --strip-components=1 -C "$LOCAL_IMAGE_DIR" &
 done
+wait
 
 N_IMAGES=$(find "$LOCAL_IMAGE_DIR" -name '*.jpg' | wc -l)
 ELAPSED=$(($(date +%s) - START_TIME))
