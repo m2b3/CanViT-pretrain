@@ -17,7 +17,7 @@ export SA1B_LINKS="sa1b/sa1b_links.tsv"
 export INDEX_DIR="$SCRATCH/dataset_indexes"
 export CHECKPOINTS_DIR=~/projects/def-skrishna/checkpoints
 export FEATURES_DIR=~/projects/def-skrishna/dinov3_dense_features
-export SA1B_FEATURES_DIR=~/projects/def-akrish/dinov3_dense_features
+export SA1B_FEATURES_DIR=~/projects/def-areynaud/dinov3_dense_features
 
 # Known checkpoints
 export DINOV3_VITB16_CKPT="$CHECKPOINTS_DIR/dinov3/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"

@@ -138,6 +138,7 @@ def main(cfg: Config) -> None:
     log.info(f"teacher_repo_id: {cfg.teacher_repo_id}")
 
     # --- Phase 1: Extract ---
+    log.info(f"Extracting JPEGs from {cfg.tar.name}...")
     t0 = time.perf_counter()
     extract_tar(cfg.tar, cfg.extract_dir)
     jpg_paths = sorted(cfg.extract_dir.glob("*.jpg"))
@@ -220,6 +221,8 @@ def main(cfg: Config) -> None:
         log.warning(f"{len(failed)} failed images")
 
     # --- Phase 4: Save ---
+    shard_mb_est = (patches_buf.nbytes + cls_buf.nbytes) / 1e6
+    log.info(f"Saving shard to {shard_path} (~{shard_mb_est:.0f} MB)...")
     t0 = time.perf_counter()
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     filenames = [p.name for p in jpg_paths]
