@@ -34,6 +34,7 @@ class Config:
     warmup_steps: int = 100_000
     start_lr: float | None = 1e-7  # None = peak_lr / warmup_steps
     peak_lr: float = 4e-4
+    cosine_total_steps: int | None = None  # None = constant after warmup; set to enable cosine decay
     # weight_decay: float = 0.05  # standard in ViTs
     # we can use a much lower weight decay due to the richness of our training signal
     # and we *should*, due to the use of small batches

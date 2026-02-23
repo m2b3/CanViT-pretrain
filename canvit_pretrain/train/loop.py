@@ -52,7 +52,7 @@ from .data import ShardedFeatureLoader, create_loaders, scene_size_px  # noqa: E
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .probe import load_probe  # noqa: E402
-from .scheduler import warmup_constant_scheduler  # noqa: E402
+from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noqa: E402
 from .step import training_step  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
@@ -287,11 +287,18 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     optimizer = torch.optim.AdamW(trainable, lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
     start_lr = cfg.start_lr if cfg.start_lr is not None else cfg.peak_lr / cfg.warmup_steps
-    scheduler = warmup_constant_scheduler(
-        optimizer, cfg.warmup_steps, cfg.peak_lr,
-        start_lr=cfg.start_lr,
-    )
-    log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e} (constant), wd={cfg.weight_decay:.2e}")
+    if cfg.cosine_total_steps is not None:
+        scheduler = warmup_cosine_scheduler(
+            optimizer, cfg.warmup_steps, cfg.cosine_total_steps, cfg.peak_lr,
+            start_lr=cfg.start_lr,
+        )
+        log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e}→0 (cosine, {cfg.cosine_total_steps} steps), wd={cfg.weight_decay:.2e}")
+    else:
+        scheduler = warmup_constant_scheduler(
+            optimizer, cfg.warmup_steps, cfg.peak_lr,
+            start_lr=cfg.start_lr,
+        )
+        log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e} (constant), wd={cfg.weight_decay:.2e}")
 
     amp_ctx = (
         torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16)
