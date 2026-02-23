@@ -1,12 +1,22 @@
 #!/bin/bash
 # Submit export jobs for all tars that don't have a corresponding shard yet.
-# Usage: bash sa1b/submit_export.sh [--dry-run]
+# Usage: bash sa1b/submit_export.sh [--dry-run] [--max-concurrent N]
 set -euo pipefail
 
 # Requires direnv (SA1B_TAR_DIR, SA1B_FEATURES_DIR).
-# Do NOT source slurm/env.sh — that's for compute nodes.
+# Do NOT source slurm/env.sh — that references $SLURM_TMPDIR which is unset on login nodes.
 : "${SA1B_TAR_DIR:?SA1B_TAR_DIR not set (run from direnv-enabled dir)}"
 : "${SA1B_FEATURES_DIR:?SA1B_FEATURES_DIR not set (run from direnv-enabled dir)}"
+
+DRY_RUN=false
+MAX_CONCURRENT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) DRY_RUN=true; shift ;;
+        --max-concurrent) MAX_CONCURRENT="$2"; shift 2 ;;
+        *) echo "Unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
 
 OUT_DIR="$SA1B_FEATURES_DIR/sa1b/dinov3_vitb16/1024/shards"
 
@@ -23,12 +33,14 @@ if [[ ${#pending[@]} -eq 0 ]]; then
     exit 0
 fi
 
-# Build comma-separated array spec
+# Build array spec with optional concurrency limit
 IFS=','; array_spec="${pending[*]}"; unset IFS
+[[ -n "$MAX_CONCURRENT" ]] && array_spec="${array_spec}%${MAX_CONCURRENT}"
+
 echo "Pending: ${#pending[@]} tars"
 echo "Array:   $array_spec"
 
-if [[ "${1:-}" == "--dry-run" ]]; then
+if $DRY_RUN; then
     echo "(dry run, not submitting)"
     exit 0
 fi
