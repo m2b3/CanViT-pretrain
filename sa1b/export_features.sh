@@ -18,7 +18,7 @@
 # For larger scale, will need a different approach.
 #
 # USAGE:
-#   sbatch scripts/sa1b/export_features.sh
+#   sbatch sa1b/export_features.sh
 # ==============================================================================
 
 set -euo pipefail
@@ -92,7 +92,7 @@ echo "Extracted $N_IMAGES images from ${#TARS[@]} tars in ${ELAPSED}s"
 # ==============================================================================
 
 echo "Building parquet index..."
-uv run python scripts/sa1b/build_parquet.py \
+uv run python sa1b/build_parquet.py \
     --image-dir "$LOCAL_IMAGE_DIR" \
     --output "$LOCAL_PARQUET"
 
