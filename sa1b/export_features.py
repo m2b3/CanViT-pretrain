@@ -167,7 +167,7 @@ def main(cfg: Config) -> None:
     patches_mmap_path = cfg.extract_dir / f"{tar_stem}_patches.mmap"
     cls_mmap_path = cfg.extract_dir / f"{tar_stem}_cls.mmap"
     patches_buf = np.memmap(patches_mmap_path, dtype=NUMPY_DTYPE, mode="w+", shape=(n, n_patches, embed_dim))
-    cls_buf = np.memmap(cls_mmap_path, dtype=NUMPY_DTYPE, mode="w+", shape=(n, embed_dim))
+    cls_buf = np.memmap(cls_mmap_path, dtype=np.float32, mode="w+", shape=(n, embed_dim))
     log.info(f"Mmap buffers: patches={patches_buf.nbytes/1e9:.1f}GB cls={cls_buf.nbytes/1e6:.0f}MB")
 
     hashes: list[str] = [""] * n
@@ -205,7 +205,7 @@ def main(cfg: Config) -> None:
             bs = imgs.shape[0]
             # GPU → CPU → mmap (OS handles write-back to SSD asynchronously)
             patches_buf[write_idx : write_idx + bs] = feats.patches.to(STORAGE_DTYPE).cpu().numpy()
-            cls_buf[write_idx : write_idx + bs] = feats.cls.to(STORAGE_DTYPE).cpu().numpy()
+            cls_buf[write_idx : write_idx + bs] = feats.cls.float().cpu().numpy()
             t_gpu = time.perf_counter() - t_gpu_start
             t_gpu_total += t_gpu
 
