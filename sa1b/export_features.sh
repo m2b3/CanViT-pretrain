@@ -3,7 +3,7 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --mem=96G
 #SBATCH --cpus-per-task=16
-#SBATCH --time=1:00:00
+#SBATCH --time=0:10:00
 #SBATCH --output=logs/export_sa1b_%A_%a.out
 #SBATCH --error=logs/export_sa1b_%A_%a.err
 
