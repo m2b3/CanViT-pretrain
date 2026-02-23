@@ -14,7 +14,6 @@ import os
 import resource
 import time
 from dataclasses import dataclass, field
-from io import BytesIO
 from pathlib import Path
 
 import torch
@@ -41,29 +40,21 @@ class Config:
 
 
 def bench_components(tar_path: Path, names: list[str], size: int, n: int) -> None:
-    """Time individual components: mmap read, PIL decode, transform."""
+    """Time individual components: read_image (mmap+decode) vs transform."""
     reader = TarImageReader(tar_path)
     transform = preprocess(size)
     names = names[:n]
 
-    # 1) Raw mmap read (bytes from tar)
-    t0 = time.perf_counter()
-    raw_buffers = []
-    for name in names:
-        offset, length = reader.index[name]
-        raw_buffers.append(reader._mm[offset : offset + length])
-    t_mmap = time.perf_counter() - t0
-
-    # 2) PIL decode (bytes → Image)
+    # 1) read_image: mmap slice + PIL decode
     t0 = time.perf_counter()
     images = []
-    for buf in raw_buffers:
-        img = Image.open(BytesIO(buf)).convert("RGB")
+    for name in names:
+        img = reader.read_image(name)
         img.load()
         images.append(img)
-    t_decode = time.perf_counter() - t0
+    t_read = time.perf_counter() - t0
 
-    # 3) Transform (Image → Tensor at target size)
+    # 2) Transform (Image → Tensor at target size)
     t0 = time.perf_counter()
     for img in images:
         transform(img)
@@ -71,10 +62,9 @@ def bench_components(tar_path: Path, names: list[str], size: int, n: int) -> Non
 
     reader.close()
 
-    total = t_mmap + t_decode + t_transform
+    total = t_read + t_transform
     log.info(f"  Components ({n} images @ {size}px):")
-    log.info(f"    mmap read:  {t_mmap:.3f}s ({t_mmap/n*1000:.1f}ms/img, {t_mmap/total*100:.0f}%)")
-    log.info(f"    PIL decode: {t_decode:.3f}s ({t_decode/n*1000:.1f}ms/img, {t_decode/total*100:.0f}%)")
+    log.info(f"    read_image: {t_read:.3f}s ({t_read/n*1000:.1f}ms/img, {t_read/total*100:.0f}%)")
     log.info(f"    transform:  {t_transform:.3f}s ({t_transform/n*1000:.1f}ms/img, {t_transform/total*100:.0f}%)")
     log.info(f"    total:      {total:.3f}s ({n/total:.1f} img/s)")
 
