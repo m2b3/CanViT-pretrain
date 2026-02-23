@@ -49,8 +49,7 @@ mkdir -p logs
 
 # Experiment-specific
 DATASET=in21k
-TEACHER_MODEL=dinov3_vitb16
-TEACHER_CKPT="$DINOV3_VITB16_CKPT"
+TEACHER_REPO_ID="facebook/dinov3-vitb16-pretrain-lvd1689m"
 IMAGE_SIZE=512
 SHARD_SIZE=4096
 SHARDS_PER_JOB=36
@@ -58,7 +57,7 @@ SHARDS_PER_JOB=36
 # Derived from env.sh
 PARQUET="$INDEX_DIR/${DATASET}-shuffled.parquet"
 IMAGE_ROOT="$IN21K_IMAGE_DIR"
-OUT_DIR="$FEATURES_DIR/${DATASET}/${TEACHER_MODEL}/${IMAGE_SIZE}"
+OUT_DIR="$FEATURES_DIR/${DATASET}/dinov3_vitb16/${IMAGE_SIZE}"
 
 JOB_ID=${SLURM_ARRAY_TASK_ID:?Must run as array job}
 START_SHARD=$((JOB_ID * SHARDS_PER_JOB))
@@ -80,8 +79,7 @@ echo "========================================"
 echo "PARQUET:            $PARQUET"
 echo "IMAGE_ROOT:         $IMAGE_ROOT"
 echo "OUT_DIR:            $OUT_DIR"
-echo "TEACHER_MODEL:      $TEACHER_MODEL"
-echo "TEACHER_CKPT:       $TEACHER_CKPT"
+echo "TEACHER_REPO_ID:    $TEACHER_REPO_ID"
 echo "IMAGE_SIZE:         $IMAGE_SIZE"
 echo "SHARD_SIZE:         $SHARD_SIZE"
 echo "SHARDS_PER_JOB:     $SHARDS_PER_JOB"
@@ -96,7 +94,6 @@ echo "========================================"
 
 [[ -f "$PARQUET" ]] || { echo "FATAL: Parquet not found: $PARQUET" >&2; exit 1; }
 [[ -d "$IMAGE_ROOT" ]] || { echo "FATAL: Image root not found: $IMAGE_ROOT" >&2; exit 1; }
-[[ -f "$TEACHER_CKPT" ]] || { echo "FATAL: Teacher ckpt not found: $TEACHER_CKPT" >&2; exit 1; }
 echo "Sanity checks: PASSED"
 echo "========================================"
 
@@ -110,8 +107,7 @@ uv run python scripts/export_features.py \
     --parquet "$PARQUET" \
     --image-root "$IMAGE_ROOT" \
     --out-dir "$OUT_DIR" \
-    --teacher-ckpt "$TEACHER_CKPT" \
-    --teacher-model "$TEACHER_MODEL" \
+    --teacher-repo-id "$TEACHER_REPO_ID" \
     --image-size "$IMAGE_SIZE" \
     --shard-size "$SHARD_SIZE" \
     --start-shard "$START_SHARD" \

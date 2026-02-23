@@ -31,14 +31,13 @@ mkdir -p logs
 # ==============================================================================
 
 IMAGE_SIZE=1024
-TEACHER_MODEL=dinov3_vitb16
-TEACHER_CKPT="$DINOV3_VITB16_CKPT"
+TEACHER_REPO_ID="facebook/dinov3-vitb16-pretrain-lvd1689m"
 SHARD_SIZE=4096
 BATCH_SIZE=32
 
 LOCAL_IMAGE_DIR="$SLURM_TMPDIR/sa1b_images"
 LOCAL_PARQUET="$SLURM_TMPDIR/sa1b_index.parquet"
-OUT_DIR="$SA1B_FEATURES_DIR/sa1b/${TEACHER_MODEL}/${IMAGE_SIZE}"
+OUT_DIR="$SA1B_FEATURES_DIR/sa1b/dinov3_vitb16/${IMAGE_SIZE}"
 
 # ==============================================================================
 # LOGGING
@@ -63,7 +62,6 @@ echo "========================================"
 # ==============================================================================
 
 [[ -d "$SA1B_TAR_DIR" ]] || { echo "FATAL: Tar dir not found: $SA1B_TAR_DIR" >&2; exit 1; }
-[[ -f "$TEACHER_CKPT" ]] || { echo "FATAL: Teacher ckpt not found: $TEACHER_CKPT" >&2; exit 1; }
 
 TARS=("$SA1B_TAR_DIR"/*.tar)
 [[ ${#TARS[@]} -gt 0 ]] || { echo "FATAL: No .tar files in $SA1B_TAR_DIR" >&2; exit 1; }
@@ -77,9 +75,11 @@ mkdir -p "$LOCAL_IMAGE_DIR"
 START_TIME=$(date +%s)
 
 # Tars are stored uncompressed on NFS — extract in parallel (NFS-bound, not CPU-bound).
+# Tar entries are ./sa_<id>.{jpg,json} — flat with ./ prefix, no subdirectories.
+# tar xf handles ./ transparently, files land directly in LOCAL_IMAGE_DIR.
 for tar in "${TARS[@]}"; do
     echo "Extracting $(basename "$tar") ..."
-    tar xf "$tar" --wildcards '*/sa_*.jpg' --strip-components=1 -C "$LOCAL_IMAGE_DIR" &
+    tar xf "$tar" -C "$LOCAL_IMAGE_DIR" &
 done
 wait
 
@@ -107,8 +107,7 @@ uv run python scripts/export_features.py \
     --parquet "$LOCAL_PARQUET" \
     --image-root "$LOCAL_IMAGE_DIR" \
     --out-dir "$OUT_DIR" \
-    --teacher-ckpt "$TEACHER_CKPT" \
-    --teacher-model "$TEACHER_MODEL" \
+    --teacher-repo-id "$TEACHER_REPO_ID" \
     --image-size "$IMAGE_SIZE" \
     --shard-size "$SHARD_SIZE" \
     --batch-size "$BATCH_SIZE" \
