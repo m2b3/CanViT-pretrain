@@ -8,15 +8,13 @@
 #SBATCH --error=logs/bench_dataloader_%j.err
 
 # CPU-only benchmark of SA-1B dataloader.
-# Tests throughput at different image sizes and worker counts.
+# Uses the real AllShardsDataset code path.
 
 set -euo pipefail
 source slurm/env.sh
 mkdir -p logs
 
 SHARD_DIR="$SA1B_FEATURES_DIR/sa1b/dinov3_vitb16/1024/shards"
-SHARD="$SHARD_DIR/sa_000020.pt"
-TAR="$SA1B_TAR_DIR/sa_000020.tar"
 
 echo "========================================"
 echo "SLURM_JOB_ID: $SLURM_JOB_ID"
@@ -25,12 +23,9 @@ echo "CPUs:         $SLURM_CPUS_PER_TASK"
 echo "Date:         $(date -Iseconds)"
 echo "========================================"
 
-[[ -f "$TAR" ]]   || { echo "FATAL: Tar not found: $TAR" >&2; exit 1; }
-[[ -f "$SHARD" ]] || { echo "FATAL: Shard not found: $SHARD" >&2; exit 1; }
-
 time uv run python sa1b/bench_dataloader.py \
-    --tar "$TAR" \
-    --shard "$SHARD" \
+    --shard-dir "$SHARD_DIR" \
+    --tar-dir "$SA1B_TAR_DIR" \
     --image-sizes 1024 1500 \
     --workers 0 1 2 4 8 \
     --n-images 200

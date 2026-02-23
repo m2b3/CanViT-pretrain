@@ -1,11 +1,12 @@
-"""Benchmark SA-1B dataloader components: tar reads, JPEG decode, transforms, shard load.
+"""Benchmark SA-1B dataloader: real code path, component breakdown.
 
-CPU-only — no GPU needed. Measures throughput and per-worker RSS at different
-image sizes and worker counts.
+CPU-only — no GPU needed. Uses the actual AllShardsDataset + DataLoader
+with the same settings as training (pin_memory=cuda_available, drop_last=True,
+persistent_workers). Measures throughput at different image sizes and worker counts.
 
 Usage:
-  uv run python sa1b/bench_dataloader.py --tar /path/to/sa_000020.tar --shard /path/to/sa_000020.pt
-  uv run python sa1b/bench_dataloader.py --tar ... --shard ... --image-sizes 1024 1500 --workers 0 1 2 4 8
+  uv run python sa1b/bench_dataloader.py \
+      --shard-dir /path/to/shards --tar-dir /path/to/tars
 """
 
 import logging
@@ -13,13 +14,15 @@ import os
 import resource
 import time
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 
 import torch
 import tyro
 from PIL import Image
-from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from torch.utils.data import DataLoader
 
+from canvit_pretrain.train.data.shards import AllShardsDataset
 from canvit_pretrain.train.data.tar_images import TarImageReader
 from canvit_utils.transforms import preprocess
 
@@ -29,16 +32,17 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    tar: Path
-    shard: Path
+    shard_dir: Path
+    tar_dir: Path
     image_sizes: list[int] = field(default_factory=lambda: [1024, 1500])
-    workers: list[int] = field(default_factory=lambda: [0, 1, 2, 4])
-    n_images: int = 200  # images to benchmark per config
-    batch_size: int = 8  # small batch — we're measuring data speed, not GPU
+    workers: list[int] = field(default_factory=lambda: [0, 1, 2, 4, 8])
+    n_images: int = 200
+    batch_size: int = 64  # same as training
 
 
-def bench_components(reader: TarImageReader, names: list[str], size: int, n: int) -> None:
+def bench_components(tar_path: Path, names: list[str], size: int, n: int) -> None:
     """Time individual components: mmap read, PIL decode, transform."""
+    reader = TarImageReader(tar_path)
     transform = preprocess(size)
     names = names[:n]
 
@@ -51,12 +55,11 @@ def bench_components(reader: TarImageReader, names: list[str], size: int, n: int
     t_mmap = time.perf_counter() - t0
 
     # 2) PIL decode (bytes → Image)
-    from io import BytesIO
     t0 = time.perf_counter()
     images = []
     for buf in raw_buffers:
         img = Image.open(BytesIO(buf)).convert("RGB")
-        img.load()  # force decode
+        img.load()
         images.append(img)
     t_decode = time.perf_counter() - t0
 
@@ -66,6 +69,8 @@ def bench_components(reader: TarImageReader, names: list[str], size: int, n: int
         transform(img)
     t_transform = time.perf_counter() - t0
 
+    reader.close()
+
     total = t_mmap + t_decode + t_transform
     log.info(f"  Components ({n} images @ {size}px):")
     log.info(f"    mmap read:  {t_mmap:.3f}s ({t_mmap/n*1000:.1f}ms/img, {t_mmap/total*100:.0f}%)")
@@ -74,43 +79,25 @@ def bench_components(reader: TarImageReader, names: list[str], size: int, n: int
     log.info(f"    total:      {total:.3f}s ({n/total:.1f} img/s)")
 
 
-class BenchDataset(IterableDataset):
-    """Mimics AllShardsDataset but for a single shard, limited to n_images."""
-
-    def __init__(self, shard_path: Path, tar_path: Path, size: int, n_images: int) -> None:
-        self.shard_path = shard_path
-        self.tar_path = tar_path
-        self.size = size
-        self.n_images = n_images
-        self.transform = preprocess(size)
-
-    def __iter__(self):
-        worker_info = get_worker_info()
-        worker_id = worker_info.id if worker_info else 0
-        num_workers = worker_info.num_workers if worker_info else 1
-
-        shard = torch.load(self.shard_path, map_location="cpu", weights_only=False, mmap=True)
-        reader = TarImageReader(self.tar_path)
-        paths = shard["paths"]
-        n = min(self.n_images, len(paths))
-
-        for i in range(worker_id, n, num_workers):
-            img = reader.read_image(paths[i])
-            tensor = self.transform(img)
-            yield tensor, shard["patches"][i].clone(), shard["cls"][i].clone()
-
-        reader.close()
-
-
 def bench_dataloader(cfg: Config, size: int, num_workers: int) -> None:
-    """Measure end-to-end DataLoader throughput and worker RSS."""
-    dataset = BenchDataset(cfg.shard, cfg.tar, size, cfg.n_images)
+    """Measure end-to-end DataLoader throughput using the real AllShardsDataset."""
+    shard_files = sorted(Path(cfg.shard_dir).glob("*.pt"))
+    assert shard_files, f"No shards in {cfg.shard_dir}"
+
+    use_pin_memory = torch.cuda.is_available()
+    dataset = AllShardsDataset(
+        shard_files=shard_files,
+        image_size=size,
+        start_shard=0,
+        tar_dir=cfg.tar_dir,
+    )
     loader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
         num_workers=num_workers,
-        pin_memory=False,
+        pin_memory=use_pin_memory,
         drop_last=True,
+        persistent_workers=num_workers > 0,
     )
 
     n_batches = 0
@@ -123,13 +110,20 @@ def bench_dataloader(cfg: Config, size: int, num_workers: int) -> None:
             break
     elapsed = time.perf_counter() - t0
 
-    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # Linux: KB → MB
-    log.info(f"  DataLoader: {num_workers}w, {size}px, {n_samples} imgs in {elapsed:.2f}s → {n_samples/elapsed:.1f} img/s, RSS={rss_mb:.0f}MB")
+    # Clean up persistent workers
+    del loader
+
+    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # Linux: KB
+    rss_mb = rss_kb / 1024
+    log.info(
+        f"  DataLoader: {num_workers}w, {size}px, bs={cfg.batch_size}, "
+        f"{n_samples} imgs in {elapsed:.2f}s → {n_samples/elapsed:.1f} img/s, "
+        f"pin_memory={use_pin_memory}, RSS={rss_mb:.0f}MB"
+    )
 
 
 def bench_shard_load(shard_path: Path) -> None:
     """Time shard loading with mmap."""
-    # Cold: first load
     t0 = time.perf_counter()
     shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
     n = len(shard["paths"])
@@ -145,35 +139,42 @@ def bench_shard_load(shard_path: Path) -> None:
 
 
 def main(cfg: Config) -> None:
-    log.info(f"=== Dataloader Benchmark ===")
-    log.info(f"tar: {cfg.tar}")
-    log.info(f"shard: {cfg.shard}")
+    log.info("=== Dataloader Benchmark ===")
+    log.info(f"shard_dir: {cfg.shard_dir}")
+    log.info(f"tar_dir: {cfg.tar_dir}")
     log.info(f"image_sizes: {cfg.image_sizes}")
     log.info(f"workers: {cfg.workers}")
-    log.info(f"n_images: {cfg.n_images}")
-    log.info(f"PID: {os.getpid()}, CPUs available: {os.cpu_count()}")
+    log.info(f"n_images: {cfg.n_images}, batch_size: {cfg.batch_size}")
+    log.info(f"PID: {os.getpid()}, CPUs: {os.cpu_count()}, CUDA: {torch.cuda.is_available()}")
+
+    shard_files = sorted(Path(cfg.shard_dir).glob("*.pt"))
+    assert shard_files, f"No shards in {cfg.shard_dir}"
+    log.info(f"Shards: {len(shard_files)}")
+
+    # Find a tar for component benchmarks
+    tar_path = cfg.tar_dir / f"{shard_files[0].stem}.tar"
+    assert tar_path.exists(), f"Tar not found: {tar_path}"
 
     # 1) Shard load timing
     log.info("\n--- Shard Load ---")
-    bench_shard_load(cfg.shard)
+    bench_shard_load(shard_files[0])
 
     # 2) Tar index timing
     log.info("\n--- Tar Index ---")
     t0 = time.perf_counter()
-    reader = TarImageReader(cfg.tar)
+    reader = TarImageReader(tar_path)
     t_index = time.perf_counter() - t0
     names = list(reader.index.keys())
     log.info(f"  Index: {len(names)} JPEGs in {t_index:.1f}s")
+    reader.close()
 
     # 3) Component breakdown per image size
     for size in cfg.image_sizes:
         log.info(f"\n--- Components @ {size}px ---")
-        bench_components(reader, names, size, cfg.n_images)
-
-    reader.close()
+        bench_components(tar_path, names, size, cfg.n_images)
 
     # 4) DataLoader throughput: size × workers grid
-    log.info(f"\n--- DataLoader Throughput ---")
+    log.info(f"\n--- DataLoader Throughput (real AllShardsDataset) ---")
     for size in cfg.image_sizes:
         for nw in cfg.workers:
             bench_dataloader(cfg, size, nw)
