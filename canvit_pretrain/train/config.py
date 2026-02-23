@@ -76,6 +76,8 @@ class Config:
     Mutually exclusive with seed_ckpt."""
     reset_normalizer: bool = False
     """Re-warmup normalizer stats when loading any checkpoint."""
+    normalizer_max_samples: int = 1024
+    """Max samples from shard for normalizer stats. Limits memory for large shards."""
     # Training
     num_workers: int = 16
     scene_resolution: int = 512

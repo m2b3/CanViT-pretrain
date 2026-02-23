@@ -84,14 +84,12 @@ def grad_norms_by_module(model: nn.Module, depth: int = 1) -> dict[str, float]:
     }
 
 
-_NORMALIZER_MAX_SAMPLES = 1024  # Enough for robust mean/var; keeps memory < 10 GB
-
-
 def init_normalizer_stats_from_shard(
     shard_path: Path,
     scene_norm: PatchStandardizer,
     cls_norm: CLSStandardizer,
     device: torch.device,
+    max_samples: int,
 ) -> None:
     """Initialize normalizer stats from one precomputed shard.
 
@@ -101,7 +99,7 @@ def init_normalizer_stats_from_shard(
     log.info(f"Computing normalizer stats from shard: {shard_path.name}")
     shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
     n_total = shard["patches"].shape[0]
-    n = min(n_total, _NORMALIZER_MAX_SAMPLES)
+    n = min(n_total, max_samples)
     # .clone() materializes from mmap; .float().to(device) for set_stats
     patches = shard["patches"][:n].clone().float().to(device)  # [n, n_tokens, D]
     cls = shard["cls"][:n].clone().float().to(device)  # [n, D]
@@ -384,7 +382,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
         shard_files = sorted(shards_dir.glob("*.pt"))
         assert shard_files, f"No shards in {shards_dir}"
-        init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device)
+        init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device, cfg.normalizer_max_samples)
 
     log.info(
         f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches,"
