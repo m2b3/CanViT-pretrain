@@ -158,9 +158,12 @@ def main(cfg: Config) -> None:
     log.info(f"GPU after teacher: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     # --- Phase 3: Inference ---
-    # Accumulate on CPU — full shard is ~66 GB in fp16, won't fit on GPU.
-    patches_buf = torch.empty(n, n_patches, embed_dim, dtype=STORAGE_DTYPE)
-    cls_buf = torch.empty(n, embed_dim, dtype=STORAGE_DTYPE)
+    # Accumulate on pinned CPU memory — full shard is ~66 GB in fp16, won't fit on GPU.
+    # Pinned + non_blocking=True avoids GPU sync on the CPU thread: the D2H copy
+    # runs on the GPU's copy engine while the CPU thread returns immediately to
+    # feed the DataLoader. Each write targets a unique slice, so no race.
+    patches_buf = torch.empty(n, n_patches, embed_dim, dtype=STORAGE_DTYPE).pin_memory()
+    cls_buf = torch.empty(n, embed_dim, dtype=STORAGE_DTYPE).pin_memory()
     hashes: list[str] = [""] * n
     failed: list[int] = []
 
@@ -175,13 +178,14 @@ def main(cfg: Config) -> None:
     t0 = time.perf_counter()
     n_batches = 0
     t_data_total = 0.0
-    t_infer_total = 0.0
+    t_gpu_total = 0.0
     write_idx = 0
+    pbar = tqdm(loader, desc=tar_stem)
 
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-        t_batch_start = time.perf_counter()
-        for imgs, indices, ok, batch_hashes in tqdm(loader, desc=tar_stem):
-            t_data = time.perf_counter() - t_batch_start
+        t_batch_end = time.perf_counter()
+        for imgs, indices, ok, batch_hashes in pbar:
+            t_data = time.perf_counter() - t_batch_end
             t_data_total += t_data
 
             for i, success, h in zip(indices.tolist(), ok.tolist(), batch_hashes):
@@ -189,25 +193,29 @@ def main(cfg: Config) -> None:
                 if not success:
                     failed.append(i)
 
-            t_infer_start = time.perf_counter()
-            imgs = imgs.to(device)
+            t_gpu_start = time.perf_counter()
+            imgs = imgs.to(device, non_blocking=True)
             feats = teacher.forward_norm_features(imgs)
             bs = imgs.shape[0]
-            patches_buf[write_idx : write_idx + bs] = feats.patches.to(STORAGE_DTYPE)
-            cls_buf[write_idx : write_idx + bs] = feats.cls.to(STORAGE_DTYPE)
+            patches_buf[write_idx : write_idx + bs].copy_(feats.patches.to(STORAGE_DTYPE), non_blocking=True)
+            cls_buf[write_idx : write_idx + bs].copy_(feats.cls.to(STORAGE_DTYPE), non_blocking=True)
+            t_gpu = time.perf_counter() - t_gpu_start
+            t_gpu_total += t_gpu
+
             write_idx += bs
-            t_infer_total += time.perf_counter() - t_infer_start
             n_batches += 1
+            pbar.set_postfix_str(f"data={t_data:.2f}s gpu={t_gpu:.2f}s img/s={write_idx/(time.perf_counter()-t0):.0f}")
+            t_batch_end = time.perf_counter()
 
-            t_batch_start = time.perf_counter()
-
+    # Sync before asserting — non-blocking copies may still be in flight
+    torch.cuda.synchronize()
     assert write_idx == n, f"Expected {n}, wrote {write_idx}"
     t_inference = time.perf_counter() - t0
 
     log.info(
         f"Inference: {n} images in {t_inference:.1f}s ({n / t_inference:.0f} img/s) | "
         f"data: {t_data_total:.1f}s ({t_data_total / t_inference * 100:.0f}%) | "
-        f"compute: {t_infer_total:.1f}s ({t_infer_total / t_inference * 100:.0f}%)"
+        f"gpu: {t_gpu_total:.1f}s ({t_gpu_total / t_inference * 100:.0f}%)"
     )
     if failed:
         log.warning(f"{len(failed)} failed images")
