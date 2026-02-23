@@ -597,8 +597,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         scene_resolution=cfg.scene_resolution,
         step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
         comet_id=exp.get_key(),
-        scene_norm_state=scene_norm.state_dict(),
-        cls_norm_state=cls_norm.state_dict(),
         optimizer_state=optimizer.state_dict(),
         scheduler_state=scheduler.state_dict(),
         training_config_history=training_config_history,

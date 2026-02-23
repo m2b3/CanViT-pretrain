@@ -81,7 +81,7 @@ for tar_idx in $TAR_INDICES; do
         exit 1
     fi
     log "  Extracting $TAR_PATH..."
-    timed tar xf "$TAR_PATH" --strip-components=1 -C "$IMAGE_DIR" '*.jpg'
+    timed tar xf "$TAR_PATH" --strip-components=1 --wildcards -C "$IMAGE_DIR" '*.jpg'
 done
 log "Extraction done."
 

@@ -130,7 +130,8 @@ class ShardedFeatureLoader:
         assert self.shard_files, f"No shards found in {shards_dir}"
 
         # Read first shard to get samples_per_shard (all shards same size)
-        first_shard = torch.load(self.shard_files[0], map_location="cpu", weights_only=False)
+        # mmap=True: SA-1B shards are ~70 GB, don't load into RAM just to count samples
+        first_shard = torch.load(self.shard_files[0], map_location="cpu", weights_only=False, mmap=True)
         self.samples_per_shard = len(first_shard["paths"])
         del first_shard
         self.batches_per_shard = self.samples_per_shard // batch_size
