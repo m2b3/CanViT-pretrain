@@ -108,7 +108,8 @@ First run: get loss on Comet, verify the model works at higher resolution.
 - Job 9081089 (47 shards, 32G mem). Pending H100 availability.
 
 ### 3. Full training run
-- Once first run validates, submit with `--array=0-N%1` for real training.
+- **REQUIRES HUMAN VALIDATION**: user must check Comet loss, VRAM, logs from first run before proceeding.
+- Once validated, user submits with `--array=0-N%1` for real training.
 
 ---
 
