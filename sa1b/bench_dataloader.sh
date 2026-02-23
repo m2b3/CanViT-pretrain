@@ -27,5 +27,6 @@ time uv run python sa1b/bench_dataloader.py \
     --shard-dir "$SHARD_DIR" \
     --tar-dir "$SA1B_TAR_DIR" \
     --image-sizes 1024 1500 \
-    --workers 0 1 2 4 8 \
-    --n-images 200
+    --workers 0 1 2 4 \
+    --n-serial 200 \
+    --n-batches 30
