@@ -6,9 +6,9 @@ Partial downloads use a .tmp suffix and are resumed on next run.
 Each tar is ~10.5 GB (gzipped, despite .tar extension), ~11k JPEGs + masks.
 ~50 MB/s on Nibi login nodes → ~3.5 min per tar.
 
-Usage (from repo root, after `source slurm/env.sh`):
-    uv run python scripts/download_sa1b.py                # all 1000 tars
-    uv run python scripts/download_sa1b.py --limit 3      # first 3 only
+Usage (from repo root):
+    uv run python scripts/sa1b/download.py                # all 1000 tars
+    uv run python scripts/sa1b/download.py --limit 3      # first 3 only
 """
 
 import csv
