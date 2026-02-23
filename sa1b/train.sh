@@ -5,7 +5,7 @@
 #SBATCH --array=0-99%1
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=96G
+#SBATCH --mem=48G
 #SBATCH --output=logs/sa1b-train-%A_%a.out
 #SBATCH --error=logs/sa1b-train-%A_%a.err
 #SBATCH --mail-user=me@yberreby.com

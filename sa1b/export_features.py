@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import torch
 import tyro
 import xxhash
@@ -47,6 +48,7 @@ from tqdm import tqdm
 from canvit_pretrain.train.transforms import val_transform
 
 STORAGE_DTYPE = torch.float16
+NUMPY_DTYPE = np.float16  # Must match STORAGE_DTYPE
 ImageFile.LOAD_TRUNCATED_IMAGES = False
 
 logging.basicConfig(
@@ -159,11 +161,15 @@ def main(cfg: Config) -> None:
     log.info(f"GPU after teacher: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     # --- Phase 3: Inference ---
-    # Accumulate on CPU — full shard is ~66 GB in fp16, won't fit on GPU.
-    # NOT pinned: 66 GB pin_memory() + DataLoader workers exceeds 96G SLURM RAM.
-    # D2H penalty is negligible (~3ms/batch at PCIe Gen5, ~1s total).
-    patches_buf = torch.empty(n, n_patches, embed_dim, dtype=STORAGE_DTYPE)
-    cls_buf = torch.empty(n, embed_dim, dtype=STORAGE_DTYPE)
+    # Accumulate into mmap'd files on SLURM_TMPDIR — the full shard is ~66 GB
+    # in fp16, which won't fit in RAM on most nodes. mmap lets the OS page
+    # data to/from the local SSD as needed, keeping RSS at a few GB.
+    patches_mmap_path = cfg.extract_dir / f"{tar_stem}_patches.mmap"
+    cls_mmap_path = cfg.extract_dir / f"{tar_stem}_cls.mmap"
+    patches_buf = np.memmap(patches_mmap_path, dtype=NUMPY_DTYPE, mode="w+", shape=(n, n_patches, embed_dim))
+    cls_buf = np.memmap(cls_mmap_path, dtype=NUMPY_DTYPE, mode="w+", shape=(n, embed_dim))
+    log.info(f"Mmap buffers: patches={patches_buf.nbytes/1e9:.1f}GB cls={cls_buf.nbytes/1e6:.0f}MB")
+
     hashes: list[str] = [""] * n
     failed: list[int] = []
 
@@ -197,8 +203,9 @@ def main(cfg: Config) -> None:
             imgs = imgs.to(device, non_blocking=True)
             feats = teacher.forward_norm_features(imgs)
             bs = imgs.shape[0]
-            patches_buf[write_idx : write_idx + bs].copy_(feats.patches.to(STORAGE_DTYPE))
-            cls_buf[write_idx : write_idx + bs].copy_(feats.cls.to(STORAGE_DTYPE))
+            # GPU → CPU → mmap (OS handles write-back to SSD asynchronously)
+            patches_buf[write_idx : write_idx + bs] = feats.patches.to(STORAGE_DTYPE).cpu().numpy()
+            cls_buf[write_idx : write_idx + bs] = feats.cls.to(STORAGE_DTYPE).cpu().numpy()
             t_gpu = time.perf_counter() - t_gpu_start
             t_gpu_total += t_gpu
 
@@ -210,6 +217,8 @@ def main(cfg: Config) -> None:
     # Sync before asserting — GPU ops may still be in flight
     torch.cuda.synchronize()
     assert write_idx == n, f"Expected {n}, wrote {write_idx}"
+    patches_buf.flush()
+    cls_buf.flush()
     t_inference = time.perf_counter() - t0
 
     log.info(
@@ -221,6 +230,9 @@ def main(cfg: Config) -> None:
         log.warning(f"{len(failed)} failed images")
 
     # --- Phase 4: Save ---
+    # torch.from_numpy shares the mmap pointer — PyTorch's serializer streams
+    # through the storage linearly, OS pages in/out as needed. Peak RSS stays low.
+    # (Raw numpy mmap would be pickled → materializes entire array. Don't do that.)
     shard_mb_est = (patches_buf.nbytes + cls_buf.nbytes) / 1e6
     log.info(f"Saving shard to {shard_path} (~{shard_mb_est:.0f} MB)...")
     t0 = time.perf_counter()
@@ -230,8 +242,8 @@ def main(cfg: Config) -> None:
     tmp = shard_path.with_suffix(".tmp")
     torch.save(
         {
-            "patches": patches_buf,
-            "cls": cls_buf,
+            "patches": torch.from_numpy(patches_buf),
+            "cls": torch.from_numpy(cls_buf),
             "paths": filenames,
             "class_idxs": torch.zeros(n, dtype=torch.int32),
             "image_hashes": hashes,
@@ -251,6 +263,11 @@ def main(cfg: Config) -> None:
     )
     tmp.rename(shard_path)
     t_save = time.perf_counter() - t0
+
+    # Clean up mmap temp files (data is now in the .pt shard)
+    del patches_buf, cls_buf
+    patches_mmap_path.unlink(missing_ok=True)
+    cls_mmap_path.unlink(missing_ok=True)
 
     shard_mb = shard_path.stat().st_size / 1e6
     t_total = time.perf_counter() - t_start
