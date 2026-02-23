@@ -61,10 +61,10 @@ First run: get loss on Comet, verify the model works at higher resolution.
 | Feature shard size | ~65-70 GB | sa_000020.pt on def-areynaud |
 | batch_size | 64 | config default |
 | batches_per_shard | 174 | 11186 // 64 |
-| shards_per_job | 28 | 4872 / 174 |
-| steps_per_job | 4872 | 174 × 28 |
+| shards_per_job | 7 | Reduced from 28 (1024px is ~4x more expensive/step) |
+| steps_per_job | 1218 | 174 × 7 |
 | SLURM_TMPDIR budget | ~375 GB | 3 TB / 8 GPUs |
-| Extracted size/job | ~288 GB | 28 × 10.3 |
+| Extracted size/job | ~72 GB | 7 × 10.3 |
 | Canvas grid size | 64 | 1024 / 16 |
 | Scene resolution | 1024px | Target for SA-1B |
 | VRAM estimate | <80 GB | 18.4 GB @ 512/32 × ~4x, plus constant factors |
@@ -82,7 +82,7 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 ### Export Pipeline
 - `sa1b/export_features.py` — 1 tar → 1 shard. Atomic save. Idempotent.
-- `sa1b/export_features.sh` — SLURM array job. `gpu:h100:1`, 96G RAM, 16 CPUs, 10 min.
+- `sa1b/export_features.sh` — SLURM array job. `gpu:h100:1`, 32G RAM, 16 CPUs, 10 min.
 - `sa1b/submit_export.sh` — Auto-submits missing shards. `--dry-run` supported. **No lock on concurrent runs.**
 - First shard exported: `sa_000020.pt` (70,394 MB, 11186 images).
 
@@ -99,12 +99,13 @@ First run: get loss on Comet, verify the model works at higher resolution.
 ## What's PENDING
 
 ### 1. First training run
-- Job 9079933 submitted (`--array=0-0%1 --time=00:20:00 --steps-per-job 174`).
+- Job 9081051 submitted (`--array=0-0%1 --time=00:20:00 --mem=32G --steps-per-job 174`).
 - Runs 174 steps on 1 shard (sa_000020). Quick pipeline validation.
 - Monitor: Comet for loss, VRAM usage, no crashes.
+- Previous attempt (9079933) died silently — probably OOM with old 96G code + 70GB shard loaded into RAM.
 
 ### 2. Export jobs
-- Job 9079258 (37 shards). Some still in queue.
+- Job 9081089 (47 shards, 32G mem). Pending H100 availability.
 
 ### 3. Full training run
 - Once first run validates, submit with `--array=0-N%1` for real training.
@@ -117,7 +118,7 @@ First run: get loss on Comet, verify the model works at higher resolution.
 2. **Variable shard sizes**: `ShardedFeatureLoader` assumes uniform shard sizes (line 132). SA-1B shards are ~11,186 but not guaranteed identical. Should be fine for first run.
 3. **Batch size at 1024px**: 64 @ 512px uses 18.4 GB. At 1024px/grid64, canvas is 4x larger. ~50-70 GB estimated. Should fit H100 80GB. May need to reduce if OOM.
 4. **Training memory**: 96G requested but probably only needs 32-48G (shards are mmap'd, images are small). Export genuinely needs 96G for the 66 GB accumulation buffer.
-5. **Export mmap optimization**: Could use numpy.memmap for accumulation buffer to reduce export memory from 96G to ~32-48G. Non-trivial change, deferred.
+5. **Export mmap optimization**: DONE (`8636703`). numpy.memmap on SLURM_TMPDIR, torch.from_numpy for save. `--mem` 96G → 32G.
 6. **Warmup for continual pretraining**: Config has 100K warmup steps. For seed from pretrained model, this is very long (LR stays near 1e-7 for ~100K steps). May want shorter warmup or no warmup.
 7. **No assertion for `scene_resolution == G * patch_size`**: Would silently break if these diverge.
 
@@ -137,6 +138,9 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 | Date | Commit | What |
 |---|---|---|
+| 2026-02-23 | `a8813b6` | Reduce train.sh: workers 16→4, cpus 16→8, steps 4872→1218 |
+| 2026-02-23 | `8636703` | Mmap export buffers, reduce --mem 96G→32G (export+train) |
+| 2026-02-23 | `f3051a9` | Remove dead build_parquet.py |
 | 2026-02-23 | `956f501` | Fix 3 bugs: checkpoint crash, tar extraction, shard OOM |
 | 2026-02-23 | `2a2e316` | Add `hf_seed_ckpt` config + loop support, plan_job.py, train.sh |
 | 2026-02-23 | `3539567` | Add --max-concurrent to submit_export.sh |
