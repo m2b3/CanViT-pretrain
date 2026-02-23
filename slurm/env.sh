@@ -30,7 +30,7 @@ export IN21K_IMAGE_DIR=/datashare/imagenet/winter21_whole
 export IN1K_VAL_IMAGE_DIR=/datashare/imagenet/ILSVRC2012/val
 export ADE20K_ZIP=~/projects/def-skrishna/datasets/ade20k/ADEChallengeData2016.zip
 export SA1B_IMAGE_DIR=~/projects/def-akrish/datasets/sa1b/images
-export SA1B_LINKS="$SCRATCH/sa1b_links.txt"
+export SA1B_LINKS="sa1b_links.tsv"
 
 # ==============================================================================
 # STORAGE
