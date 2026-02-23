@@ -101,6 +101,7 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
 
             yielded = 0
             skipped = 0
+            t_read = t_transform = t_patches = 0.0
 
             for i in range(worker_id, n_samples, num_workers):
                 if i in failed_indices:
@@ -109,29 +110,46 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
 
                 rel_path = shard["paths"][i]
                 try:
+                    t0 = time.perf_counter()
                     if tar_reader is not None:
                         img = tar_reader.read_image(rel_path)
                     else:
                         assert self.image_root is not None
                         with Image.open(self.image_root / rel_path) as f:
                             img = f.convert("RGB")
+                    t1 = time.perf_counter()
                     img_tensor = self.transform(img)
+                    t2 = time.perf_counter()
                 except Exception as e:
                     log.warning(f"Worker {worker_id}: RUNTIME FAILURE {rel_path}: {e}")
                     skipped += 1
                     continue
 
+                t_read += t1 - t0
+                t_transform += t2 - t1
+
                 assert isinstance(img_tensor, Tensor)
-                yield (
-                    img_tensor,
-                    shard["patches"][i].clone(),
-                    shard["cls"][i].clone(),
-                    int(shard["class_idxs"][i]),
-                )
+                t0 = time.perf_counter()
+                patches = shard["patches"][i].clone()
+                cls = shard["cls"][i].clone()
+                t_patches += time.perf_counter() - t0
+
+                yield (img_tensor, patches, cls, int(shard["class_idxs"][i]))
                 yielded += 1
 
             if worker_id == 0:
-                log.info(f"Shard {shard_idx} done: yielded={yielded}, skipped={skipped}")
+                total = t_read + t_transform + t_patches
+                if yielded > 0 and total > 0:
+                    log.info(
+                        f"Shard {shard_idx} done: {yielded} imgs, "
+                        f"read={t_read/yielded*1e3:.1f}ms "
+                        f"transform={t_transform/yielded*1e3:.1f}ms "
+                        f"patches={t_patches/yielded*1e3:.1f}ms "
+                        f"total={total/yielded*1e3:.1f}ms/img ({yielded/total:.0f} img/s) "
+                        f"skipped={skipped}"
+                    )
+                else:
+                    log.info(f"Shard {shard_idx} done: yielded={yielded}, skipped={skipped}")
 
             shard_counter += 1
 
