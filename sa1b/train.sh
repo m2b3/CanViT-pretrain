@@ -4,7 +4,7 @@
 #SBATCH --time=01:00:00
 #SBATCH --array=0-99%1
 #SBATCH --gres=gpu:h100:1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --output=logs/sa1b-train-%A_%a.out
 #SBATCH --error=logs/sa1b-train-%A_%a.err
@@ -30,8 +30,9 @@ timed() { local start=$SECONDS; "$@"; log "  ↳ $((SECONDS - start))s"; }
 
 # === CONFIG ===
 BATCH_SIZE=64
-SHARDS_PER_JOB=28       # 28 shards × 174 batches/shard = 4872 steps
-STEPS_PER_JOB=4872      # Must equal SHARDS_PER_JOB × batches_per_shard
+NUM_WORKERS=4            # 1024px images are large; 4 workers keeps RSS reasonable
+SHARDS_PER_JOB=7         # 7 shards × 174 batches/shard = 1218 steps
+STEPS_PER_JOB=1218       # Must equal SHARDS_PER_JOB × batches_per_shard
 HF_SEED="canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02"
 
 log "=== SA-1B Continual Pretraining ==="
@@ -100,5 +101,6 @@ exec uv run python -m canvit_pretrain.train \
     --scene-resolution 1024 \
     --steps-per-job "$STEPS_PER_JOB" \
     --batch-size "$BATCH_SIZE" \
+    --num-workers "$NUM_WORKERS" \
     --dataset sa1b \
     "$@"
