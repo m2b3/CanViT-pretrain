@@ -13,9 +13,14 @@ Usage (from repo root):
 
 import csv
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+# sa_NNNNNN.tar — the actual image tars. The TSV also contains
+# sa_images_ids.txt (metadata) and sa_co_gold.tar (benchmark), which we skip.
+IMAGE_TAR_RE = re.compile(r"^sa_\d{6}\.tar$")
 
 
 def main() -> None:
@@ -35,15 +40,14 @@ def main() -> None:
 
     tar_dir.mkdir(parents=True, exist_ok=True)
 
-    # sa1b_links.tsv: TSV with header "file_name\tcdn_link", 1000 data rows
+    # sa1b_links.tsv: TSV with header "file_name\tcdn_link"
+    # Contains 1000 image tars + 2 non-image files (sa_images_ids.txt, sa_co_gold.tar)
     with open(links) as f:
         reader = csv.DictReader(f, delimiter="\t")
-        rows = list(reader)
+        assert reader.fieldnames == ["file_name", "cdn_link"], f"Unexpected columns: {reader.fieldnames}"
+        rows = [r for r in reader if IMAGE_TAR_RE.match(r["file_name"])]
 
-    assert len(rows) > 0, f"No rows in {links}"
-    assert "file_name" in rows[0] and "cdn_link" in rows[0], (
-        f"Expected columns 'file_name' and 'cdn_link', got {list(rows[0].keys())}"
-    )
+    assert len(rows) == 1000, f"Expected 1000 image tars, got {len(rows)}"
 
     if args.limit > 0:
         rows = rows[: args.limit]
@@ -52,6 +56,22 @@ def main() -> None:
     print(f"TAR_DIR: {tar_dir}")
     print(f"LINKS:   {links} ({len(rows)} tars to process)")
     print(f"======================")
+
+    # Also download sa_images_ids.txt (canonical list of all image IDs) if not present
+    with open(links) as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for r in reader:
+            if r["file_name"] == "sa_images_ids.txt":
+                ids_dest = tar_dir.parent / "sa_images_ids.txt"
+                if not ids_dest.exists():
+                    print(f"[download] sa_images_ids.txt -> {ids_dest}")
+                    subprocess.run(
+                        ["wget", "-c", "-q", "--show-progress", "-O", str(ids_dest), r["cdn_link"]],
+                        check=True,
+                    )
+                else:
+                    print(f"[skip] sa_images_ids.txt (already exists)")
+                break
 
     downloaded = 0
     skipped = 0
