@@ -4,7 +4,6 @@
 First run: get loss on Comet, verify the model works at higher resolution.
 
 **Branch**: `sa1b` (worktree: `~/code/CanViT-train-SA1B`)
-**Last updated**: 2026-02-23 ~12:00 EST, commit `3539567`
 
 ---
 
@@ -17,7 +16,6 @@ First run: get loss on Comet, verify the model works at higher resolution.
 - **Solution**: `hf_seed_ckpt` config option. Downloads from HF, extracts state_dict + config, overrides `cfg.model`, proceeds with seed mode (step=0, fresh optimizer).
 - **Grid size change**: 32 → 64. Only 6 standardizer keys mismatch (3 missing for "64", 3 unexpected for "32"). All 233 core weights load perfectly. Handled by existing `strict=False` + regex filter.
 - **IMPORTANT**: `cfg.model` defaults are `convex` + `gate_bias_init=-2.0`. The HF model is `additive` + `gate_bias_init=None`. Using defaults crashes. The `hf_seed_ckpt` path MUST override `cfg.model` with the HF config.
-- **Smoketested locally**: 2026-02-23, commit `3539567`. `from_pretrained()` → `.state_dict()` → `load_state_dict(strict=False)` → 0 core mismatches.
 
 ### Storage Model
 | What | Where | Persistence |
@@ -36,12 +34,17 @@ First run: get loss on Comet, verify the model works at higher resolution.
 - Only images from shards within [start_shard, start_shard + shards_per_job] are accessed.
 - **No symlinks needed.** Just extract the right tars.
 
-### Tar Extraction
-- File count limit on def-akrish: 500K files. Permanent extraction is impossible (250 tars × 11K images = 2.8M files).
-- SLURM_TMPDIR: 3 TB shared across 8 GPUs per node. Conservative budget: ~375 GB.
-- Each tar = ~10.3 GB of JPEGs. Budget for ~28 tars per job.
-- `tar xf $TAR_PATH --strip-components=1 -C $SLURM_TMPDIR/sa1b_images/ '*.jpg'`
-- Extraction is sequential; network-bound (~5 min for 28 tars from NFS).
+### Image Resolution
+- **Teacher export**: 1024px input → features at 1024px (baked at export time).
+- **Training images**: loaded at `scene_resolution=1024px`, same transform as export (`val_transform`).
+- **Student glimpses**: 128px² crops from the loaded scene image. Higher scene resolution = more fine-grained info when student looks "up close".
+- The dataloader image resolution affects glimpse pixel richness and CPU/GPU memory, NOT alignment with the teacher features (those are already fixed from export).
+- No assertion currently validates `scene_resolution == G * patch_size`. For SA-1B: 1024 == 64 × 16 = 1024.
+
+### Tar Structure
+- SA-1B tars from Meta have `./` prefix: entries like `./sa_226692.jpg` (flat, no subdirectory).
+- **train.sh** must use `--wildcards` flag with `'*.jpg'` — without it, GNU tar's default glob doesn't match across `/` and extracts nothing. Also `--strip-components=1` to strip `./`.
+- **export_features.py** lists members with `tar tf` then extracts by exact path — unaffected by glob issues.
 
 ### Job Array Design
 - `%1` concurrency (1 job at a time, like IN21k).
@@ -70,15 +73,18 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 ## What's DONE
 
-### Export Pipeline (verified on MIG slice, NOT yet via sbatch)
+### Training Pipeline (commit `956f501`)
+- `sa1b/train.sh` — SLURM array job. Extracts tars via `plan_job.py`, then trains.
+- `sa1b/plan_job.py` — reads checkpoint → computes which shards/tars needed → outputs tar indices.
+- `hf_seed_ckpt` config option in `loop.py` — downloads from HF, overrides cfg.model, seed mode.
+- `strict=False` + regex filter for grid-size-change standardizer mismatches.
+- Standardizers travel with model state_dict via `model.standardizers(G)`.
+
+### Export Pipeline
 - `sa1b/export_features.py` — 1 tar → 1 shard. Atomic save. Idempotent.
 - `sa1b/export_features.sh` — SLURM array job. `gpu:h100:1`, 96G RAM, 16 CPUs, 10 min.
-- `sa1b/submit_export.sh` — Auto-submits missing shards. `--dry-run` supported.
+- `sa1b/submit_export.sh` — Auto-submits missing shards. `--dry-run` supported. **No lock on concurrent runs.**
 - First shard exported: `sa_000020.pt` (70,394 MB, 11186 images).
-
-### Standardizer Unification (commit `21e9bbc`)
-- Training loop uses `model.standardizers(G)` — standardizer state travels with model state_dict.
-- `strict=False` on state_dict load + regex validation.
 
 ### Download
 - `sa1b/download.py` running on Nibi (tmux `sa1b-dl`). ~73 MB/s.
@@ -87,44 +93,43 @@ First run: get loss on Comet, verify the model works at higher resolution.
 ### Env Setup
 - `.envrc.nibi` committed. `SA1B_TAR_DIR`, `SA1B_FEATURES_DIR`, `CANVIT_FLAGSHIP_CKPT` defined.
 - `sa1b/sa1b_links.tsv` committed (1000 image tars).
-- `sa1b/build_parquet.py` committed.
 
 ---
 
 ## What's PENDING
 
-### 1. `hf_seed_ckpt` support — IN PROGRESS
-- Add `hf_seed_ckpt: str | None = None` to `Config`.
-- In `loop.py`: download from HF, extract state_dict + config, override `cfg.model`, seed mode.
-- Mutually exclusive with `seed_ckpt`.
+### 1. First training run
+- Job 9079933 submitted (`--array=0-0%1 --time=00:20:00 --steps-per-job 174`).
+- Runs 174 steps on 1 shard (sa_000020). Quick pipeline validation.
+- Monitor: Comet for loss, VRAM usage, no crashes.
 
-### 2. SA-1B training sbatch — NOT WRITTEN
-- `sa1b/train.sh`: SLURM array job.
-- Preamble: run `sa1b/plan_job.py` to get tar list, extract to SLURM_TMPDIR.
-- CLI args: `--hf-seed-ckpt`, `--canvas-patch-grid-size 64`, `--scene-resolution 1024`, `--reset-normalizer`, `--steps-per-job 4872`, `--dataset sa1b`.
+### 2. Export jobs
+- Job 9079258 (37 shards). Some still in queue.
 
-### 3. `sa1b/plan_job.py` — NOT WRITTEN
-- Reads checkpoint (if any) to determine start_step.
-- Computes which shards/tars this job needs.
-- Outputs tar indices (zero-padded).
-
-### 4. Submit export jobs
-- Need enough tars downloaded (≥28 for first training job).
-- `bash sa1b/submit_export.sh` on Nibi.
-
-### 5. First training run
-- Submit with `--array=0-0%1` (single task, quick test).
-- Monitor Comet for loss.
-- Check VRAM usage.
+### 3. Full training run
+- Once first run validates, submit with `--array=0-N%1` for real training.
 
 ---
 
 ## Tensions / Open Questions
 
-1. **Image size vs export size**: Teacher features are exported at 1024px. Student sees images at `scene_resolution` (also 1024px). Could dissociate later (e.g., student at 512px with 1024px features). Deferred for first run.
-2. **Shuffling**: SA-1B images within a tar are geographically correlated (contiguous IDs = same region). No shuffle for now — verified visually that 4 sequential images look diverse enough. Revisit if loss curves show issues.
-3. **Variable shard sizes**: `ShardedFeatureLoader` assumes uniform shard sizes (line 132). SA-1B shards are ~11,186 but not guaranteed identical. Should be fine for first run.
-4. **Batch size at 1024px**: 64 @ 512px uses 18.4 GB. At 1024px/grid64, canvas is 4x larger. ~50-70 GB estimated. Should fit H100 80GB. May need to reduce if OOM.
+1. **Shuffling**: SA-1B images within a tar are geographically correlated (contiguous IDs = same region). No shuffle for now — verified visually that 4 sequential images look diverse enough. Revisit if loss curves show issues.
+2. **Variable shard sizes**: `ShardedFeatureLoader` assumes uniform shard sizes (line 132). SA-1B shards are ~11,186 but not guaranteed identical. Should be fine for first run.
+3. **Batch size at 1024px**: 64 @ 512px uses 18.4 GB. At 1024px/grid64, canvas is 4x larger. ~50-70 GB estimated. Should fit H100 80GB. May need to reduce if OOM.
+4. **Training memory**: 96G requested but probably only needs 32-48G (shards are mmap'd, images are small). Export genuinely needs 96G for the 66 GB accumulation buffer.
+5. **Export mmap optimization**: Could use numpy.memmap for accumulation buffer to reduce export memory from 96G to ~32-48G. Non-trivial change, deferred.
+6. **Warmup for continual pretraining**: Config has 100K warmup steps. For seed from pretrained model, this is very long (LR stays near 1e-7 for ~100K steps). May want shorter warmup or no warmup.
+7. **No assertion for `scene_resolution == G * patch_size`**: Would silently break if these diverge.
+
+---
+
+## Bugs Found and Fixed
+
+| Date | Commit | Bug | Impact |
+|---|---|---|---|
+| 2026-02-23 | `956f501` | End-of-job `save_checkpoint()` passed removed `scene_norm_state`/`cls_norm_state` kwargs | Would crash with TypeError after every training job — ALL training wasted |
+| 2026-02-23 | `956f501` | `train.sh` tar extraction: `'*.jpg'` doesn't match `./sa_226692.jpg` without `--wildcards` | Zero images extracted, training crashes on first image load |
+| 2026-02-23 | `956f501` | `ShardedFeatureLoader.__init__` loaded first shard without `mmap=True` | ~70 GB loaded into RAM just to call `len()`, risking OOM on 96G nodes |
 
 ---
 
@@ -132,7 +137,8 @@ First run: get loss on Comet, verify the model works at higher resolution.
 
 | Date | Commit | What |
 |---|---|---|
-| 2026-02-23 | (pending) | Add `hf_seed_ckpt` config + loop support, plan_job.py, train.sh |
+| 2026-02-23 | `956f501` | Fix 3 bugs: checkpoint crash, tar extraction, shard OOM |
+| 2026-02-23 | `2a2e316` | Add `hf_seed_ckpt` config + loop support, plan_job.py, train.sh |
 | 2026-02-23 | `3539567` | Add --max-concurrent to submit_export.sh |
 | 2026-02-22 | `21e9bbc` | Unify standardizers: model.standardizers(G) in loop |
 | 2026-02-22 | various | Export pipeline (export_features.py/.sh, submit_export.sh) |
