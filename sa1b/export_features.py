@@ -158,12 +158,11 @@ def main(cfg: Config) -> None:
     log.info(f"GPU after teacher: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     # --- Phase 3: Inference ---
-    # Accumulate on pinned CPU memory — full shard is ~66 GB in fp16, won't fit on GPU.
-    # Pinned + non_blocking=True: D2H runs on GPU copy engine, CPU thread returns
-    # immediately to feed DataLoader. Each write targets a unique slice, no race.
-    # Requires ~70 GB RAM — request ≥96G from SLURM.
-    patches_buf = torch.empty(n, n_patches, embed_dim, dtype=STORAGE_DTYPE).pin_memory()
-    cls_buf = torch.empty(n, embed_dim, dtype=STORAGE_DTYPE).pin_memory()
+    # Accumulate on CPU — full shard is ~66 GB in fp16, won't fit on GPU.
+    # NOT pinned: 66 GB pin_memory() + DataLoader workers exceeds 96G SLURM RAM.
+    # D2H penalty is negligible (~3ms/batch at PCIe Gen5, ~1s total).
+    patches_buf = torch.empty(n, n_patches, embed_dim, dtype=STORAGE_DTYPE)
+    cls_buf = torch.empty(n, embed_dim, dtype=STORAGE_DTYPE)
     hashes: list[str] = [""] * n
     failed: list[int] = []
 
@@ -197,8 +196,8 @@ def main(cfg: Config) -> None:
             imgs = imgs.to(device, non_blocking=True)
             feats = teacher.forward_norm_features(imgs)
             bs = imgs.shape[0]
-            patches_buf[write_idx : write_idx + bs].copy_(feats.patches.to(STORAGE_DTYPE), non_blocking=True)
-            cls_buf[write_idx : write_idx + bs].copy_(feats.cls.to(STORAGE_DTYPE), non_blocking=True)
+            patches_buf[write_idx : write_idx + bs].copy_(feats.patches.to(STORAGE_DTYPE))
+            cls_buf[write_idx : write_idx + bs].copy_(feats.cls.to(STORAGE_DTYPE))
             t_gpu = time.perf_counter() - t_gpu_start
             t_gpu_total += t_gpu
 
@@ -207,7 +206,7 @@ def main(cfg: Config) -> None:
             pbar.set_postfix_str(f"data={t_data:.2f}s gpu={t_gpu:.2f}s img/s={write_idx/(time.perf_counter()-t0):.0f}")
             t_batch_end = time.perf_counter()
 
-    # Sync before asserting — non-blocking copies may still be in flight
+    # Sync before asserting — GPU ops may still be in flight
     torch.cuda.synchronize()
     assert write_idx == n, f"Expected {n}, wrote {write_idx}"
     t_inference = time.perf_counter() - t0
