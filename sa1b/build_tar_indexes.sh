@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=build-tar-idx
-#SBATCH --account=rrg-skrishna_gpu
+#SBATCH --account=def-skrishna
 #SBATCH --time=02:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
@@ -8,7 +8,7 @@
 #SBATCH --error=logs/build-tar-idx-%j.err
 
 # Build .idx files for all SA-1B tars. CPU-only, no GPU.
-# ~120s per tar (56s scan + 64s SHA), 127 tars / 8 workers ≈ 32 min.
+# ~40s per tar (2s scan + 35s SHA), 130 tars / 8 workers ≈ 11 min.
 
 set -eux
 
