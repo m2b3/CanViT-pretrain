@@ -82,4 +82,5 @@ exec uv run python -m canvit_pretrain.train \
     --dataset sa1b \
     --comet-project canvit-sa1b \
     --viz-every-n-vals 1 \
+    --curve-every-n-vals 1 \
     "$@"
