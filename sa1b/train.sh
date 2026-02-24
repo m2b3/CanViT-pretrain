@@ -5,7 +5,7 @@
 #SBATCH --array=0-99%1
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=192G
+#SBATCH --mem=128G
 #SBATCH --output=logs/sa1b-train-%A_%a.out
 #SBATCH --error=logs/sa1b-train-%A_%a.err
 #SBATCH --mail-user=me@yberreby.com
@@ -29,7 +29,7 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 # === CONFIG ===
 BATCH_SIZE=64
-NUM_WORKERS=12           # 12w reached d=34% (GPU-bound). 70GB mmap shard needs --mem=192G.
+NUM_WORKERS=12           # 12w reached d=34% (GPU-bound). 70GB mmap shard needs --mem=128G+.
 STEPS_PER_JOB=1218       # 7 shards × 174 batches/shard
 HF_SEED="canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02"
 
