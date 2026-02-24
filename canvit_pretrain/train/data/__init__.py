@@ -129,6 +129,7 @@ def create_loaders(cfg: "Config", start_step: int) -> Loaders:
         start_step=start_step,
         image_root=cfg.feature_image_root,
         tar_dir=cfg.tar_dir,
+        steps_per_job=cfg.steps_per_job,
     )
     log.info(f"  {len(train_loader.shard_files)} shards, start_shard={train_loader.start_shard}")
 

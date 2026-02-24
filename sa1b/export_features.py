@@ -48,7 +48,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from canvit_pretrain.train.data.tar_images import TarImageReader
+from canvit_pretrain.train.data.tar_images import TarImageReader, scan_tar_headers
 from canvit_utils.transforms import preprocess
 
 STORAGE_DTYPE = torch.float16
@@ -136,7 +136,8 @@ def main(cfg: Config) -> None:
     # ~44s on cold NFS, ~2s warm cache (70 GB tar, 11k JPEGs)
     log.info(f"Indexing {cfg.tar.name} via mmap...")
     t0 = time.perf_counter()
-    reader = TarImageReader(cfg.tar)
+    index = scan_tar_headers(cfg.tar)
+    reader = TarImageReader(cfg.tar, index=index)
     n = len(reader.index)
     assert n > 0, f"No JPEGs in {cfg.tar}"
     t_index = time.perf_counter() - t0

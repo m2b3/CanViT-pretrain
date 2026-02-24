@@ -13,6 +13,7 @@ Image sources:
 """
 
 import logging
+import math
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -24,7 +25,7 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from canvit_utils.transforms import preprocess
 
-from .tar_images import TarImageReader
+from .tar_images import TarImageReader, TarIndex, load_tar_index, scan_tar_headers
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
         *,
         image_root: Path | None = None,
         tar_dir: Path | None = None,
+        tar_indexes: dict[str, TarIndex] | None = None,
     ) -> None:
         assert (image_root is None) != (tar_dir is None), \
             "Exactly one of image_root or tar_dir must be set"
@@ -54,6 +56,7 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
         self.image_size = image_size
         self.start_shard = start_shard
         self.expected_samples_per_shard = expected_samples_per_shard
+        self.tar_indexes = tar_indexes or {}
         self.transform = preprocess(image_size)
 
     def _tar_path_for_shard(self, shard_path: Path) -> Path:
@@ -83,7 +86,12 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
             if self.tar_dir is not None:
                 if tar_reader is not None:
                     tar_reader.close()
-                tar_reader = TarImageReader(self._tar_path_for_shard(shard_path))
+                tar_path = self._tar_path_for_shard(shard_path)
+                pre_index = self.tar_indexes.get(shard_path.stem)
+                # Training path: pre-built index from main process (via fork COW).
+                # Bench/test path: no pre-built index, scan headers on the fly.
+                index = pre_index if pre_index is not None else scan_tar_headers(tar_path)
+                tar_reader = TarImageReader(tar_path, index=index)
 
             n_samples = len(shard["paths"])
             failed_indices = set(shard.get("failed_indices", []))
@@ -170,6 +178,7 @@ class ShardedFeatureLoader:
         *,
         image_root: Path | None = None,
         tar_dir: Path | None = None,
+        steps_per_job: int | None = None,
     ) -> None:
         assert (image_root is None) != (tar_dir is None), \
             "Exactly one of image_root or tar_dir must be set"
@@ -199,9 +208,37 @@ class ShardedFeatureLoader:
             f"start_shard={self.start_shard}, skip={self._skip_batches}"
         )
 
+        # Load pre-built tar indexes (.idx files) in main process.
+        # Workers inherit via fork COW — zero indexing during training.
+        # .idx files are created by sa1b/build_tar_indexes.py.
+        self.tar_indexes: dict[str, TarIndex] = {}
+        if self.tar_dir is not None:
+            self._prebuild_tar_indexes(steps_per_job)
+
         # Will be created lazily on first iteration
         self.loader: DataLoader | None = None
         self.loader_iter: Iterator | None = None
+
+    def _prebuild_tar_indexes(self, steps_per_job: int | None) -> None:
+        """Load .idx files for upcoming shards. Runs in main process before fork."""
+        assert self.tar_dir is not None
+        n_shards = len(self.shard_files)
+        if steps_per_job is not None:
+            n_ahead = math.ceil(steps_per_job / self.batches_per_shard) + 1
+        else:
+            n_ahead = n_shards
+        n_ahead = min(n_ahead, n_shards)
+
+        log.info(f"Loading tar indexes for {n_ahead}/{n_shards} shards...")
+        t0 = time.perf_counter()
+        for i in range(n_ahead):
+            idx = (self.start_shard + i) % n_shards
+            sf = self.shard_files[idx]
+            tar_path = self.tar_dir / f"{sf.stem}.tar"
+            assert tar_path.exists(), f"Tar not found: {tar_path}"
+            self.tar_indexes[sf.stem] = load_tar_index(tar_path)
+        elapsed = time.perf_counter() - t0
+        log.info(f"Loaded {len(self.tar_indexes)} tar indexes in {elapsed:.1f}s")
 
     def _create_loader(self) -> DataLoader:
         """Create DataLoader with dataset starting at start_shard."""
@@ -212,6 +249,7 @@ class ShardedFeatureLoader:
             expected_samples_per_shard=self.samples_per_shard,
             image_root=self.image_root,
             tar_dir=self.tar_dir,
+            tar_indexes=self.tar_indexes,
         )
         return DataLoader(
             dataset,

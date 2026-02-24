@@ -21,7 +21,7 @@ import tyro
 from torch.utils.data import DataLoader
 
 from canvit_pretrain.train.data.shards import AllShardsDataset
-from canvit_pretrain.train.data.tar_images import TarImageReader
+from canvit_pretrain.train.data.tar_images import TarImageReader, scan_tar_headers
 from canvit_utils.transforms import preprocess
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s", datefmt="%H:%M:%S")
@@ -66,7 +66,7 @@ def get_total_rss_mb() -> float:
 def bench_serial(shard_path: Path, tar_path: Path, size: int, n: int) -> None:
     """Per-operation breakdown mimicking AllShardsDataset.__iter__, no pipelining."""
     shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
-    reader = TarImageReader(tar_path)
+    reader = TarImageReader(tar_path, index=scan_tar_headers(tar_path))
     transform = preprocess(size)
 
     paths = [shard["paths"][i] for i in range(n)]

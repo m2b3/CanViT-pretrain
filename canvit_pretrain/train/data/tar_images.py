@@ -1,17 +1,21 @@
 """Read images directly from mmap'd SA-1B tar files. No extraction needed.
 
-Each SA-1B tar (~70 GB) contains ~11k JPEGs + ~11k JSONs. We use `tarfile`
-to scan headers once and build a {name: (offset, size)} index, then serve
-images via mmap slicing.  All forked DataLoader workers share the same
-mmap'd pages (copy-on-write).
+Each SA-1B tar (~70 GB) contains ~11k JPEGs + ~11k JSONs. We scan headers
+to build a {name: (offset, size)} index, then read images via mmap slicing.
+Forked DataLoader workers share mmap'd pages (copy-on-write).
 
-Verified on sa_000020.tar: index build ~2s, image read ~18ms/img, 0 missing
-vs shard paths.
+Two ways to get a TarIndex:
+  scan_tar_headers(tar_path)  — scan tar file (~56s). For export/bench.
+  load_tar_index(tar_path)    — load .idx file (~0.01s). For training.
+
+.idx files are created by sa1b/build_tar_indexes.py and include SHA256
+and file size for integrity. Training asserts they exist.
 """
 
 import io
 import logging
 import mmap
+import pickle
 import tarfile
 import time
 from pathlib import Path
@@ -20,33 +24,68 @@ from PIL import Image
 
 log = logging.getLogger(__name__)
 
+# {stripped_name: (data_offset, data_size)}
+TarIndex = dict[str, tuple[int, int]]
+
+
+def scan_tar_headers(tar_path: Path) -> TarIndex:
+    """Scan tar headers → {stripped_name: (data_offset, data_size)}.
+
+    Slow (~56s for 70 GB tar). Use for export scripts and benchmarks.
+    For training, use load_tar_index() instead.
+    """
+    t0 = time.perf_counter()
+    index: TarIndex = {}
+    with tarfile.open(tar_path, "r") as tf:
+        for member in tf:
+            if not member.name.endswith(".jpg"):
+                continue
+            stripped = member.name.split("/", 1)[-1] if "/" in member.name else member.name
+            index[stripped] = (member.offset_data, member.size)
+    elapsed = time.perf_counter() - t0
+    log.info(f"Scanned tar: {tar_path.name}, {len(index)} JPEGs in {elapsed:.1f}s")
+    return index
+
+
+def load_tar_index(tar_path: Path) -> TarIndex:
+    """Load pre-built .idx file for a tar. Crashes if missing or stale.
+
+    .idx files are built by sa1b/build_tar_indexes.py. Verifies tar file
+    size matches (instant stat() check, no full read).
+    """
+    idx_path = tar_path.parent / f"{tar_path.name}.idx"
+    assert idx_path.exists(), (
+        f"No .idx for {tar_path.name}. "
+        f"Run: uv run python sa1b/build_tar_indexes.py --tar-dir {tar_path.parent}"
+    )
+
+    t0 = time.perf_counter()
+    with open(idx_path, "rb") as f:
+        data = pickle.load(f)
+
+    actual_size = tar_path.stat().st_size
+    assert data["tar_size"] == actual_size, (
+        f"Tar size mismatch: {tar_path.name} "
+        f"(index={data['tar_size']}, actual={actual_size}). "
+        f"Re-run: uv run python sa1b/build_tar_indexes.py --tar-dir {tar_path.parent} --force"
+    )
+
+    index = data["index"]
+    elapsed = time.perf_counter() - t0
+    log.info(
+        f"Loaded tar index: {tar_path.name}, {len(index)} JPEGs "
+        f"(sha256={data['sha256'][:12]}..., {elapsed:.3f}s)"
+    )
+    return index
+
 
 class TarImageReader:
-    """Read images from an mmap'd tar file by name.
+    """Read images from an mmap'd tar file by name."""
 
-    Index build: iterate tarfile members (~2s for 70 GB tar).
-    Image read: mmap slice → BytesIO → PIL decode (~18ms/img).
-    """
-
-    def __init__(self, tar_path: Path) -> None:
+    def __init__(self, tar_path: Path, *, index: TarIndex) -> None:
         self._fd = open(tar_path, "rb")
         self._mm = mmap.mmap(self._fd.fileno(), 0, access=mmap.ACCESS_READ)
-        t0 = time.perf_counter()
-        self.index = self._build_index(tar_path)
-        elapsed = time.perf_counter() - t0
-        log.info(f"TarImageReader: {tar_path.name}, {len(self.index)} JPEGs indexed in {elapsed:.1f}s")
-
-    def _build_index(self, tar_path: Path) -> dict[str, tuple[int, int]]:
-        """Scan tar headers → {stripped_name: (data_offset, data_size)}."""
-        index: dict[str, tuple[int, int]] = {}
-        with tarfile.open(tar_path, "r") as tf:
-            for member in tf:
-                if not member.name.endswith(".jpg"):
-                    continue
-                # Strip leading directory (like tar --strip-components=1)
-                stripped = member.name.split("/", 1)[-1] if "/" in member.name else member.name
-                index[stripped] = (member.offset_data, member.size)
-        return index
+        self.index = index
 
     def read_image(self, name: str) -> Image.Image:
         data_offset, size = self.index[name]
