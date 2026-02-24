@@ -201,6 +201,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     if ckpt_path_to_load is not None:
         ckpt_data = load_checkpoint(ckpt_path_to_load, cfg.device)
         prev_comet_id = ckpt_data["comet_id"]
+        # Override cfg.model from checkpoint — model arch MUST match saved weights.
+        # Without this, CLI defaults (e.g. convex) override the checkpoint's config
+        # (e.g. additive), causing missing/unexpected keys on load_state_dict.
+        ckpt_model_cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt_data["model_config"])
+        if ckpt_model_cfg != cfg.model:
+            log.warning(f"Overriding cfg.model from checkpoint (was {cfg.model.canvas_update_mode}, "
+                        f"now {ckpt_model_cfg.canvas_update_mode})")
+            cfg.model = ckpt_model_cfg
 
     # === COMET EXPERIMENT ===
     # RESUME mode: continue existing experiment. SEED/FRESH mode: new experiment.
@@ -311,11 +319,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     # Two sources: .pt checkpoint (ckpt_data) or HF Hub seed (hf_seed_state_dict)
     weights_to_load: dict[str, Tensor] | None = None
     if ckpt_data is not None:
-        ckpt_cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt_data["model_config"])
-        if ckpt_cfg != cfg.model:
-            log.warning("Checkpoint config differs from current config!")
-            log.warning(f"  Checkpoint: {ckpt_cfg}")
-            log.warning(f"  Current:    {cfg.model}")
         weights_to_load = ckpt_data["state_dict"]
     elif hf_seed_state_dict is not None:
         weights_to_load = hf_seed_state_dict

@@ -110,6 +110,8 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
             yielded = 0
             skipped = 0
             t_read = t_transform = t_patches = 0.0
+            max_read = max_patches = 0.0
+            n_slow_patches = 0  # patches clone > 500ms
 
             for i in range(worker_id, n_samples, num_workers):
                 if i in failed_indices:
@@ -133,31 +135,34 @@ class AllShardsDataset(IterableDataset[tuple[Tensor, Tensor, Tensor, int]]):
                     skipped += 1
                     continue
 
-                t_read += t1 - t0
+                dt_read = t1 - t0
+                t_read += dt_read
                 t_transform += t2 - t1
+                max_read = max(max_read, dt_read)
 
                 assert isinstance(img_tensor, Tensor)
                 t0 = time.perf_counter()
                 patches = shard["patches"][i].clone()
                 cls = shard["cls"][i].clone()
-                t_patches += time.perf_counter() - t0
+                dt_patches = time.perf_counter() - t0
+                t_patches += dt_patches
+                max_patches = max(max_patches, dt_patches)
+                if dt_patches > 0.5:
+                    n_slow_patches += 1
 
                 yield (img_tensor, patches, cls, int(shard["class_idxs"][i]))
                 yielded += 1
 
-            if worker_id == 0:
-                total = t_read + t_transform + t_patches
-                if yielded > 0 and total > 0:
-                    log.info(
-                        f"Shard {shard_idx} done: {yielded} imgs, "
-                        f"read={t_read/yielded*1e3:.1f}ms "
-                        f"transform={t_transform/yielded*1e3:.1f}ms "
-                        f"patches={t_patches/yielded*1e3:.1f}ms "
-                        f"total={total/yielded*1e3:.1f}ms/img ({yielded/total:.0f} img/s) "
-                        f"skipped={skipped}"
-                    )
-                else:
-                    log.info(f"Shard {shard_idx} done: yielded={yielded}, skipped={skipped}")
+            # All workers log — see per-worker distribution across shard
+            total = t_read + t_transform + t_patches
+            if yielded > 0 and total > 0:
+                log.info(
+                    f"w{worker_id} shard {shard_idx}: {yielded} imgs, "
+                    f"read={t_read/yielded*1e3:.1f}ms(max={max_read*1e3:.0f}) "
+                    f"patches={t_patches/yielded*1e3:.1f}ms(max={max_patches*1e3:.0f}) "
+                    f"slow_patches={n_slow_patches} "
+                    f"total={total/yielded*1e3:.1f}ms/img ({yielded/total:.0f} img/s)"
+                )
 
             shard_counter += 1
 
