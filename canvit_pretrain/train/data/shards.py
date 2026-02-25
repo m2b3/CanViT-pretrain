@@ -197,9 +197,21 @@ class ShardedFeatureLoader:
 
         log.info(f"Globbing shards in {self.shards_dir}...")
         t0 = time.perf_counter()
-        self.shard_files = sorted(self.shards_dir.glob("*.pt"))
-        log.info(f"  Found {len(self.shard_files)} shards in {time.perf_counter() - t0:.2f}s")
-        assert self.shard_files, f"No shards found in {shards_dir}"
+        all_shards = sorted(self.shards_dir.glob("*.pt"))
+        log.info(f"  Found {len(all_shards)} shards in {time.perf_counter() - t0:.2f}s")
+        assert all_shards, f"No shards found in {shards_dir}"
+
+        # When using tar-based loading, only keep shards that have a .tar.idx file.
+        # Exports may land new shards after the last idx build — those are unusable.
+        if tar_dir is not None:
+            td = Path(tar_dir)
+            usable = [s for s in all_shards if (td / f"{s.stem}.tar.idx").exists()]
+            if len(usable) < len(all_shards):
+                log.warning(f"  Filtered to {len(usable)}/{len(all_shards)} shards (rest lack .tar.idx)")
+            self.shard_files = usable
+        else:
+            self.shard_files = all_shards
+        assert self.shard_files, f"No usable shards in {shards_dir}"
 
         # Read first shard to get samples_per_shard (all shards same size)
         # mmap=True: SA-1B shards are ~70 GB, don't load into RAM just to count samples
