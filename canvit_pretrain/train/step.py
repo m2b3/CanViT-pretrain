@@ -116,7 +116,7 @@ def training_step(
     """
     n_branches = n_full_start_branches + n_random_start_branches
     assert n_branches >= 1
-    assert chunk_size >= 2
+    assert chunk_size >= 1
     assert 0.0 <= continue_prob <= 1.0
     device = images.device
     B = images.shape[0]
@@ -224,6 +224,18 @@ def training_step(
             scene_pred=L.scene_pred,
             cls_pred=L.cls_pred,
         )
+
+        # t=0 constitutes a complete chunk when chunk_size=1.
+        if chunk_size == 1:
+            loss_for_backward = chunk.chunk_combined_loss / n_glimpses / n_branches
+            loss_for_backward.backward()
+            if n_glimpses > 1:
+                chunk.state = RecurrentState(
+                    canvas=out.state.canvas.detach(),
+                    recurrent_cls=out.state.recurrent_cls.detach(),
+                )
+                chunk.vpe = out.vpe.detach() if out.vpe is not None else None
+                chunk.chunk_combined_loss = torch.zeros((), device=device)
 
         for t in range(1, n_glimpses):
             # t>=1: use pre-computed schedule (half RANDOM, half POLICY, shuffled)
