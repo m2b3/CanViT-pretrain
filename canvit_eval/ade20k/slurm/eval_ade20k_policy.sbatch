@@ -20,7 +20,6 @@ set -eux
 NAME="${1:?Usage: sbatch --array=0-N eval_ade20k_policy.sbatch <c2f|fullrand|iid> <probe_ckpt>}"
 PROBE_CKPT="${2:?Missing probe checkpoint path}"
 
-cd ~/scratch/CanViT-train
 source canvit_eval/ade20k/slurm/setup.sh
 
 case "$NAME" in

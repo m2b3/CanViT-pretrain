@@ -27,7 +27,6 @@ from canvit_pretrain.train.scheduler import warmup_constant_scheduler
 from canvit_pretrain.train.transforms import (
     imagenet_normalize,
     train_transform,
-    val_transform,
 )
 from canvit_pretrain.train.viewpoint import (
     PixelBox,
@@ -57,7 +56,6 @@ __all__ = [
     "imagenet_normalize",
     "scene_size_px",
     "train_transform",
-    "val_transform",
     # Probe
     "IN1K_NUM_CLASSES",
     "PROBE_REGISTRY",

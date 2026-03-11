@@ -11,7 +11,6 @@
 # Usage: sbatch canvit_eval/ade20k/slurm/train_ade20k_probes.sbatch [--max-steps 5000] [...]
 
 set -eux
-cd ~/scratch/CanViT-train
 source canvit_eval/ade20k/slurm/setup.sh
 mkdir -p logs
 

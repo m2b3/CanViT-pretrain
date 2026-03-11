@@ -15,7 +15,6 @@ set -eux
 
 PROBE_CKPT="${1:?Usage: sbatch eval_ade20k_dinov3_probe.sbatch <probe_ckpt>}"
 
-cd ~/scratch/CanViT-train
 source canvit_eval/ade20k/slurm/setup.sh
 mkdir -p logs
 

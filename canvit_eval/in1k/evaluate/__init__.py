@@ -36,7 +36,7 @@ TOP_K = 5
 
 
 def _default_val_dir() -> Path:
-    return Path(os.environ.get("IN1K_VAL_DIR", "/datashare/imagenet/ILSVRC2012/val"))
+    return Path(os.environ.get("IN1K_VAL_IMAGE_DIR", "/datashare/imagenet/ILSVRC2012/val"))
 
 
 def _default_output() -> Path:

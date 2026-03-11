@@ -21,6 +21,9 @@ outputs/
 # macOS
 *.DS_Store
 
+# Environment (machine-specific, see .envrc.nibi)
+.envrc
+
 # Misc
 throwaway/
 profile_*.json

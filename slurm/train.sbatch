@@ -41,7 +41,6 @@ fi
 log "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo 'N/A')"
 log "Args: $*"
 
-cd ~/scratch/CanViT-train
 source slurm/env.sh
 
 # Dependencies
@@ -58,8 +57,8 @@ RUN_NAME_ARG=()
 exec uv run python -m canvit_pretrain.train \
     "${RUN_NAME_ARG[@]}" \
     --feature-base-dir "$FEATURES_DIR/in21k" \
-    --feature-image-root "$IN21K_DIR" \
-    --val-dir "$IN1K_VAL_DIR" \
+    --feature-image-root "$IN21K_IMAGE_DIR" \
+    --val-dir "$IN1K_VAL_IMAGE_DIR" \
     --train-index-dir "$INDEX_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \
     "$@"

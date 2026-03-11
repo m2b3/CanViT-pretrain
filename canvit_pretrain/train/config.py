@@ -34,6 +34,7 @@ class Config:
     warmup_steps: int = 100_000
     start_lr: float | None = 1e-7  # None = peak_lr / warmup_steps
     peak_lr: float = 4e-4
+    cosine_total_steps: int | None = None  # None = constant after warmup; set to enable cosine decay
     # weight_decay: float = 0.05  # standard in ViTs
     # we can use a much lower weight decay due to the richness of our training signal
     # and we *should*, due to the use of small batches
@@ -50,7 +51,6 @@ class Config:
     enable_scene_cls_loss: bool = True  # Scene (global) CLS reconstruction loss
     ema_alpha: float = 0.1  # EMA smoothing for metrics
     grad_clip: float = 1.0
-    # Must be multiple of batches_per_shard (shard_size // batch_size) for clean resume
     steps_per_job: int = 4_992  # Steps this job does before exiting (for SLURM arrays)
     # Data
     train_dir: Path = Path("/datasets/ILSVRC/Data/CLS-LOC/train")
@@ -62,16 +62,23 @@ class Config:
     #   {feature_base_dir}/{teacher_name}/{scene_resolution}/shards/
     feature_base_dir: Path | None = None
     feature_image_root: Path | None = None  # Required with feature_base_dir
+    tar_dir: Path | None = None  # SA-1B: images read directly from mmap'd tars
     # Run identification and checkpointing
     run_name: str | None = None
     """Run name. Auto-generated from SLURM_ARRAY_JOB_ID or timestamp if None."""
     ckpt_dir: Path = Path("checkpoints")
     """Directory for checkpoint storage. Run checkpoints go in {ckpt_dir}/{run_name}/."""
     seed_ckpt: Path | None = None
-    """Seed model weights from external checkpoint. Starts fresh (new experiment, step=0).
-    Only used if no checkpoint exists in run_dir. For forking runs with different config."""
+    """Seed model weights from external checkpoint (.pt in CheckpointData format).
+    Starts fresh (new experiment, step=0). Only used if no checkpoint exists in run_dir."""
+    hf_seed_ckpt: str | None = None
+    """Seed model weights from HF Hub repo (e.g. 'canvit/canvitb16-add-vpe-...'). Downloads
+    config.json + model.safetensors, overrides cfg.model with the checkpoint's config.
+    Mutually exclusive with seed_ckpt."""
     reset_normalizer: bool = False
     """Re-warmup normalizer stats when loading any checkpoint."""
+    normalizer_max_samples: int = 0
+    """Max samples from shard for normalizer stats. 0 = use all samples."""
     # Training
     num_workers: int = 16
     scene_resolution: int = 512

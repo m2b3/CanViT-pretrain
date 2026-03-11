@@ -1,7 +1,4 @@
-"""ImageNet normalization and transforms for pretraining.
-
-Constants from timm. Training-specific augmentations defined here.
-"""
+"""ImageNet transforms for pretraining."""
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision import transforms
@@ -17,16 +14,6 @@ def train_transform(size: int, crop_scale: tuple[float, float]) -> transforms.Co
     return transforms.Compose([
         transforms.RandomResizedCrop(size, scale=crop_scale),
         transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        imagenet_normalize(),
-    ])
-
-
-def val_transform(size: int) -> transforms.Compose:
-    """Validation transform: center crop + normalize."""
-    return transforms.Compose([
-        transforms.Resize(size),
-        transforms.CenterCrop(size),
         transforms.ToTensor(),
         imagenet_normalize(),
     ])

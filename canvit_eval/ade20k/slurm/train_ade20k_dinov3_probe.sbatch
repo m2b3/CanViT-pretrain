@@ -19,7 +19,6 @@ set -eux
 RESOLUTION="${1:?Usage: sbatch train_ade20k_dinov3_probe.sbatch <resolution> [extra args...]}"
 shift
 
-cd ~/scratch/CanViT-train
 source canvit_eval/ade20k/slurm/setup.sh
 mkdir -p logs
 

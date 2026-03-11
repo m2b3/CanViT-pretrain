@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from drac_imagenet import IndexedImageFolder
 
-from ..transforms import val_transform
+from canvit_utils.transforms import preprocess
 from .shards import ShardedFeatureLoader
 
 log = logging.getLogger(__name__)
@@ -108,27 +108,33 @@ def create_loaders(cfg: "Config", start_step: int) -> Loaders:
 
     # Train loader: precomputed features (required)
     assert cfg.feature_base_dir is not None, "feature_base_dir required"
-    assert cfg.feature_image_root is not None, "feature_image_root required"
+    assert (cfg.feature_image_root is None) != (cfg.tar_dir is None), \
+        "Exactly one of feature_image_root or tar_dir required"
     log.info("Train: using PRECOMPUTED FEATURES (ShardedFeatureLoader)")
     shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(sz) / "shards"
     log.info(f"  feature_base_dir: {cfg.feature_base_dir}")
     log.info(f"  teacher_name: {cfg.teacher_name}")
     log.info(f"  resolution: {sz}")
     log.info(f"  → shards_dir: {shards_dir}")
-    log.info(f"  image_root: {cfg.feature_image_root}")
+    if cfg.tar_dir is not None:
+        log.info(f"  tar_dir: {cfg.tar_dir} (images read directly from tar)")
+    else:
+        log.info(f"  image_root: {cfg.feature_image_root}")
     assert shards_dir.is_dir(), f"shards_dir not found: {shards_dir}"
     train_loader = ShardedFeatureLoader(
         shards_dir=shards_dir,
-        image_root=cfg.feature_image_root,
         image_size=sz,
         batch_size=cfg.batch_size,
         num_workers=cfg.num_workers,
         start_step=start_step,
+        image_root=cfg.feature_image_root,
+        tar_dir=cfg.tar_dir,
+        steps_per_job=cfg.steps_per_job,
     )
     log.info(f"  {len(train_loader.shard_files)} shards, start_shard={train_loader.start_shard}")
 
     # Val loader
-    val_tf = val_transform(sz)
+    val_tf = preprocess(sz)
     if cfg.val_index_dir is not None:
         val_index_dir = cfg.val_index_dir
         log.info(f"Val: using provided val_index_dir={val_index_dir}")

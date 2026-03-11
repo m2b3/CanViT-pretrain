@@ -4,8 +4,8 @@ Usage (in interactive session):
     source slurm/env.sh
     uv run python scripts/validate_features.py \
         --shard $FEATURES_DIR/dinov3_vitb16/512/shards/00000.pt \
-        --image-root $IN21K_DIR \
-        --teacher-ckpt $DINOV3_VITB16_CKPT \
+        --image-root $IN21K_IMAGE_DIR \
+        --teacher-repo-id facebook/dinov3-vitb16-pretrain-lvd1689m \
         --idx 42
 """
 
@@ -14,11 +14,12 @@ import sys
 from pathlib import Path
 
 import torch
-from canvit import create_backbone
 
 # Import exact same dataset class as export
 sys.path.insert(0, str(Path(__file__).parent))
-from export_features import ImageDataset
+from export_in21k_features import ImageDataset
+
+from canvit_utils.teacher import load_teacher
 
 
 def compare(name: str, a: torch.Tensor, b: torch.Tensor) -> None:
@@ -30,9 +31,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--shard", type=Path, required=True)
     parser.add_argument("--image-root", type=Path, required=True)
-    parser.add_argument("--teacher-ckpt", type=Path, required=True)
+    parser.add_argument("--teacher-repo-id", type=str, required=True)
     parser.add_argument("--idx", type=int, default=0)
-    parser.add_argument("--teacher-model", type=str, default="dinov3_vitb16")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -54,11 +54,8 @@ def main():
     assert img_hash == shard["image_hashes"][args.idx], "Hash mismatch!"
     img_tensor = img_tensor.unsqueeze(0).to(device)
 
-    # Load teacher (exact same as export)
-    teacher = create_backbone(args.teacher_model, weights=str(args.teacher_ckpt))
-    teacher = teacher.to(device).eval()
-    for p in teacher.parameters():
-        p.requires_grad = False
+    # Load teacher (same as export: HuggingFace Hub)
+    teacher = load_teacher(args.teacher_repo_id, device)
 
     with torch.no_grad():
         # Run inference at different precisions

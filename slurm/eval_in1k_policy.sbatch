@@ -19,7 +19,6 @@ set -eux
 
 NAME="${1:?Usage: sbatch --array=0-N eval_in1k_policy.sbatch <c2f|fullrand|iid>}"
 
-cd ~/scratch/CanViT-train
 source slurm/env.sh
 
 case "$NAME" in

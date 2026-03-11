@@ -20,7 +20,6 @@ log "Job: $SLURM_JOB_ID on $(hostname)"
 log "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo 'N/A')"
 log "Args: $*"
 
-cd ~/scratch/CanViT-train
 source slurm/env.sh
 
 mkdir -p logs outputs
