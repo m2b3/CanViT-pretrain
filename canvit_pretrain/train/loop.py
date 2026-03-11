@@ -98,7 +98,7 @@ def init_normalizer_stats_from_shard(
     log.info(f"Computing normalizer stats from shard: {shard_path.name}")
     shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
     n_total = shard["patches"].shape[0]
-    n = min(n_total, max_samples)
+    n = min(n_total, max_samples) if max_samples > 0 else n_total
     # .clone() materializes from mmap; .float().to(device) for set_stats
     patches = shard["patches"][:n].clone().float().to(device)  # [n, n_tokens, D]
     cls = shard["cls"][:n].clone().float().to(device)  # [n, D]
