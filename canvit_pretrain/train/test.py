@@ -11,7 +11,9 @@ from canvit_pretrain.train.data import (
     InfiniteLoader,
 )
 from canvit_pretrain.train.scheduler import warmup_constant_scheduler
-from canvit_pretrain.train.transforms import imagenet_normalize, train_transform, val_transform
+from canvit_utils.transforms import preprocess
+
+from canvit_pretrain.train.transforms import imagenet_normalize, train_transform
 from canvit_pretrain.train.viewpoint import (
     PixelBox,
     make_eval_viewpoints,
@@ -49,16 +51,16 @@ class TestTrainTransform:
         assert out.dtype == torch.float32
 
 
-class TestValTransform:
+class TestPreprocess:
     def test_output_shape(self) -> None:
-        t = val_transform(224)
+        t = preprocess(224)
         img = Image.new("RGB", (256, 256))
         out = t(img)
         assert isinstance(out, Tensor)
         assert out.shape == (3, 224, 224)
 
     def test_deterministic(self) -> None:
-        t = val_transform(64)
+        t = preprocess(64)
         img = Image.new("RGB", (128, 128), color=(100, 150, 200))
         out1 = t(img)
         out2 = t(img)

@@ -1,11 +1,12 @@
-"""Export teacher features for IN21k.
+"""Export teacher features to sharded .pt files.
 
 Successfully used to export ~19TB of DINOv3 ViT-B/16 features on ImageNet-21k
-(January 2026, Narval cluster). The data is exported and in use — do not modify
-this script's behavior.
+(January 2026, Narval cluster). Last used for IN21k at commit 0915b44
+(2026-02-11). Teacher loading updated from local .pth to HuggingFace Hub
+(2026-02-23, sa1b branch) — feature extraction logic unchanged.
 
 Precomputes DINOv3 features for all images, stores as sharded .pt files.
-This eliminates expensive 512px teacher inference during training.
+This eliminates expensive teacher inference during training.
 
 USAGE:
     # Single shard
@@ -13,7 +14,7 @@ USAGE:
         --parquet /path/to/index.parquet \
         --image-root /path/to/images \
         --out-dir /path/to/output \
-        --teacher-ckpt /path/to/weights.pth \
+        --teacher-repo-id facebook/dinov3-vitb16-pretrain-lvd1689m \
         --shard 0
 
     # Range of shards (for SLURM array jobs)
@@ -32,7 +33,7 @@ SHARD SCHEMA:
     shard_id, start_idx, end_idx
 
     # Compatibility (must match across all shards)
-    parquet_path, parquet_sha256, teacher_model, teacher_ckpt,
+    parquet_path, parquet_sha256, teacher_repo_id,
     image_size, shard_size, dtype, embed_dim, n_patches
 
     # Provenance
@@ -55,13 +56,13 @@ import pyarrow.parquet as pq
 import torch
 import tyro
 import xxhash
-from canvit import create_backbone
+from canvit_utils.teacher import load_teacher
 from PIL import Image, ImageFile
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from canvit_pretrain.train.transforms import val_transform
+from canvit_utils.transforms import preprocess
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -91,8 +92,7 @@ class Config:
     parquet: Path
     image_root: Path
     out_dir: Path
-    teacher_ckpt: Path
-    teacher_model: str
+    teacher_repo_id: str
     image_size: int
 
     # Shard selection
@@ -145,7 +145,7 @@ class ImageDataset(Dataset):
         self.root = root
         self.paths = paths
         self.size = size
-        self.transform = val_transform(size)
+        self.transform = preprocess(size)
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -188,8 +188,7 @@ class FeatureExporter:
         log.info(f"parquet: {cfg.parquet}")
         log.info(f"image_root: {cfg.image_root}")
         log.info(f"out_dir: {cfg.out_dir}")
-        log.info(f"teacher_ckpt: {cfg.teacher_ckpt}")
-        log.info(f"teacher_model: {cfg.teacher_model}")
+        log.info(f"teacher_repo_id: {cfg.teacher_repo_id}")
         log.info(f"image_size: {cfg.image_size}")
         log.info(f"dtype: {STORAGE_DTYPE} ({STORAGE_BYTES} bytes)")
 
@@ -218,21 +217,15 @@ class FeatureExporter:
         log.info(f"Parquet hash: {self.parquet_hash}")
         log.info(f"Git commit: {self.git_commit[:12]}")
 
-        # Teacher
-        self.teacher = (
-            create_backbone(cfg.teacher_model, weights=str(cfg.teacher_ckpt))
-            .to(self.device)
-            .eval()
-        )
-        for p in self.teacher.parameters():
-            p.requires_grad = False
+        # Teacher (frozen DINOv3 from HuggingFace Hub)
+        self.teacher = load_teacher(cfg.teacher_repo_id, self.device)
 
-        patch_size = self.teacher.patch_size_px
+        patch_size = self.teacher.model.config.patch_size
         self.embed_dim = self.teacher.embed_dim
         self.n_patches = (cfg.image_size // patch_size) ** 2
         assert cfg.image_size % patch_size == 0, f"{cfg.image_size} % {patch_size} != 0"
         log.info(
-            f"Teacher: {cfg.teacher_model}, {self.embed_dim}d, {self.n_patches} patches"
+            f"Teacher: {cfg.teacher_repo_id}, {self.embed_dim}d, {self.n_patches} patches"
         )
         self._log_gpu("after teacher")
 
@@ -255,7 +248,6 @@ class FeatureExporter:
         cfg = self.cfg
         assert cfg.parquet.exists(), f"Parquet not found: {cfg.parquet}"
         assert cfg.image_root.is_dir(), f"Not a directory: {cfg.image_root}"
-        assert cfg.teacher_ckpt.exists(), f"Checkpoint not found: {cfg.teacher_ckpt}"
 
         schema = pq.read_schema(cfg.parquet)
         missing = {"path", "class_idx"} - set(schema.names)
@@ -400,8 +392,7 @@ class FeatureExporter:
                 # Compatibility
                 "parquet_path": str(cfg.parquet),
                 "parquet_sha256": self.parquet_hash,
-                "teacher_model": cfg.teacher_model,
-                "teacher_ckpt": str(cfg.teacher_ckpt),
+                "teacher_repo_id": cfg.teacher_repo_id,
                 "image_size": cfg.image_size,
                 "shard_size": cfg.shard_size,
                 "dtype": str(STORAGE_DTYPE),

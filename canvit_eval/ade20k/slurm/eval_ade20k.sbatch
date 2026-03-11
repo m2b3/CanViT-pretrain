@@ -11,7 +11,6 @@
 # Usage: sbatch canvit_eval/ade20k/slurm/eval_ade20k.sbatch --probe-ckpt /path/to/best.pt [...]
 
 set -eux
-cd ~/scratch/CanViT-train
 source canvit_eval/ade20k/slurm/setup.sh
 mkdir -p logs
 

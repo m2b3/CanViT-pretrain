@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 class Config:
     # Paths - feature_base_dir should include dataset (e.g. $FEATURES_DIR/in21k)
     feature_base_dir: Path = Path(os.environ.get("FEATURES_DIR", "~/projects/def-skrishna/dinov3_dense_features")).expanduser() / "in21k"
-    image_root: Path = Path(os.environ.get("IN21K_DIR", "/datashare/imagenet/winter21_whole"))
+    image_root: Path = Path(os.environ.get("IN21K_IMAGE_DIR", "/datashare/imagenet/winter21_whole"))
     teacher_model: str = "dinov3_vitb16"
     image_size: int = 512
 

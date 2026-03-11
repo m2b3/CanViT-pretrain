@@ -80,8 +80,6 @@ def test_strips_orig_mod() -> None:
             "scene_resolution": 512,
             "step": None,
             "train_loss": None,
-            "scene_norm_state": None,
-            "cls_norm_state": None,
             "optimizer_state": None,
             "scheduler_state": None,
             "training_config_history": None,

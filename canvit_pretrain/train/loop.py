@@ -3,6 +3,7 @@
 # backward() runs outside autocast (as PyTorch recommends). torch.compile's default
 # "same_as_forward" assumption silently corrupts gradients when that's the case.
 import torch._functorch.config
+
 torch._functorch.config.backward_pass_autocast = "off"  # type: ignore[attr-defined]
 
 import logging
@@ -42,7 +43,7 @@ from canvit.backbone.vit import NormFeatures  # noqa: E402
 from ytch.model import count_parameters  # noqa: E402
 
 from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
-from canvit_pretrain.checkpoint import CheckpointData, current_provenance, find_latest, update_symlink  # noqa: E402
+from canvit_pretrain.checkpoint import CheckpointData, current_provenance, find_latest, load_state_dict_flexible, update_symlink  # noqa: E402
 from canvit_pretrain.checkpoint import load as load_checkpoint  # noqa: E402
 from canvit_pretrain.checkpoint import save as save_checkpoint  # noqa: E402
 
@@ -51,7 +52,7 @@ from .data import ShardedFeatureLoader, create_loaders, scene_size_px  # noqa: E
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
 from .probe import load_probe  # noqa: E402
-from .scheduler import warmup_constant_scheduler  # noqa: E402
+from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noqa: E402
 from .step import training_step  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
@@ -87,16 +88,24 @@ def init_normalizer_stats_from_shard(
     scene_norm: PatchStandardizer,
     cls_norm: CLSStandardizer,
     device: torch.device,
+    max_samples: int,
 ) -> None:
-    """Initialize normalizer stats from one precomputed shard."""
+    """Initialize normalizer stats from one precomputed shard.
+
+    Uses mmap + subset to avoid loading the full shard into memory.
+    SA-1B shards are ~70 GB; loading fully would OOM on any device.
+    """
     log.info(f"Computing normalizer stats from shard: {shard_path.name}")
-    shard = torch.load(shard_path, map_location=device, weights_only=False)
-    patches = shard["patches"].float()  # [N, n_tokens, D]
-    cls = shard["cls"].float()  # [N, D]
+    shard = torch.load(shard_path, map_location="cpu", weights_only=False, mmap=True)
+    n_total = shard["patches"].shape[0]
+    n = min(n_total, max_samples)
+    # .clone() materializes from mmap; .float().to(device) for set_stats
+    patches = shard["patches"][:n].clone().float().to(device)  # [n, n_tokens, D]
+    cls = shard["cls"][:n].clone().float().to(device)  # [n, D]
     scene_norm.set_stats(patches)
-    cls_norm.set_stats(cls.unsqueeze(1))  # [N, 1, D] for n_tokens=1
-    log.info(f"  Scene/CLS stats from {patches.shape[0]} samples")
-    del shard
+    cls_norm.set_stats(cls.unsqueeze(1))  # [n, 1, D] for n_tokens=1
+    log.info(f"  Scene/CLS stats from {n}/{n_total} samples")
+    del shard, patches, cls
     torch.cuda.empty_cache()
 
 
@@ -160,8 +169,10 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         return flat
 
     # Determine checkpoint source and load mode
-    # Priority: run_dir/latest.pt (RESUME) > seed_ckpt (SEED) > fresh start
+    # Priority: run_dir/latest.pt (RESUME) > seed_ckpt (SEED) > hf_seed_ckpt (HF SEED) > fresh
+    assert not (cfg.seed_ckpt and cfg.hf_seed_ckpt), "seed_ckpt and hf_seed_ckpt are mutually exclusive"
     ckpt_path_to_load: Path | None = None
+    hf_seed_state_dict: dict[str, Tensor] | None = None
     is_seeding = False  # True = seed mode (weights only), False = resume mode (full state)
     latest = find_latest(run_dir)
     if latest is not None:
@@ -172,6 +183,15 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         ckpt_path_to_load = cfg.seed_ckpt
         is_seeding = True
         log.info(f"SEED mode: loading weights from {ckpt_path_to_load} (fresh opt/sched/step)")
+    elif cfg.hf_seed_ckpt is not None:
+        from canvit.model.pretraining.hub import CanViTForPretrainingHFHub
+        log.info(f"HF SEED mode: loading from {cfg.hf_seed_ckpt}")
+        hf_model = CanViTForPretrainingHFHub.from_pretrained(cfg.hf_seed_ckpt)
+        hf_seed_state_dict = {k: v for k, v in hf_model.state_dict().items()}
+        cfg.model = hf_model.cfg
+        log.info(f"  Model config from HF: {cfg.model}")
+        del hf_model
+        is_seeding = True
     else:
         log.info("FRESH mode: no checkpoint, starting from scratch")
 
@@ -181,6 +201,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     if ckpt_path_to_load is not None:
         ckpt_data = load_checkpoint(ckpt_path_to_load, cfg.device)
         prev_comet_id = ckpt_data["comet_id"]
+        # Override cfg.model from checkpoint — model arch MUST match saved weights.
+        # Without this, CLI defaults (e.g. convex) override the checkpoint's config
+        # (e.g. additive), causing missing/unexpected keys on load_state_dict.
+        ckpt_model_cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt_data["model_config"])
+        if ckpt_model_cfg != cfg.model:
+            log.warning(f"Overriding cfg.model from checkpoint (was {cfg.model.canvas_update_mode}, "
+                        f"now {ckpt_model_cfg.canvas_update_mode})")
+            cfg.model = ckpt_model_cfg
 
     # === COMET EXPERIMENT ===
     # RESUME mode: continue existing experiment. SEED/FRESH mode: new experiment.
@@ -267,11 +295,18 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     optimizer = torch.optim.AdamW(trainable, lr=cfg.peak_lr, weight_decay=cfg.weight_decay)
     start_lr = cfg.start_lr if cfg.start_lr is not None else cfg.peak_lr / cfg.warmup_steps
-    scheduler = warmup_constant_scheduler(
-        optimizer, cfg.warmup_steps, cfg.peak_lr,
-        start_lr=cfg.start_lr,
-    )
-    log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e} (constant), wd={cfg.weight_decay:.2e}")
+    if cfg.cosine_total_steps is not None:
+        scheduler = warmup_cosine_scheduler(
+            optimizer, cfg.warmup_steps, cfg.cosine_total_steps, cfg.peak_lr,
+            start_lr=cfg.start_lr,
+        )
+        log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e}→0 (cosine, {cfg.cosine_total_steps} steps), wd={cfg.weight_decay:.2e}")
+    else:
+        scheduler = warmup_constant_scheduler(
+            optimizer, cfg.warmup_steps, cfg.peak_lr,
+            start_lr=cfg.start_lr,
+        )
+        log.info(f"Optimizer: AdamW, lr={start_lr:.2e}→{cfg.peak_lr:.2e} (constant), wd={cfg.weight_decay:.2e}")
 
     amp_ctx = (
         torch.autocast(device_type=cfg.device.type, dtype=torch.bfloat16)
@@ -280,27 +315,28 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     log.info(f"AMP: {'bfloat16' if cfg.amp else 'disabled'}")
     log.info(f"Non-blocking transfers: {'enabled' if cfg.non_blocking_transfer else 'DISABLED (sync)'}")
 
-    # === RESTORE MODEL/OPTIMIZER STATE FROM CHECKPOINT ===
+    # === RESTORE MODEL WEIGHTS ===
+    # Two sources: .pt checkpoint (ckpt_data) or HF Hub seed (hf_seed_state_dict)
+    weights_to_load: dict[str, Tensor] | None = None
     if ckpt_data is not None:
-        ckpt_cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt_data["model_config"])
-        if ckpt_cfg != cfg.model:
-            log.warning("Checkpoint config differs from current config!")
-            log.warning(f"  Checkpoint: {ckpt_cfg}")
-            log.warning(f"  Current:    {cfg.model}")
-        model.load_state_dict(ckpt_data["state_dict"], strict=True)
-        log.info("Model state loaded (strict=True)")
+        weights_to_load = ckpt_data["state_dict"]
+    elif hf_seed_state_dict is not None:
+        weights_to_load = hf_seed_state_dict
 
-        # Load optimizer + scheduler state (RESUME mode only)
-        if is_seeding:
-            log.info("SEED mode: fresh optimizer+scheduler (step=0)")
-        else:
-            opt_state = ckpt_data["optimizer_state"]
-            sched_state = ckpt_data["scheduler_state"]
-            assert opt_state is not None, "Checkpoint missing optimizer_state — cannot resume"
-            assert sched_state is not None, "Checkpoint missing scheduler_state — cannot resume"
-            optimizer.load_state_dict(opt_state)
-            scheduler.load_state_dict(sched_state)
-            log.info(f"RESUME mode: restored optimizer+scheduler (step={sched_state['last_epoch']})")
+    if weights_to_load is not None:
+        load_state_dict_flexible(model, weights_to_load)
+
+    # === RESTORE OPTIMIZER/SCHEDULER (RESUME mode only) ===
+    if ckpt_data is not None and not is_seeding:
+        opt_state = ckpt_data["optimizer_state"]
+        sched_state = ckpt_data["scheduler_state"]
+        assert opt_state is not None, "Checkpoint missing optimizer_state — cannot resume"
+        assert sched_state is not None, "Checkpoint missing scheduler_state — cannot resume"
+        optimizer.load_state_dict(opt_state)
+        scheduler.load_state_dict(sched_state)
+        log.info(f"RESUME mode: restored optimizer+scheduler (step={sched_state['last_epoch']})")
+    elif is_seeding:
+        log.info("SEED mode: fresh optimizer+scheduler (step=0)")
 
     # Build training config history (tracks config across resumes)
     training_config_history: dict[str, dict] = {}
@@ -328,29 +364,22 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             feats = teacher.forward_norm_features(images)
             return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
-    scene_norm = PatchStandardizer(grid_size=G, embed_dim=teacher.embed_dim).to(cfg.device)
-    cls_norm = CLSStandardizer(embed_dim=teacher.embed_dim).to(cfg.device)
+    # Use model's own standardizers — their state is part of model.state_dict(),
+    # so it travels correctly with HF Hub upload/download and checkpoint save/load.
+    cls_norm, scene_norm = model.standardizers(G)
 
+    need_init = cfg.reset_normalizer or not scene_norm.initialized
+    if cfg.reset_normalizer:
+        log.info("Reset normalizer: will re-init from shard")
+    elif scene_norm.initialized:
+        log.info("Standardizer stats loaded from model state_dict")
 
-    norm_loaded = False
-    if ckpt_data is not None and not cfg.reset_normalizer:
-        scene_norm_state = ckpt_data["scene_norm_state"]
-        cls_norm_state = ckpt_data["cls_norm_state"]
-        assert scene_norm_state is not None, "Checkpoint missing scene_norm_state"
-        assert cls_norm_state is not None, "Checkpoint missing cls_norm_state"
-        scene_norm.load_state_dict(scene_norm_state)
-        cls_norm.load_state_dict(cls_norm_state)
-        norm_loaded = True
-        log.info("Loaded scene/cls normalizer states from checkpoint")
-    elif cfg.reset_normalizer:
-        log.info("Reset normalizer: will re-init stats")
-
-    if not norm_loaded:
-        assert cfg.feature_base_dir is not None, "feature_base_dir required for normalizer init"
+    if need_init:
+        assert cfg.feature_base_dir is not None, "feature_base_dir required for standardizer init"
         shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
         shard_files = sorted(shards_dir.glob("*.pt"))
         assert shard_files, f"No shards in {shards_dir}"
-        init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device)
+        init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device, cfg.normalizer_max_samples)
 
     log.info(
         f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches,"
@@ -376,12 +405,16 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         norm_cls = cls_norm(raw_cls.unsqueeze(1)).squeeze(1)
         return TrainBatch(images, labels, norm_patches, norm_cls, raw_patches, raw_cls)
 
+    # Timing accumulators for data vs GPU bottleneck analysis
+    t_data_total = 0.0
+    t_gpu_total = 0.0
+
     # Step semantics: step S = model state after S gradient updates
     # step=0: before any gradient (initial model)
     # Scheduler last_epoch tracks gradient updates done so far
     start_step = scheduler.last_epoch
     end_step = start_step + cfg.steps_per_job
-    if ckpt_data is not None and start_step == 0:
+    if ckpt_data is not None and not is_seeding and start_step == 0:
         log.error("!!! CHECKPOINT LOADED BUT start_step=0 - optimizer/scheduler state was not restored !!!")
     log.info(f"Starting training loop: steps {start_step} → {end_step}")
     model.train()  # Explicit: validate() restores, but be clear about initial state
@@ -445,8 +478,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 scene_resolution=cfg.scene_resolution,
                 step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
                 comet_id=exp.get_key(),
-                scene_norm_state=scene_norm.state_dict(),
-                cls_norm_state=cls_norm.state_dict(),
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
                 training_config_history=training_config_history,
@@ -456,11 +487,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
         # === TRAINING PHASE (only for step < end_step) ===
         if step < end_step:
+            t_data_start = time.perf_counter()
             if batch is None:
                 batch = load_train_batch()
+            t_data = time.perf_counter() - t_data_start
+            t_data_total += t_data
 
             optimizer.zero_grad()
-            t_step_start = time.perf_counter()
+            t_gpu_start = time.perf_counter()
 
             step_metrics = training_step(
                 model=model,
@@ -485,12 +519,14 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 collect_viz=do_pca,
             )
 
-            if step == start_step:
-                log.info(f"First training_step took {time.perf_counter() - t_step_start:.1f}s (includes compile)")
-
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
             optimizer.step()
             scheduler.step()
+            t_gpu = time.perf_counter() - t_gpu_start
+            t_gpu_total += t_gpu
+
+            if step == start_step:
+                log.info(f"First training_step took {t_gpu:.1f}s (includes compile)")
 
             # Update EMA for all metrics
             ema.update("total_loss", step_metrics.total_loss)
@@ -517,11 +553,19 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 metrics["train/lr"] = lr
                 metrics["train/grad_norm"] = grad_norm
                 metrics["train/continue_prob"] = cfg.continue_prob
+                # Data vs GPU bottleneck: cumulative percentages
+                t_total_so_far = t_data_total + t_gpu_total
+                if t_total_so_far > 0:
+                    data_pct = t_data_total / t_total_so_far * 100
+                    gpu_pct = t_gpu_total / t_total_so_far * 100
+                    metrics["train/data_pct"] = data_pct
+                    metrics["train/gpu_pct"] = gpu_pct
                 exp.log_metrics(metrics, step=step)
 
                 ema_loss = ema.get("total_loss")
                 assert ema_loss is not None
-                pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e}")
+                data_str = f"d={data_pct:.0f}%" if t_total_so_far > 0 else ""
+                pbar.set_postfix_str(f"loss={ema_loss.item():.2e} grad={grad_norm:.2e} lr={lr:.2e} {data_str}")
 
             # Per-module grad norms (at val intervals, after training)
             if step % cfg.val_every == 0:
@@ -575,8 +619,6 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         scene_resolution=cfg.scene_resolution,
         step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
         comet_id=exp.get_key(),
-        scene_norm_state=scene_norm.state_dict(),
-        cls_norm_state=cls_norm.state_dict(),
         optimizer_state=optimizer.state_dict(),
         scheduler_state=scheduler.state_dict(),
         training_config_history=training_config_history,

@@ -3,10 +3,26 @@
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import (
     ConstantLR,
+    CosineAnnealingLR,
     LinearLR,
     LRScheduler,
     SequentialLR,
 )
+
+
+def _make_warmup(
+    optimizer: Optimizer,
+    warmup_steps: int,
+    peak_lr: float,
+    start_lr: float | None,
+) -> LinearLR:
+    effective_start_lr = start_lr if start_lr is not None else peak_lr / warmup_steps
+    return LinearLR(
+        optimizer,
+        start_factor=effective_start_lr / peak_lr,
+        end_factor=1.0,
+        total_iters=warmup_steps,
+    )
 
 
 def warmup_constant_scheduler(
@@ -15,37 +31,31 @@ def warmup_constant_scheduler(
     peak_lr: float,
     start_lr: float | None = None,
 ) -> LRScheduler:
-    """Create warmup + constant LR scheduler.
-
-    Warmup: linear from start_lr to peak_lr over warmup_steps.
-    Then: constant at peak_lr forever.
-
-    Args:
-        optimizer: The optimizer to schedule.
-        warmup_steps: Number of warmup steps (0 = constant from start).
-        peak_lr: Learning rate after warmup.
-        start_lr: Learning rate at step 0. None = peak_lr / warmup_steps.
-
-    Returns:
-        LRScheduler.
-    """
-    assert warmup_steps >= 0, "warmup_steps must be non-negative"
-
+    """Warmup → constant at peak_lr."""
+    assert warmup_steps >= 0
     if warmup_steps == 0:
         return ConstantLR(optimizer, factor=1.0, total_iters=0)
 
-    effective_start_lr = start_lr if start_lr is not None else peak_lr / warmup_steps
-    start_factor = effective_start_lr / peak_lr
-
-    warmup = LinearLR(
-        optimizer,
-        start_factor=start_factor,
-        end_factor=1.0,
-        total_iters=warmup_steps,
-    )
+    warmup = _make_warmup(optimizer, warmup_steps, peak_lr, start_lr)
     constant = ConstantLR(optimizer, factor=1.0, total_iters=0)
-    return SequentialLR(
-        optimizer,
-        schedulers=[warmup, constant],
-        milestones=[warmup_steps],
-    )
+    return SequentialLR(optimizer, schedulers=[warmup, constant], milestones=[warmup_steps])
+
+
+def warmup_cosine_scheduler(
+    optimizer: Optimizer,
+    warmup_steps: int,
+    total_steps: int,
+    peak_lr: float,
+    start_lr: float | None = None,
+    min_lr: float = 0.0,
+) -> LRScheduler:
+    """Warmup → cosine decay from peak_lr to min_lr over total_steps."""
+    assert warmup_steps >= 0
+    assert total_steps > warmup_steps, f"total_steps ({total_steps}) must exceed warmup_steps ({warmup_steps})"
+
+    if warmup_steps == 0:
+        return CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=min_lr)
+
+    warmup = _make_warmup(optimizer, warmup_steps, peak_lr, start_lr)
+    cosine = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=min_lr)
+    return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
