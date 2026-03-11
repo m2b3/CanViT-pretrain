@@ -103,7 +103,7 @@ echo "========================================"
 
 START_TIME=$(date +%s)
 
-uv run python scripts/export_features.py \
+uv run python scripts/export_in21k_features.py \
     --parquet "$PARQUET" \
     --image-root "$IMAGE_ROOT" \
     --out-dir "$OUT_DIR" \
