@@ -300,6 +300,7 @@ def make_eval_policy(
     if resolved == "entropy_coarse_to_fine":
         assert probe is not None, "entropy_coarse_to_fine requires probe="
         assert get_spatial_fn is not None, "entropy_coarse_to_fine requires get_spatial_fn="
+        # FIXME: hardcoded to exactly 3 levels (1+4+16=21). Should support arbitrary n_levels.
         assert n_viewpoints == 21, f"entropy_coarse_to_fine requires n_viewpoints=21, got {n_viewpoints}"
         return EntropyGuidedC2F(
             batch_size, device, canvas_grid,
