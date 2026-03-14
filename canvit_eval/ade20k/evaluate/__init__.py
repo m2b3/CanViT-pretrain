@@ -1,4 +1,16 @@
-"""ADE20K canvas probe evaluation with configurable policies."""
+"""ADE20K canvas probe evaluation with configurable policies.
+
+Evaluates a frozen CanViT checkpoint using a trained segmentation probe
+on the ADE20K-SceneParse150 validation set (2000 images, 150 classes).
+
+Feature type: always canvas_hidden (LayerNorm'd spatial canvas tokens).
+Metric: global mIoU (intersection/union summed across all images, DINOv3-style).
+
+Output .pt file contains:
+    mious: dict[str, float] — per-timestep mIoU ("t0", "t1", ..., "mean")
+    viewpoints: list[dict] — per-timestep viewpoint metadata for first batch
+    metadata: dict — full config, timing, git commit, hardware info
+"""
 
 import logging
 import os
@@ -84,6 +96,16 @@ def load_probe(ckpt_path: Path, device: torch.device, embed_dim: int) -> ProbeHe
     return probe
 
 
+def _viewpoint_to_dict(vp: "torch.Tensor", t: int) -> dict:
+    """Serialize first batch element's viewpoint for logging."""
+    return {
+        "t": t,
+        "center_y": vp.centers[0, 0].item(),
+        "center_x": vp.centers[0, 1].item(),
+        "scale": vp.scales[0].item(),
+    }
+
+
 @torch.inference_mode()
 def evaluate(cfg: EvalConfig) -> Path:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -119,7 +141,6 @@ def evaluate(cfg: EvalConfig) -> Path:
         num_workers=cfg.num_workers, pin_memory=True,
     )
 
-    # Per-timestep IoU accumulators
     iou_per_t = [IoUAccumulator(NUM_CLASSES, IGNORE_LABEL, device) for _ in range(T)]
 
     amp_dtype = torch.bfloat16 if cfg.amp else torch.float32
@@ -128,7 +149,10 @@ def evaluate(cfg: EvalConfig) -> Path:
     log.info(f"Evaluating: policy={cfg.policy}, T={T}, scene={cfg.scene_size}, "
              f"canvas={canvas_grid}, glimpse={cfg.glimpse_px}")
 
-    for images, masks in tqdm(loader, desc="Evaluating", unit="batch"):
+    viewpoint_log: list[dict] = []
+    t_start = time.monotonic()
+
+    for batch_idx, (images, masks) in enumerate(tqdm(loader, desc="Evaluating", unit="batch")):
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
         B = images.shape[0]
@@ -146,6 +170,11 @@ def evaluate(cfg: EvalConfig) -> Path:
         with amp_ctx:
             for t in range(T):
                 vp = policy.step(t, state)
+
+                # Log viewpoints from first batch for reproducibility
+                if batch_idx == 0:
+                    viewpoint_log.append(_viewpoint_to_dict(vp, t))
+
                 glimpse = sample_at_viewpoint(
                     spatial=images, viewpoint=vp, glimpse_size_px=cfg.glimpse_px,
                 )
@@ -155,9 +184,10 @@ def evaluate(cfg: EvalConfig) -> Path:
                 features = model.get_spatial(state.canvas).view(B, canvas_grid, canvas_grid, -1)
                 eval_probe_on_batch(probe, features, masks, iou_per_t[t])
 
+    wall_time = time.monotonic() - t_start
+
     # Results
     mious = [iou_per_t[t].compute() for t in range(T)]
-    mean_miou = sum(mious) / len(mious)
 
     log.info("")
     log.info("=" * 70)
@@ -165,11 +195,18 @@ def evaluate(cfg: EvalConfig) -> Path:
     log.info("=" * 70)
     for t, m in enumerate(mious):
         log.info(f"  t{t}: {100*m:.2f}%")
-    log.info(f"  mean: {100*mean_miou:.2f}%")
+    log.info(f"  mean: {100*sum(mious)/len(mious):.2f}%")
+    log.info(f"  wall_time: {wall_time:.1f}s")
 
     results = {
-        "mious": {f"t{t}": m for t, m in enumerate(mious)} | {"mean": mean_miou},
-        "metadata": collect_metadata(cfg),
+        "mious": {f"t{t}": m for t, m in enumerate(mious)},
+        "viewpoints": viewpoint_log,
+        "metadata": {
+            **collect_metadata(cfg),
+            "wall_time_seconds": wall_time,
+            "n_images": len(dataset),
+            "feature_type": FEATURE_TYPE,
+        },
     }
 
     cfg.output.parent.mkdir(parents=True, exist_ok=True)

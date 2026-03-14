@@ -143,7 +143,29 @@ def test_tile_mean_uncertainty_per_image():
     assert best_0 != best_1, "Different images should pick different tiles"
 
 
-def test_entropy_c2f_needs_21_viewpoints():
+def test_f2c_reverses_level_order():
+    """F2C should start at the finest scale, C2F at the coarsest."""
+    pol_c2f = make_eval_policy("coarse_to_fine", 2, torch.device("cpu"), 21)
+    pol_f2c = make_eval_policy("fine_to_coarse", 2, torch.device("cpu"), 21)
+    # C2F t=0 is full scene (scale=1)
+    assert (pol_c2f.step(0, None).scales == 1.0).all()
+    # F2C t=0 is finest scale (scale=0.25 for 3-level quadtree)
+    assert (pol_f2c.step(0, None).scales == 0.25).all()
+
+
+def test_f2c_covers_all_levels():
+    """F2C at T=21 should cover levels 2, 1, 0 in that order."""
+    pol = make_eval_policy("fine_to_coarse", 1, torch.device("cpu"), 21)
+    scales = [pol.step(t, None).scales[0].item() for t in range(21)]
+    # First 16: scale=0.25 (level 2)
+    assert all(s == 0.25 for s in scales[:16])
+    # Next 4: scale=0.5 (level 1)
+    assert all(s == 0.5 for s in scales[16:20])
+    # Last 1: scale=1.0 (level 0)
+    assert scales[20] == 1.0
+
+
+def test_entropy_coarse_to_fine_needs_21_viewpoints():
     with pytest.raises(AssertionError, match="n_viewpoints=21"):
-        make_eval_policy("entropy_c2f", 2, torch.device("cpu"), 10,
+        make_eval_policy("entropy_coarse_to_fine", 2, torch.device("cpu"), 10,
                          probe=torch.nn.Identity(), get_spatial_fn=lambda x: x)

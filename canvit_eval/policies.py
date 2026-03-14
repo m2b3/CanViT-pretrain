@@ -11,7 +11,13 @@ This matches the convention in canvit.viewpoint.
 import logging
 from typing import Literal, Protocol
 
-PolicyName = Literal["coarse_to_fine", "c2f", "random", "iid", "full_then_random", "fullrand", "entropy_c2f"]
+PolicyName = Literal[
+    "coarse_to_fine",
+    "fine_to_coarse",
+    "random",
+    "full_then_random",
+    "entropy_coarse_to_fine",
+]
 
 import torch
 from canvit import RecurrentState, Viewpoint
@@ -48,6 +54,47 @@ class StaticPolicy:
 
     def step(self, t: int, state: RecurrentState | None) -> Viewpoint:
         return self._viewpoints[t]
+
+
+# ── Fine-to-coarse ─────────────────────────────────────────────────
+
+
+def fine_to_coarse_viewpoints(
+    batch_size: int,
+    device: torch.device,
+    n_viewpoints: int,
+) -> list[Viewpoint]:
+    """Generate fine-to-coarse quadtree viewpoints (reversed C2F).
+
+    Visits the finest scale first, then coarser scales.
+    Same quadtree structure as C2F but levels are traversed in reverse.
+    Within each level, order is shuffled per batch item.
+    """
+    # Build levels finest-first
+    levels: list[list[tuple[float, float, float]]] = []
+    level = 0
+    total = 0
+    while total < n_viewpoints:
+        lvl_vps = _level_viewpoints(level)
+        levels.append(lvl_vps)
+        total += len(lvl_vps)
+        level += 1
+    levels.reverse()  # finest first
+
+    result: list[Viewpoint] = []
+    for level_vps in levels:
+        level_t = torch.tensor(level_vps, device=device, dtype=torch.float32)
+        n = len(level_vps)
+        if n == 1:
+            perms = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+        else:
+            perms = torch.stack([torch.randperm(n, device=device) for _ in range(batch_size)])
+        for i in range(n):
+            if len(result) >= n_viewpoints:
+                return result
+            idx = perms[:, i]
+            result.append(Viewpoint(centers=level_t[idx, :2], scales=level_t[idx, 2]))
+    return result[:n_viewpoints]
 
 
 # ── Entropy-guided C2F ─────────────────────────────────────────────
@@ -160,7 +207,7 @@ class EntropyGuidedC2F:
 
     @property
     def name(self) -> str:
-        return "entropy_c2f"
+        return "entropy_coarse_to_fine"
 
     def _compute_entropy(self, state: RecurrentState) -> Tensor:
         """[B, G, G] categorical entropy from probe predictions."""
@@ -238,17 +285,22 @@ def make_eval_policy(
     """Create an evaluation policy by name.
 
     Supported: coarse_to_fine/c2f, random/iid,
-    full_then_random/fullrand, entropy_c2f.
+    full_then_random/fullrand, entropy_coarse_to_fine.
 
-    For entropy_c2f, pass probe= and get_spatial_fn=.
+    For entropy_coarse_to_fine, pass probe= and get_spatial_fn=.
     """
-    ALIASES = {"c2f": "coarse_to_fine", "fullrand": "full_then_random", "iid": "random"}
+    ALIASES = {
+        "c2f": "coarse_to_fine",
+        "f2c": "fine_to_coarse",
+        "fullrand": "full_then_random",
+        "iid": "random",
+    }
     resolved = ALIASES.get(policy_name, policy_name)
 
-    if resolved == "entropy_c2f":
-        assert probe is not None, "entropy_c2f requires probe="
-        assert get_spatial_fn is not None, "entropy_c2f requires get_spatial_fn="
-        assert n_viewpoints == 21, f"entropy_c2f requires n_viewpoints=21, got {n_viewpoints}"
+    if resolved == "entropy_coarse_to_fine":
+        assert probe is not None, "entropy_coarse_to_fine requires probe="
+        assert get_spatial_fn is not None, "entropy_coarse_to_fine requires get_spatial_fn="
+        assert n_viewpoints == 21, f"entropy_coarse_to_fine requires n_viewpoints=21, got {n_viewpoints}"
         return EntropyGuidedC2F(
             batch_size, device, canvas_grid,
             probe=probe, get_spatial_fn=get_spatial_fn,
@@ -256,6 +308,9 @@ def make_eval_policy(
 
     if resolved == "coarse_to_fine":
         return StaticPolicy(resolved, coarse_to_fine_viewpoints(batch_size, device, n_viewpoints))
+
+    if resolved == "fine_to_coarse":
+        return StaticPolicy(resolved, fine_to_coarse_viewpoints(batch_size, device, n_viewpoints))
 
     if resolved in ("random", "full_then_random"):
         return StaticPolicy(resolved, random_viewpoints(
