@@ -1,22 +1,15 @@
-"""Push migrated ablation checkpoints to private HuggingFace Hub repos.
+"""Push ablation checkpoints to private HuggingFace Hub repos.
 
-Loads each checkpoint, extracts all metadata, uploads model weights + rich
-model card with full provenance. Requires migrated checkpoints (standardizers
-in state_dict).
+Handles legacy standardizer migration in-memory — works on both raw
+(un-migrated) and migrated checkpoints. No separate migration step needed.
 
 Naming: {owner}/canvitb16-abl-{slug}-{YYYYMMDD}
-  Date from checkpoint timestamp. All ablations share the same date (same
-  training campaign). Slug from registry.
+  Date from checkpoint timestamp. Slug from registry.
 
 Usage:
-    # Dry run (print repo IDs + metadata without pushing):
     uv run python scripts/push_ablation_checkpoints.py \
         --ckpt-dir ~/projects/canvit-eval-workspace/ablation_checkpoints/ \
         --dry-run
-
-    # Push:
-    uv run python scripts/push_ablation_checkpoints.py \
-        --ckpt-dir ~/projects/canvit-eval-workspace/ablation_checkpoints/
 """
 
 import logging
@@ -26,6 +19,7 @@ from pathlib import Path
 
 import torch
 import tyro
+from torch import Tensor
 
 from canvit.model.pretraining.hub import upload_to_hf
 from canvit.model.pretraining.impl import CanViTForPretraining
@@ -34,7 +28,6 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 # ckpt_dir stem → short slug for HF repo name.
-# Source of truth: analysis/ablations/__init__.py in CanViT-Toward-AVFMs.
 _SLUG: dict[str, str] = {
     "abl-baseline-200k": "baseline",
     "abl-qkvo-dcan256-200k": "qkvo-dcan256",
@@ -50,13 +43,43 @@ _SLUG: dict[str, str] = {
     "abl-vit-s-200k": "vit-s",
 }
 
+# Keys that are large/non-serializable — excluded from HF metadata.
+_SKIP_METADATA = {"state_dict", "optimizer_state", "scheduler_state"}
 
-def _extract_metadata(ckpt: dict, slug: str) -> dict:
-    """Extract all checkpoint metadata (everything except weights/optimizer)."""
-    skip = {"state_dict", "optimizer_state", "scheduler_state"}
-    meta = {k: v for k, v in ckpt.items() if k not in skip}
-    meta["ablation_slug"] = slug
-    return meta
+
+def _migrate_standardizers_in_place(raw: dict) -> None:
+    """Migrate legacy standardizer keys into state_dict if needed. Mutates raw."""
+    scene_legacy = raw.get("scene_norm_state")
+    cls_legacy = raw.get("cls_norm_state")
+    if scene_legacy is None:
+        return  # Already migrated or current format
+
+    assert cls_legacy is not None, "scene_norm_state present but cls_norm_state missing"
+    assert scene_legacy["_initialized"].item(), "Legacy scene stats not initialized"
+    assert cls_legacy["_initialized"].item(), "Legacy cls stats not initialized"
+
+    grids = raw["canvas_patch_grid_sizes"]
+    assert len(grids) == 1, f"Expected 1 grid size, got {grids}"
+    G = str(grids[0])
+    sd = raw["state_dict"]
+
+    for prefix, legacy in [("scene_standardizers", scene_legacy), ("cls_standardizers", cls_legacy)]:
+        for stat_name in ["mean", "var", "_initialized"]:
+            sd[f"{prefix}.{G}.{stat_name}"] = legacy[stat_name]
+
+    del raw["scene_norm_state"]
+    del raw["cls_norm_state"]
+    log.info("    migrated standardizers in-memory (grid=%s)", G)
+
+
+def _verify_standardizers(model: CanViTForPretraining) -> None:
+    """Assert all standardizers are initialized."""
+    for G in model.canvas_patch_grid_sizes:
+        _, scene_std = model.standardizers(G)
+        assert scene_std.initialized, (
+            f"Standardizer not initialized for grid {G} after loading. "
+            "Checkpoint may be corrupt."
+        )
 
 
 @dataclass
@@ -68,7 +91,6 @@ class Args:
 
 def main(args: Args) -> None:
     assert args.ckpt_dir.is_dir(), f"Not a directory: {args.ckpt_dir}"
-
     files = sorted(args.ckpt_dir.glob("*.pt"))
     assert len(files) > 0, f"No .pt files in {args.ckpt_dir}"
 
@@ -79,15 +101,15 @@ def main(args: Args) -> None:
         stem = f.stem
         slug = _SLUG.get(stem)
         assert slug is not None, (
-            f"Unknown checkpoint stem '{stem}' — not in _SLUG. "
-            f"Known: {sorted(_SLUG)}"
+            f"Unknown checkpoint '{stem}' — not in _SLUG. Known: {sorted(_SLUG)}"
         )
 
-        ckpt = torch.load(f, map_location="cpu", weights_only=False)
-        step = ckpt["step"]
-        ts = datetime.fromisoformat(ckpt["timestamp"])
-        date_str = ts.strftime("%Y%m%d")
+        raw = torch.load(f, map_location="cpu", weights_only=False)
+        _migrate_standardizers_in_place(raw)
 
+        step = raw["step"]
+        ts = datetime.fromisoformat(raw["timestamp"])
+        date_str = ts.strftime("%Y%m%d")
         repo_id = f"{args.owner}/canvitb16-abl-{slug}-{date_str}"
 
         log.info("  %s → %s (step=%d, %s)", stem, repo_id, step, ts.date())
@@ -95,10 +117,25 @@ def main(args: Args) -> None:
         if args.dry_run:
             continue
 
-        model = CanViTForPretraining.from_checkpoint(f)
-        meta = _extract_metadata(ckpt, slug)
+        # Reconstruct model from (possibly migrated) raw checkpoint
+        from canvit.backbone import create_backbone
+        from canvit.model.pretraining.impl import CanViTForPretrainingConfig
+        import dacite
+
+        cfg = dacite.from_dict(CanViTForPretrainingConfig, raw["model_config"])
+        model = CanViTForPretraining(
+            backbone=create_backbone(raw["backbone_name"]),
+            cfg=cfg,
+            backbone_name=raw["backbone_name"],
+            canvas_patch_grid_sizes=raw["canvas_patch_grid_sizes"],
+        )
+        model.load_state_dict(raw["state_dict"])
+        _verify_standardizers(model)
+
+        meta = {k: v for k, v in raw.items() if k not in _SKIP_METADATA}
         upload_to_hf(model, repo_id, private=True, extra_metadata=meta)
-        del model
+
+        del model, raw
         torch.cuda.empty_cache()
 
     log.info("Done.")
