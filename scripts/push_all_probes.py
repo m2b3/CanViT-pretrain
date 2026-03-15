@@ -49,29 +49,44 @@ def _find_best_pt(d: Path) -> Path:
     return max(candidates, key=_extract_miou)
 
 
-# Old → current HF repo name mapping for model slugs.
-# The model is the SAME, just renamed on HF.
-_MODEL_SLUG_REMAP: dict[str, str] = {
-    "canvit-vitb16-pretrain-512px-in21k": "canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02",
+# Short model identifiers for probe naming.
+# Full model repo stored in config.json metadata.
+_MODEL_SHORT: dict[str, str] = {
+    # DINOv3 teachers
+    "facebook/dinov3-vitb16-pretrain-lvd1689m": "dv3b",
+    "facebook/dinov3-vits16-pretrain-lvd1689m": "dv3s",
+    # CanViT checkpoints (old and current repo names → same short id)
+    "canvit/canvit-vitb16-pretrain-512px-in21k": "in21k",
+    "canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02": "in21k",
+    "canvit/canvitb16-add-vpe-pretrain-g128px-s1024px-sa1b-dv3b16-2026-02-26-from-in21k-2026-02-02": "sa1b",
 }
 
 
 def _make_repo_id(owner: str, config: dict, is_dinov3: bool) -> str:
-    """Derive HF repo ID from checkpoint metadata. No hardcoded names."""
+    """Derive HF repo ID from checkpoint metadata.
+
+    Format:
+      DINOv3: probe-ade20k-{steps}k-{model_short}-{resolution}px
+      Canvas: probe-ade20k-{steps}k-s{scene}-c{grid}-{model_short}
+    """
     steps_k = config["max_steps"] // 1000
 
     if is_dinov3:
-        model_raw = config["model"]
-        slug = model_raw.split("/")[-1].replace("-pretrain-lvd1689m", "")
+        model_repo = config["model"]
+        short = _MODEL_SHORT[model_repo]
         resolution = config["resolution"]
-        return f"{owner}/probe-ade20k-{steps_k}k-{slug}-{resolution}px"
+        return f"{owner}/probe-ade20k-{steps_k}k-{short}-{resolution}px"
     else:
-        raw_slug = config["model_repo"].split("/")[-1]
-        model_slug = _MODEL_SLUG_REMAP.get(raw_slug, raw_slug)
+        model_repo = config["model_repo"]
+        short = _MODEL_SHORT.get(model_repo)
+        assert short is not None, (
+            f"Unknown model_repo '{model_repo}' — add to _MODEL_SHORT. "
+            f"Known: {sorted(_MODEL_SHORT)}"
+        )
         scene = config.get("image_size", config.get("scene_size"))
-        assert scene is not None, f"No scene size in config: {sorted(config.keys())}"
+        assert scene is not None
         grid = scene // 16
-        return f"{owner}/probe-ade20k-{steps_k}k-s{scene}-c{grid}-{model_slug}"
+        return f"{owner}/probe-ade20k-{steps_k}k-s{scene}-c{grid}-{short}"
 
 
 def main(args: Args) -> None:
