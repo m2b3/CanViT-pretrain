@@ -24,16 +24,14 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, ResizeMode, make_val_transform
-from canvit_eval.ade20k.probe import ProbeHead, eval_probe_on_batch
-from canvit_eval.ade20k.train_probe.config import CANVAS_FEATURES, _default_ade20k_root
+from canvit_eval.ade20k.probe import eval_probe_on_batch
+from canvit_eval.ade20k.train_probe.config import _default_ade20k_root
+from canvit_utils.probes import SegmentationProbe
 from canvit_eval.metrics import IoUAccumulator
 from canvit_eval.policies import PolicyName, make_eval_policy
 from canvit_eval.utils import collect_metadata
 
 log = logging.getLogger(__name__)
-
-FEATURE_TYPE = "canvas_hidden"
-
 
 def _default_output() -> Path:
     job_id = os.environ.get("SLURM_ARRAY_JOB_ID", os.environ.get("SLURM_JOB_ID", "local"))
@@ -46,7 +44,7 @@ def _default_output() -> Path:
 class EvalConfig:
     """ADE20K canvas probe evaluation configuration."""
 
-    probe_ckpt: Path
+    probe_repo: str
     ade20k_root: Path = field(default_factory=_default_ade20k_root)
     output: Path = field(default_factory=_default_output)
 
@@ -66,33 +64,6 @@ class EvalConfig:
     device: str = "cuda"
     amp: bool = True
 
-
-def load_probe(ckpt_path: Path, device: torch.device, embed_dim: int) -> ProbeHead:
-    """Load a canvas_hidden probe from checkpoint."""
-    log.info(f"Loading probe from {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-
-    feat_spec = CANVAS_FEATURES[FEATURE_TYPE]
-    dropout = ckpt.get("config", {}).get("dropout", 0.0)
-
-    if "feat_type" in ckpt:
-        assert ckpt["feat_type"] == FEATURE_TYPE, (
-            f"Probe is for {ckpt['feat_type']!r}, expected {FEATURE_TYPE!r}"
-        )
-        state_dict = ckpt["probe_state_dict"]
-    else:
-        assert FEATURE_TYPE in ckpt["probe_state_dicts"], (
-            f"Legacy checkpoint missing {FEATURE_TYPE!r}"
-        )
-        state_dict = ckpt["probe_state_dicts"][FEATURE_TYPE]
-
-    probe = ProbeHead(embed_dim, dropout=dropout, use_ln=feat_spec.needs_ln).to(device)
-    probe.load_state_dict(state_dict)
-    probe.eval()
-
-    best_per_t = ckpt.get("best_mious_per_t")
-    log.info(f"  {FEATURE_TYPE}: loaded (best per-t mIoU: {best_per_t})")
-    return probe
 
 
 def _viewpoint_to_dict(vp: "Viewpoint", t: int) -> dict:
@@ -127,8 +98,12 @@ def evaluate(cfg: EvalConfig) -> Path:
     canvas_grid = cfg.canvas_grid if cfg.canvas_grid is not None else cfg.scene_size // patch_size
     cfg.canvas_grid = canvas_grid
 
-    # Load probe
-    probe = load_probe(cfg.probe_ckpt, device, model.canvas_dim)
+    # Load probe from HuggingFace Hub
+    log.info(f"Loading probe: {cfg.probe_repo}")
+    probe = SegmentationProbe.from_pretrained(cfg.probe_repo).to(device).eval()
+    assert probe.embed_dim == model.canvas_dim, (
+        f"Probe embed_dim={probe.embed_dim} != model canvas_dim={model.canvas_dim}"
+    )
 
     # Dataset
     dataset = ADE20kDataset(

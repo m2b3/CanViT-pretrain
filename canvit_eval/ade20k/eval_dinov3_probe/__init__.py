@@ -16,7 +16,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from canvit_eval.ade20k.dataset import IGNORE_LABEL, NUM_CLASSES, ADE20kDataset, ResizeMode, make_val_transform
-from canvit_eval.ade20k.probe import ProbeHead, eval_probe_on_batch
+from canvit_eval.ade20k.probe import eval_probe_on_batch
+from canvit_utils.probes import SegmentationProbe
 from canvit_eval.ade20k.train_probe.config import _default_ade20k_root
 from canvit_eval.metrics import IoUAccumulator
 from canvit_eval.utils import collect_metadata
@@ -34,7 +35,7 @@ def _default_output() -> Path:
 class DINOv3ProbeEvalConfig:
     """DINOv3 baseline probe evaluation configuration."""
 
-    probe_ckpt: Path
+    probe_repo: str
     ade20k_root: Path = field(default_factory=_default_ade20k_root)
     output: Path = field(default_factory=_default_output)
     resize_mode: ResizeMode = "squish"
@@ -57,26 +58,32 @@ def evaluate(cfg: DINOv3ProbeEvalConfig) -> Path:
     for k, v in asdict(cfg).items():
         log.info(f"  {k}: {v}")
 
-    # Load checkpoint
-    log.info(f"Loading checkpoint: {cfg.probe_ckpt}")
-    ckpt = torch.load(cfg.probe_ckpt, map_location=device, weights_only=False)
-    resolution = ckpt["resolution"]
-    model_name = ckpt["model"]
-    log.info(f"  resolution={resolution}, model={model_name}")
+    # Load probe from HuggingFace Hub
+    log.info(f"Loading probe: {cfg.probe_repo}")
+    probe = SegmentationProbe.from_pretrained(cfg.probe_repo).to(device).eval()
+
+    # Extract teacher model + resolution from probe's HF config metadata
+    import json
+    from huggingface_hub import hf_hub_download
+    config_path = hf_hub_download(cfg.probe_repo, "config.json")
+    probe_config = json.loads(Path(config_path).read_text())
+    probe_meta = probe_config.get("metadata", {})
+    probe_train_config = probe_meta.get("config", {})
+    model_name = probe_train_config.get("model", probe_meta.get("model"))
+    resolution = probe_train_config.get("resolution", probe_meta.get("resolution"))
+    assert model_name is not None, f"No teacher model in probe config metadata for {cfg.probe_repo}"
+    assert resolution is not None, f"No resolution in probe config metadata for {cfg.probe_repo}"
+    log.info(f"  teacher={model_name}, resolution={resolution}px, embed_dim={probe.embed_dim}")
 
     # Load teacher
     teacher = load_teacher(model_name, device)
     patch_size = teacher.model.config.patch_size
     grid = resolution // patch_size
     assert grid > 0, f"resolution={resolution} too small for patch_size={patch_size}"
-    log.info(f"  embed_dim={teacher.embed_dim}, patch_size={patch_size}, grid={grid}x{grid}")
-
-    # Load probe
-    dropout = ckpt.get("config", {}).get("dropout", 0.0)
-    probe = ProbeHead(teacher.embed_dim, dropout=dropout, use_ln=False).to(device)
-    probe.load_state_dict(ckpt["probe_state_dict"])
-    probe.eval()
-    log.info(f"  probe loaded (best mIoU={ckpt.get('best_miou', 'N/A')})")
+    assert teacher.embed_dim == probe.embed_dim, (
+        f"Teacher embed_dim={teacher.embed_dim} != probe embed_dim={probe.embed_dim}"
+    )
+    log.info(f"  patch_size={patch_size}, grid={grid}x{grid}")
 
     # Dataset
     dataset = ADE20kDataset(
