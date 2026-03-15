@@ -49,23 +49,28 @@ def _find_best_pt(d: Path) -> Path:
     return max(candidates, key=_extract_miou)
 
 
+# Old → current HF repo name mapping for model slugs.
+# The model is the SAME, just renamed on HF.
+_MODEL_SLUG_REMAP: dict[str, str] = {
+    "canvit-vitb16-pretrain-512px-in21k": "canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02",
+}
+
+
 def _make_repo_id(owner: str, config: dict, is_dinov3: bool) -> str:
     """Derive HF repo ID from checkpoint metadata. No hardcoded names."""
     steps_k = config["max_steps"] // 1000
 
     if is_dinov3:
-        # DINOv3: model is e.g. "facebook/dinov3-vitb16-pretrain-lvd1689m"
         model_raw = config["model"]
-        # Extract short name: dinov3-vitb16
         slug = model_raw.split("/")[-1].replace("-pretrain-lvd1689m", "")
         resolution = config["resolution"]
         return f"{owner}/probe-ade20k-{steps_k}k-{slug}-{resolution}px"
     else:
-        # Canvas: model_repo is e.g. "canvit/canvitb16-add-vpe-pretrain-..."
-        model_slug = config["model_repo"].split("/")[-1]
+        raw_slug = config["model_repo"].split("/")[-1]
+        model_slug = _MODEL_SLUG_REMAP.get(raw_slug, raw_slug)
         scene = config.get("image_size", config.get("scene_size"))
         assert scene is not None, f"No scene size in config: {sorted(config.keys())}"
-        grid = scene // 16  # patch_size
+        grid = scene // 16
         return f"{owner}/probe-ade20k-{steps_k}k-s{scene}-c{grid}-{model_slug}"
 
 
