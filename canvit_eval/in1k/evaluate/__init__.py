@@ -26,7 +26,8 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from tqdm import tqdm
 
-from canvit_eval.utils import PolicyName, collect_metadata, make_viewpoints
+from canvit_eval.policies import PolicyName, make_eval_policy
+from canvit_eval.utils import collect_metadata
 
 log = logging.getLogger(__name__)
 TOP_K = 5
@@ -48,10 +49,10 @@ def _default_output() -> Path:
 class Config:
     val_dir: Path = field(default_factory=_default_val_dir)
     output: Path = field(default_factory=_default_output)
-    model_repo: str = "canvit/canvit-vitb16-pretrain-512px-in21k"
+    model_repo: str = "canvit/canvitb16-pretrain-g128px-s512px-in21k-dv3b16"
     probe_repo: str = "yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe"
     policy: PolicyName = "coarse_to_fine"
-    n_viewpoints: int = 16
+    n_viewpoints: int = 21
     canvas_grid: int = 32
     glimpse_px: int = 128
     batch_size: int = 64
@@ -280,15 +281,17 @@ def evaluate(cfg: Config) -> Path:
         out.labels[start:end] = batch_labels.to(torch.int16)
 
         # Run trajectory
-        vps = make_viewpoints(
+        policy = make_eval_policy(
             cfg.policy, B, device, T,
+            canvas_grid=cfg.canvas_grid,
             min_scale=cfg.random_min_scale,
             max_scale=cfg.random_max_scale,
             start_with_full_scene=cfg.random_start_full,
         )
         state = model.init_state(batch_size=B, canvas_grid_size=cfg.canvas_grid)
 
-        for t, vp in enumerate(vps):
+        for t in range(T):
+            vp = policy.step(t, state)
             step, state = run_timestep(model, probe, cls_std, state, images, vp, cfg.glimpse_px)
             store_timestep(out, step, vp, start, end, t)
             update_accuracy(correct_top1, correct_top5, step.top_k_classes, labels_gpu, t)

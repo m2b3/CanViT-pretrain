@@ -4,14 +4,18 @@ import os
 import subprocess
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 import torch
 from canvit import Viewpoint
 from canvit_utils.policies import coarse_to_fine_viewpoints, random_viewpoints
 
-PolicyName = Literal["coarse_to_fine", "random", "full_then_random"]
-POLICY_ALIASES: dict[str, PolicyName] = {"c2f": "coarse_to_fine", "fullrand": "full_then_random", "iid": "random"}
+from typing import Literal
+
+# Narrower type for make_viewpoints — only supports static pre-generated policies.
+# For evaluation policies (including fine_to_coarse, entropy_coarse_to_fine),
+# use canvit_eval.policies.PolicyName + make_eval_policy instead.
+ViewpointPolicyName = Literal["coarse_to_fine", "random", "full_then_random"]
 
 
 def get_git_commit() -> str | None:
@@ -41,7 +45,7 @@ def collect_metadata(cfg: Any) -> dict:
 
 
 def make_viewpoints(
-    policy: PolicyName,
+    policy: ViewpointPolicyName,
     batch_size: int,
     device: torch.device,
     n_viewpoints: int,
