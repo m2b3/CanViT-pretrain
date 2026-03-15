@@ -5,7 +5,7 @@ and DINOv3 teacher features. No probes, no labels — just forward passes.
 
 Usage:
     uv run python -m canvit_eval.reconstruction \
-        --ckpt path/to/checkpoint.pt \
+        --model-repo canvit/canvitb16-abl-baseline-2026-03-02 \
         --image-dir /datasets/ADE20k/ADEChallengeData2016/images/validation \
         --output results/abl_baseline.pt
 """
@@ -26,8 +26,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from canvit_pretrain import CanViTForPretraining
-from canvit_pretrain.checkpoint import load_model
+from canvit import CanViTForPretrainingHFHub
 
 from canvit_eval.utils import collect_metadata, make_viewpoints
 
@@ -60,7 +59,7 @@ class FlatImageDataset(Dataset):
 
 @dataclass
 class ReconstructionEvalConfig:
-    ckpt: Path
+    model_repo: str
     image_dir: Path
     output: Path
 
@@ -120,17 +119,16 @@ def _cache_teacher_features(
 def evaluate(cfg: ReconstructionEvalConfig) -> dict:
     device = torch.device(cfg.device)
 
-    # Load model from training checkpoint
-    log.info("Loading model from %s", cfg.ckpt)
-    model, ckpt_data = load_model(cfg.ckpt, device=device)
-    model.eval()
+    # Load model from HuggingFace Hub
+    log.info("Loading model from %s", cfg.model_repo)
+    model = CanViTForPretrainingHFHub.from_pretrained(cfg.model_repo).to(device).eval()
 
     canvas_grid = cfg.canvas_grid
     has_cls = model.scene_cls_head is not None
     cls_std, scene_std = model.standardizers(canvas_grid)
     assert scene_std.initialized, (
         f"Standardizer not initialized for grid {canvas_grid}. "
-        "Run scripts/migrate_ablation_checkpoints.py first."
+        "Checkpoint may not have standardizer stats for this grid size."
     )
 
     # Dataset — just images, no labels needed
@@ -235,9 +233,8 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
         "n_images": img_idx,
         "elapsed_s": round(elapsed, 1),
         "metadata": {
-            "ckpt_path": str(cfg.ckpt),
-            "ckpt_step": ckpt_data.get("step"),
-            "ckpt_backbone": ckpt_data["backbone_name"],
+            "model_repo": cfg.model_repo,
+            "backbone_name": model.backbone_name,
             "scene_size": cfg.scene_size,
             "canvas_grid": cfg.canvas_grid,
             "glimpse_px": cfg.glimpse_px,
