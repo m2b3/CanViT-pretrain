@@ -216,14 +216,14 @@ def evaluate(cfg: ReconstructionEvalConfig) -> dict:
     log.info("Evaluation done: %d images in %.1fs (%.1f img/s)",
              img_idx, elapsed, img_idx / elapsed)
 
-    # Build results
+    # Build results — store full precision, let consumers round
     per_timestep = [
         {
             "t": t,
-            "scene_cos_raw": round(m.scene_raw_sum / m.n_images, 6),
-            "cls_cos_raw": round(m.cls_raw_sum / m.n_images, 6),
-            "scene_cos_norm": round(m.scene_norm_sum / m.n_images, 6),
-            "cls_cos_norm": round(m.cls_norm_sum / m.n_images, 6),
+            "scene_cos_raw": m.scene_raw_sum / m.n_images,
+            "cls_cos_raw": m.cls_raw_sum / m.n_images,
+            "scene_cos_norm": m.scene_norm_sum / m.n_images,
+            "cls_cos_norm": m.cls_norm_sum / m.n_images,
         }
         for t, m in enumerate(metrics)
     ]
