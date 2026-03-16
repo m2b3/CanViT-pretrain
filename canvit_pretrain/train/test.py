@@ -1,6 +1,7 @@
 """Tests for canvit_pretrain.train module."""
 
 import torch
+from canvit_utils.transforms import preprocess
 from PIL import Image
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
@@ -11,8 +12,6 @@ from canvit_pretrain.train.data import (
     InfiniteLoader,
 )
 from canvit_pretrain.train.scheduler import warmup_constant_scheduler
-from canvit_utils.transforms import preprocess
-
 from canvit_pretrain.train.transforms import imagenet_normalize, train_transform
 from canvit_pretrain.train.viewpoint import (
     PixelBox,

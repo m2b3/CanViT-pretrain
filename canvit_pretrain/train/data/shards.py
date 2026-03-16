@@ -19,11 +19,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import torch
+from canvit_utils.transforms import preprocess
 from PIL import Image
 from torch import Tensor
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
-
-from canvit_utils.transforms import preprocess
 
 from .tar_images import TarImageReader, TarIndex, load_tar_index, scan_tar_headers
 

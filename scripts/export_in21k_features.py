@@ -57,12 +57,11 @@ import torch
 import tyro
 import xxhash
 from canvit_utils.teacher import load_teacher
+from canvit_utils.transforms import preprocess
 from PIL import Image, ImageFile
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-
-from canvit_utils.transforms import preprocess
 
 # -----------------------------------------------------------------------------
 # Constants

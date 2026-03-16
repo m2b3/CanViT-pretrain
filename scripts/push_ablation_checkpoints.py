@@ -19,7 +19,6 @@ from pathlib import Path
 
 import torch
 import tyro
-
 from canvit.model.pretraining.hub import upload_to_hf
 from canvit.model.pretraining.impl import CanViTForPretraining
 
@@ -117,9 +116,9 @@ def main(args: Args) -> None:
             continue
 
         # Reconstruct model from (possibly migrated) raw checkpoint
+        import dacite
         from canvit.backbone import create_backbone
         from canvit.model.pretraining.impl import CanViTForPretrainingConfig
-        import dacite
 
         cfg = dacite.from_dict(CanViTForPretrainingConfig, raw["model_config"])
         model = CanViTForPretraining(

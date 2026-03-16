@@ -43,7 +43,13 @@ from canvit.backbone.vit import NormFeatures  # noqa: E402
 from ytch.model import count_parameters  # noqa: E402
 
 from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
-from canvit_pretrain.checkpoint import CheckpointData, current_provenance, find_latest, load_state_dict_flexible, update_symlink  # noqa: E402
+from canvit_pretrain.checkpoint import (  # noqa: E402
+    CheckpointData,
+    current_provenance,
+    find_latest,
+    load_state_dict_flexible,
+    update_symlink,
+)
 from canvit_pretrain.checkpoint import load as load_checkpoint  # noqa: E402
 from canvit_pretrain.checkpoint import save as save_checkpoint  # noqa: E402
 

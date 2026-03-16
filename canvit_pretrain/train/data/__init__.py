@@ -10,11 +10,11 @@ from torch import Tensor
 
 if TYPE_CHECKING:
     from ..config import Config
+from canvit_utils.transforms import preprocess
 from torch.utils.data import DataLoader, Dataset
 
 from drac_imagenet import IndexedImageFolder
 
-from canvit_utils.transforms import preprocess
 from .shards import ShardedFeatureLoader
 
 log = logging.getLogger(__name__)

@@ -14,6 +14,7 @@ Target platforms: CUDA (primary), CPU, MPS (nice-to-have, may behave oddly).
 """
 
 import torch._functorch.config
+
 torch._functorch.config.backward_pass_autocast = "off"  # type: ignore[attr-defined]
 
 import logging
