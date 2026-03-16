@@ -18,6 +18,7 @@ PolicyName = Literal[
     "random",
     "full_then_random",
     "entropy_coarse_to_fine",
+    "constant_full_scene",
 ]
 
 import torch
@@ -333,5 +334,9 @@ def make_eval_policy(
             min_scale=min_scale, max_scale=max_scale,
             start_with_full_scene=False,
         ))
+
+    if resolved == "constant_full_scene":
+        vps = [Viewpoint.full_scene(batch_size=batch_size, device=device)] * n_viewpoints
+        return StaticPolicy(resolved, vps)
 
     raise ValueError(f"Unknown policy: {policy_name!r}")
