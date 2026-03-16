@@ -41,7 +41,7 @@ done
 CANVIT_IN21K="canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02"
 # SA1B deprioritized for v0 — not included in eval.
 
-for spec in "s512-c32-in21k:512:32:$CANVIT_IN21K" "s1024-c64-in21k:1024:64:$CANVIT_IN21K"; do
+for spec in "s512-c8-in21k:512:8:$CANVIT_IN21K" "s512-c16-in21k:512:16:$CANVIT_IN21K" "s512-c32-in21k:512:32:$CANVIT_IN21K" "s1024-c64-in21k:1024:64:$CANVIT_IN21K"; do
   IFS=: read -r slug scene grid model_repo <<< "$spec"
   out="$OUT_DIR/canvit_${slug}.pt"
   if [ -f "$out" ]; then echo "SKIP $out"; continue; fi
