@@ -38,6 +38,7 @@ def make_val_transform(
     Handles reduce_zero_label: 0→255 (ignore), 1-150→0-149 (classes).
     """
     if mode == "center_crop":
+        # SAB: Center crop img transform should use canvit_utils.preprocess() for consistency
         img_transform = T.Compose([
             T.Resize(size),
             T.CenterCrop(size),
