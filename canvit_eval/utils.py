@@ -8,7 +8,7 @@ from typing import Any
 
 import torch
 from canvit import Viewpoint
-from canvit_utils.policies import coarse_to_fine_viewpoints, random_viewpoints
+from canvit.policies import coarse_to_fine_viewpoints, random_viewpoints
 
 from typing import Literal
 
