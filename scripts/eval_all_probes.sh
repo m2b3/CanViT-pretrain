@@ -39,9 +39,9 @@ done
 # NOTE: model_repo is the TRAINING checkpoint, not the eval resolution.
 # The IN21K model is always s512px (trained at 512); it's EVALUATED at different scene sizes.
 CANVIT_IN21K="canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02"
-CANVIT_SA1B="canvit/canvitb16-add-vpe-pretrain-g128px-s1024px-sa1b-dv3b16-2026-02-26-from-in21k-2026-02-02"
+# SA1B deprioritized for v0 — not included in eval.
 
-for spec in "s512-c32-in21k:512:32:$CANVIT_IN21K" "s1024-c64-in21k:1024:64:$CANVIT_IN21K" "s1024-c64-sa1b:1024:64:$CANVIT_SA1B"; do
+for spec in "s512-c32-in21k:512:32:$CANVIT_IN21K" "s1024-c64-in21k:1024:64:$CANVIT_IN21K"; do
   IFS=: read -r slug scene grid model_repo <<< "$spec"
   out="$OUT_DIR/canvit_${slug}.pt"
   if [ -f "$out" ]; then echo "SKIP $out"; continue; fi
