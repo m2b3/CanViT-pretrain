@@ -49,7 +49,7 @@ def _default_output() -> Path:
 class Config:
     val_dir: Path = field(default_factory=_default_val_dir)
     output: Path = field(default_factory=_default_output)
-    model_repo: str = "canvit/canvitb16-pretrain-g128px-s512px-in21k-dv3b16"
+    model_repo: str = "canvit/canvitb16-add-vpe-pretrain-g128px-s512px-in21k-dv3b16-2026-02-02"
     probe_repo: str = "yberreby/dinov3-vitb16-lvd1689m-in1k-512x512-linear-clf-probe"
     policy: PolicyName = "coarse_to_fine"
     n_viewpoints: int = 21
