@@ -1,4 +1,4 @@
-"""Entry point for scene matching training."""
+"""Entry point for CanViT pretraining."""
 
 import logging
 from dataclasses import replace
@@ -19,7 +19,7 @@ def main() -> None:
     cfg = tyro.cli(Config)
 
     log.info("=" * 60)
-    log.info("Scene Matching Training")
+    log.info("CanViT Pretraining")
     log.info("=" * 60)
     log.info(f"Config: {cfg}")
     log.info(f"Device: {cfg.device}")

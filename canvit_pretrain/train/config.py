@@ -1,4 +1,4 @@
-"""Configuration for scene matching training."""
+"""Configuration for CanViT pretraining."""
 
 from dataclasses import dataclass, field
 from pathlib import Path

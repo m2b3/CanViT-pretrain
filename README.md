@@ -22,7 +22,7 @@ uv run pypatree
 
 | Repo | Role |
 |------|------|
-| [CanViT-PyTorch](https://github.com/m2b3/CanViT-PyTorch) | Core model + policies |
+| [CanViT-PyTorch-Next](https://github.com/yberreby/CanViT-PyTorch-Next) | Core model + policies |
 | [CanViT-probes](https://github.com/m2b3/CanViT-probes) | Probes, datasets, metrics, probe training |
 | [CanViT-eval](https://github.com/m2b3/CanViT-eval) | Evaluation (produces .pt result files) |
 | [CanViT-Toward-AVFMs](https://github.com/m2b3/CanViT-Toward-AVFMs) | Paper (.pt → JSON → PDF) |
