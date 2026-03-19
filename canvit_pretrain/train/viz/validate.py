@@ -154,13 +154,13 @@ def validate(
     log_pca: bool = False,
     teacher: DINOv3Teacher | None = None,
     log_spatial_stats: bool = False,
-    backbone: str | None = None,
+    teacher_name: str | None = None,
 ) -> float:
     """Run validation with streaming metrics (no O(B×T) memory)."""
     assert not log_pca or teacher is not None
 
-    if probe is not None and backbone is not None:
-        probe_res = get_probe_resolution(backbone)
+    if probe is not None and teacher_name is not None:
+        probe_res = get_probe_resolution(teacher_name)
         if scene_size_px != probe_res:
             log.warning(
                 f"Resolution mismatch: model predicts teacher@{scene_size_px}, "
@@ -187,8 +187,8 @@ def validate(
             gt_name = get_imagenet_class_names()[gt_idx] if has_probe else ""
 
             if has_probe and teacher is not None:
-                assert backbone is not None and probe is not None
-                probe_res = get_probe_resolution(backbone)
+                assert teacher_name is not None and probe is not None
+                probe_res = get_probe_resolution(teacher_name)
                 images_at_probe_res = F.interpolate(
                     images, size=(probe_res, probe_res), mode="bilinear", align_corners=False
                 )

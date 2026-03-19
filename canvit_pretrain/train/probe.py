@@ -26,9 +26,9 @@ PROBE_REGISTRY: dict[str, ProbeInfo] = {
 }
 
 # Verify registry consistency at import time
-for backbone, info in PROBE_REGISTRY.items():
+for teacher_name, info in PROBE_REGISTRY.items():
     expected_res_str = f"{info.resolution}x{info.resolution}"
-    assert expected_res_str in info.repo, f"Probe {backbone}: resolution {info.resolution} not in repo name {info.repo}"
+    assert expected_res_str in info.repo, f"Probe {teacher_name}: resolution {info.resolution} not in repo name {info.repo}"
 
 
 class TopKPrediction(NamedTuple):
@@ -44,17 +44,17 @@ def get_imagenet_class_names() -> list[str]:
     return list(ResNet50_Weights.IMAGENET1K_V1.meta["categories"])
 
 
-def load_probe(backbone: str, device: torch.device) -> DINOv3LinearClassificationHead | None:
-    """Load IN1k classification probe from HF Hub. Returns None if backbone unsupported."""
-    if backbone not in PROBE_REGISTRY:
+def load_probe(teacher_name: str, device: torch.device) -> DINOv3LinearClassificationHead | None:
+    """Load IN1k classification probe from HF Hub. Returns None if teacher_name unsupported."""
+    if teacher_name not in PROBE_REGISTRY:
         return None
-    probe = DINOv3LinearClassificationHead.from_pretrained(PROBE_REGISTRY[backbone].repo)
+    probe = DINOv3LinearClassificationHead.from_pretrained(PROBE_REGISTRY[teacher_name].repo)
     return probe.to(device).eval()
 
 
-def get_probe_resolution(backbone: str) -> int:
-    """Get the image resolution the probe was trained at. Raises KeyError if backbone unsupported."""
-    return PROBE_REGISTRY[backbone].resolution
+def get_probe_resolution(teacher_name: str) -> int:
+    """Get the image resolution the probe was trained at. Raises KeyError if teacher_name unsupported."""
+    return PROBE_REGISTRY[teacher_name].resolution
 
 
 def labels_are_in1k(labels: Tensor) -> bool:

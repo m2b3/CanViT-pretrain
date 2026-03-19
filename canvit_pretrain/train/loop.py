@@ -463,7 +463,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                         log_pca=do_pca,
                         teacher=teacher,
                         log_spatial_stats=cfg.log_spatial_stats,
-                        backbone=cfg.teacher_name,
+                        teacher_name=cfg.teacher_name,
                     )
             except Exception:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
