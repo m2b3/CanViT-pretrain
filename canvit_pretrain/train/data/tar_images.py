@@ -88,6 +88,7 @@ class TarImageReader:
         self.index = index
 
     def read_image(self, name: str) -> Image.Image:
+        assert self._mm is not None
         data_offset, size = self.index[name]
         return Image.open(io.BytesIO(self._mm[data_offset : data_offset + size])).convert("RGB")
 

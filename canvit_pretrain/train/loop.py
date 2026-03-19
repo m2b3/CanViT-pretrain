@@ -194,6 +194,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         log.info(f"HF SEED mode: loading from {cfg.hf_seed_ckpt}")
         hf_model = CanViTForPretrainingHFHub.from_pretrained(cfg.hf_seed_ckpt)
         hf_seed_state_dict = {k: v for k, v in hf_model.state_dict().items()}
+        assert isinstance(hf_model.cfg, CanViTForPretrainingConfig)
         cfg.model = hf_model.cfg
         log.info(f"  Model config from HF: {cfg.model}")
         del hf_model
@@ -552,7 +553,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
             if step % cfg.log_every == 0:
                 grad_norm = grad_norm_t.item()
-                lr = scheduler.get_last_lr()[0]
+                lr_val = scheduler.get_last_lr()[0]
+                assert isinstance(lr_val, float)
+                lr = lr_val
 
                 # Log all EMA metrics
                 metrics = {f"train/{k}": v.item() for k, v in ema.items()}
@@ -560,6 +563,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 metrics["train/grad_norm"] = grad_norm
                 metrics["train/continue_prob"] = cfg.continue_prob
                 # Data vs GPU bottleneck: cumulative percentages
+                data_pct = 0.0
                 t_total_so_far = t_data_total + t_gpu_total
                 if t_total_so_far > 0:
                     data_pct = t_data_total / t_total_so_far * 100
