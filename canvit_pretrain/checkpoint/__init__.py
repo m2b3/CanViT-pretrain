@@ -292,7 +292,7 @@ def load_model(
     path: Path, device: torch.device | str = "cpu",
 ) -> tuple[CanViTForPretraining, CheckpointData]:
     """Load CanViTForPretraining from checkpoint. Returns (model, checkpoint_data)."""
-    from canvit import create_backbone
+    from canvit_pytorch import create_backbone
 
     ckpt = load(path, device)
 

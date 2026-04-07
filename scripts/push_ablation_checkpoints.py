@@ -19,8 +19,8 @@ from pathlib import Path
 
 import torch
 import tyro
-from canvit.model.pretraining.hub import upload_to_hf
-from canvit.model.pretraining.impl import CanViTForPretraining
+from canvit_pytorch.model.pretraining.hub import upload_to_hf
+from canvit_pytorch.model.pretraining.impl import CanViTForPretraining
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -117,8 +117,8 @@ def main(args: Args) -> None:
 
         # Reconstruct model from (possibly migrated) raw checkpoint
         import dacite
-        from canvit.backbone import create_backbone
-        from canvit.model.pretraining.impl import CanViTForPretrainingConfig
+        from canvit_pytorch.backbone import create_backbone
+        from canvit_pytorch.model.pretraining.impl import CanViTForPretrainingConfig
 
         cfg = dacite.from_dict(CanViTForPretrainingConfig, raw["model_config"])
         model = CanViTForPretraining(

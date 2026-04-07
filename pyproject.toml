@@ -6,7 +6,7 @@ authors = [{ name = "Yohaï-Eliel BERREBY", email = "me@yberreby.com" }]
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "canvit",
+    "canvit-pytorch",
     "canvit-probes",
     "dinov3",
     "dinov3-in1k-probes",
@@ -38,7 +38,7 @@ build-backend = "hatchling.build"
 packages = ["canvit_pretrain", "drac_imagenet"]
 
 [tool.uv.sources]
-canvit = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch-Next.git", branch = "main" }
+canvit-pytorch = { git = "ssh://git@github.com/yberreby/CanViT-PyTorch-Next.git", branch = "main" }
 canvit-probes = { git = "ssh://git@github.com/m2b3/CanViT-probes.git", branch = "main" }
 dinov3 = { git = "https://github.com/yberreby/dinov3.git" }
 dinov3-in1k-probes = { git = "https://github.com/yberreby/dinov3-in1k-probes.git" }

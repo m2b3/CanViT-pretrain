@@ -26,8 +26,8 @@ from typing import Any
 
 import torch
 import tyro
-from canvit import create_backbone
-from canvit.viewpoint import Viewpoint
+from canvit_pytorch import create_backbone
+from canvit_pytorch.viewpoint import Viewpoint
 from canvit_utils.teacher import load_teacher
 from rich.console import Console
 from rich.table import Table

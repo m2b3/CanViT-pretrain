@@ -9,7 +9,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from canvit import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
+from canvit_pytorch import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining

@@ -38,8 +38,8 @@ class TrainBatch(NamedTuple):
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
-from canvit import CLSStandardizer, PatchStandardizer  # noqa: E402
-from canvit.backbone.vit import NormFeatures  # noqa: E402
+from canvit_pytorch import CLSStandardizer, PatchStandardizer  # noqa: E402
+from canvit_pytorch.backbone.vit import NormFeatures  # noqa: E402
 from ytch.model import count_parameters  # noqa: E402
 
 from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
@@ -190,7 +190,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         is_seeding = True
         log.info(f"SEED mode: loading weights from {ckpt_path_to_load} (fresh opt/sched/step)")
     elif cfg.hf_seed_ckpt is not None:
-        from canvit.model.pretraining.hub import CanViTForPretrainingHFHub
+        from canvit_pytorch.model.pretraining.hub import CanViTForPretrainingHFHub
         log.info(f"HF SEED mode: loading from {cfg.hf_seed_ckpt}")
         hf_model = CanViTForPretrainingHFHub.from_pretrained(cfg.hf_seed_ckpt)
         hf_seed_state_dict = {k: v for k, v in hf_model.state_dict().items()}

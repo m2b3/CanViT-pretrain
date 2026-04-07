@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 import numpy as np
-from canvit import CanViTOutput
+from canvit_pytorch import CanViTOutput
 from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining

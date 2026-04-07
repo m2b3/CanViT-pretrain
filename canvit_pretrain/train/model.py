@@ -4,8 +4,8 @@ import logging
 from typing import NamedTuple
 
 import torch
-from canvit import create_backbone
-from canvit.backbone.vit import ViTBackbone
+from canvit_pytorch import create_backbone
+from canvit_pytorch.backbone.vit import ViTBackbone
 from canvit_utils.teacher import DINOv3Teacher
 from canvit_utils.teacher import load_teacher as _load_teacher
 

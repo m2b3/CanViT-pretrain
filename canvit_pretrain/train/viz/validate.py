@@ -8,9 +8,9 @@ import comet_ml
 import numpy as np
 import torch
 import torch.nn.functional as F
-from canvit import CanViTOutput, CLSStandardizer, PatchStandardizer, RecurrentState
-from canvit.backbone.vit import NormFeatures
-from canvit.viewpoint import Viewpoint as CanvitViewpoint
+from canvit_pytorch import CanViTOutput, CLSStandardizer, PatchStandardizer, RecurrentState
+from canvit_pytorch.backbone.vit import NormFeatures
+from canvit_pytorch.viewpoint import Viewpoint as CanvitViewpoint
 from canvit_utils.teacher import DINOv3Teacher
 from dinov3_in1k_probes import DINOv3LinearClassificationHead
 from torch import Tensor

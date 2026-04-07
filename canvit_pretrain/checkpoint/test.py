@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 import torch
-from canvit import create_backbone
+from canvit_pytorch import create_backbone
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 from canvit_pretrain.checkpoint import CheckpointData, load, save

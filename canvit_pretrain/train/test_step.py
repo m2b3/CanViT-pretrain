@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from canvit import create_backbone
+from canvit_pytorch import create_backbone
 from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
