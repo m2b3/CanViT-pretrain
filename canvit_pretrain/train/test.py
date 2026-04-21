@@ -3,51 +3,19 @@
 import torch
 from canvit_pytorch.preprocess import preprocess
 from PIL import Image
-from canvit_pytorch.preprocess import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torch import Tensor
-from torchvision import transforms
 
 from canvit_pretrain.train.data import (
     MAX_CONSECUTIVE_FAILURES,
     InfiniteLoader,
 )
 from canvit_pretrain.train.scheduler import warmup_constant_scheduler
-from canvit_pretrain.train.transforms import imagenet_normalize, train_transform
 from canvit_pretrain.train.viewpoint import (
     PixelBox,
     make_eval_viewpoints,
-    random_viewpoint,
     viewpoint_to_pixel_box,
 )
 from canvit_pretrain.train.viz import imagenet_denormalize_to_numpy, timestep_colors
-
-# === Data Tests ===
-
-class TestImagenetNormalize:
-    def test_returns_normalize_transform(self) -> None:
-        norm = imagenet_normalize()
-        assert isinstance(norm, transforms.Normalize)
-
-    def test_uses_correct_constants(self) -> None:
-        norm = imagenet_normalize()
-        assert tuple(norm.mean) == IMAGENET_DEFAULT_MEAN
-        assert tuple(norm.std) == IMAGENET_DEFAULT_STD
-
-
-class TestTrainTransform:
-    def test_output_shape(self) -> None:
-        t = train_transform(224, crop_scale=(0.4, 1.0))
-        img = Image.new("RGB", (256, 256))
-        out = t(img)
-        assert isinstance(out, Tensor)
-        assert out.shape == (3, 224, 224)
-
-    def test_output_dtype(self) -> None:
-        t = train_transform(64, crop_scale=(0.5, 1.0))
-        img = Image.new("RGB", (128, 128))
-        out = t(img)
-        assert isinstance(out, Tensor)
-        assert out.dtype == torch.float32
 
 
 class TestPreprocess:
@@ -179,19 +147,6 @@ class TestWarmupConstantScheduler:
 
 
 # === Viewpoint Tests ===
-
-class TestRandomViewpoint:
-    def test_basic(self) -> None:
-        vp = random_viewpoint(4, torch.device("cpu"))
-        assert vp.centers.shape == (4, 2)
-        assert vp.scales.shape == (4,)
-        assert vp.name == "random"
-
-    def test_scale_bounds(self) -> None:
-        vp = random_viewpoint(100, torch.device("cpu"), min_scale=0.3, max_scale=0.7)
-        assert (vp.scales >= 0.3).all()
-        assert (vp.scales <= 0.7).all()
-
 
 class TestMakeEvalViewpoints:
     def test_default_returns_10_viewpoints(self) -> None:

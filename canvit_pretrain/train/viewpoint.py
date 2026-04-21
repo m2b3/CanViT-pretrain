@@ -11,7 +11,6 @@ __all__ = [
     "PixelBox",
     "Viewpoint",
     "ViewpointType",
-    "random_viewpoint",
     "make_eval_viewpoints",
     "viewpoint_to_pixel_box",
 ]
@@ -116,18 +115,6 @@ class Viewpoint(CoreViewpoint):
         centers = (torch.rand(batch_size, 2, device=device) * 2 - 1) * L.unsqueeze(1)
 
         return Viewpoint(name="random", centers=centers, scales=scales)
-
-
-def random_viewpoint(
-    B: int,
-    device: torch.device,
-    min_scale: float = 0.0,
-    max_scale: float = 1.0,
-) -> Viewpoint:
-    """Sample random viewpoints. Thin wrapper for backward compat."""
-    return Viewpoint.random(
-        batch_size=B, device=device, min_scale=min_scale, max_scale=max_scale
-    )
 
 
 def make_eval_viewpoints(

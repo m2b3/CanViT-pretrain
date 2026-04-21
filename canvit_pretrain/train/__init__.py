@@ -20,15 +20,10 @@ from canvit_pretrain.train.probe import (
     load_probe,
 )
 from canvit_pretrain.train.scheduler import warmup_constant_scheduler
-from canvit_pretrain.train.transforms import (
-    imagenet_normalize,
-    train_transform,
-)
 from canvit_pretrain.train.viewpoint import (
     PixelBox,
     Viewpoint,
     make_eval_viewpoints,
-    random_viewpoint,
     viewpoint_to_pixel_box,
 )
 from canvit_pretrain.train.viz import (
@@ -49,9 +44,7 @@ __all__ = [
     "InfiniteLoader",
     "Loaders",
     "create_loaders",
-    "imagenet_normalize",
     "scene_size_px",
-    "train_transform",
     # Probe
     "IN1K_NUM_CLASSES",
     "PROBE_REGISTRY",
@@ -69,7 +62,6 @@ __all__ = [
     "PixelBox",
     "Viewpoint",
     "make_eval_viewpoints",
-    "random_viewpoint",
     "viewpoint_to_pixel_box",
     # Viz
     "TimestepPredictions",

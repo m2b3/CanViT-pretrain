@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from canvit_pretrain.train.viz.image import imagenet_denormalize_to_numpy
-from canvit_pretrain.train.viz.metrics import compute_spatial_stats, cosine_dissimilarity
+from canvit_pretrain.train.viz.metrics import cosine_dissimilarity
 from canvit_pretrain.train.viz.pca import fit_pca, pca_rgb
 from canvit_pretrain.train.viz.plot import timestep_colors
 
@@ -67,19 +67,6 @@ class TestCosineDissimilarity:
         b = np.array([[0.0, 1.0]])
         result = cosine_dissimilarity(a, b)
         assert np.allclose(result, 1.0, atol=1e-6)
-
-
-class TestComputeSpatialStats:
-    def test_output_keys(self) -> None:
-        x = torch.randn(2, 16, 32)
-        stats = compute_spatial_stats(x)
-        assert "mean" in stats
-        assert "std" in stats
-
-    def test_std_positive(self) -> None:
-        x = torch.randn(2, 16, 32)
-        stats = compute_spatial_stats(x)
-        assert stats["std"] > 0
 
 
 class TestTimestepColors:
