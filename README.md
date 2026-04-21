@@ -32,16 +32,12 @@ Two phases: export teacher features once per (teacher, dataset, resolution); the
 
 ### Phase 1 — Export DINOv3 teacher features
 
-Phase 1 consumes a shuffled parquet index of image paths + class indices. Build it once per (dataset, cluster):
+Build the shuffled parquet index, then submit the export array job:
 
 ```bash
 uv run python scripts/build_shuffled_index.py \
   --image-root $IN21K_IMAGE_DIR --index-dir $INDEX_DIR --dataset in21k
-```
 
-Then submit the export array job:
-
-```bash
 sbatch --array=0-99%20 slurm/export_features.sh
 ```
 
