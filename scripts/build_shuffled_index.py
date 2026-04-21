@@ -16,6 +16,7 @@ Usage:
         --dataset in21k
 """
 
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,7 +33,6 @@ class Config:
     image_root: Path
     index_dir: Path
     dataset: str
-    seed: int = 0
 
 
 def main(cfg: Config) -> None:
@@ -47,17 +47,18 @@ def main(cfg: Config) -> None:
     canonical = cfg.index_dir / f"{cfg.image_root.name}.parquet"
     assert canonical.exists(), f"IndexedImageFolder did not produce {canonical}"
 
+    seed = secrets.randbits(63)
     table = pq.read_table(canonical)
-    perm = np.random.default_rng(cfg.seed).permutation(table.num_rows)
+    perm = np.random.default_rng(seed).permutation(table.num_rows)
     shuffled_table = table.take(pa.array(perm))
 
     md = dict(table.schema.metadata or {})
-    md[b"shuffle_seed"] = str(cfg.seed).encode()
+    md[b"shuffle_seed"] = str(seed).encode()
     md[b"source_parquet"] = canonical.name.encode()
     shuffled_table = shuffled_table.replace_schema_metadata(md)
 
     pq.write_table(shuffled_table, shuffled, compression="zstd")
-    print(f"Wrote {shuffled} ({shuffled_table.num_rows:,} rows, seed={cfg.seed})")
+    print(f"Wrote {shuffled} ({shuffled_table.num_rows:,} rows, seed={seed})")
 
 
 if __name__ == "__main__":
