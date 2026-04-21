@@ -53,7 +53,7 @@ The sbatch passes `"$@"` straight through. See `slurm/train.sbatch`'s header for
 
 Switching teacher / resolution / dataset requires re-running Phase 1.
 
-### Phase 2b — Ablations
+### Ablations
 
 Each ablation is a variant of the flagship run (same harness, one parameter
 changed). Submit individually:
