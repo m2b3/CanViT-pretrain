@@ -1,4 +1,4 @@
-"""Build a deterministically-shuffled parquet index of image paths for Phase 1.
+"""Build a deterministically-shuffled parquet index of image paths for feature export.
 
 `scripts/export_in21k_features.py` consumes `$INDEX_DIR/<dataset>-shuffled.parquet`
 and processes rows in parquet order. Shuffling ensures each shard contains a

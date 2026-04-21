@@ -28,9 +28,9 @@ cp .envrc.nibi .envrc && direnv allow
 
 ## Workflow
 
-Two phases: export teacher features once per (teacher, dataset, resolution); then repeated training runs that consume the cached features.
+Two stages: export teacher features once per (teacher, dataset, resolution); then repeated training runs that consume the cached features.
 
-### Phase 1 — Export DINOv3 teacher features
+### Export DINOv3 teacher features
 
 Build the shuffled parquet index, then submit the export array job:
 
@@ -43,7 +43,7 @@ sbatch --array=0-99%20 slurm/export_features.sh
 
 See `slurm/export_features.sh` for the teacher/image-size/shard constants and `scripts/export_in21k_features.py`'s header comment for atomic-write guarantees, resume semantics, and monitor commands.
 
-### Phase 2 — Train
+### Train
 
 ```bash
 sbatch slurm/train.sbatch [--flag value ...]
@@ -56,7 +56,7 @@ uv run python -m canvit_pretrain.train --help
 
 The sbatch passes `"$@"` straight through. See `slurm/train.sbatch`'s header for array-sizing, run-name derivation, and override examples (CanViT-S, resuming, quick smoke).
 
-Switching teacher / resolution / dataset requires re-running Phase 1.
+Switching teacher / resolution / dataset requires re-running the feature export.
 
 ### Ablations
 

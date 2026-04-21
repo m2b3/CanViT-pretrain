@@ -1,3 +1,5 @@
+"""Data loading for CanViT pretraining: shard loaders + batch types."""
+
 import logging
 import tempfile
 from collections.abc import Iterator
