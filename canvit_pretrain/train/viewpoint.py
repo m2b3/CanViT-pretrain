@@ -1,11 +1,3 @@
-"""Viewpoint sampling for training and evaluation.
-
-Extends canvit.viewpoint with training-specific utilities:
-- Named viewpoints for debugging/logging
-- Random viewpoint sampling with safe-box-area distribution
-- Evaluation viewpoint sequences (wraps canvit_utils.policies)
-"""
-
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import NamedTuple

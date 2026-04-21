@@ -1,10 +1,5 @@
 """Export teacher features to sharded .pt files.
 
-Successfully used to export ~19TB of DINOv3 ViT-B/16 features on ImageNet-21k
-(January 2026, Narval cluster). Last used for IN21k at commit 0915b44
-(2026-02-11). Teacher loading updated from local .pth to HuggingFace Hub
-(2026-02-23, sa1b branch) — feature extraction logic unchanged.
-
 Precomputes DINOv3 features for all images, stores as sharded .pt files.
 This eliminates expensive teacher inference during training.
 
