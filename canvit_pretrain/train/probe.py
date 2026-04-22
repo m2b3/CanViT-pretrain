@@ -76,15 +76,7 @@ def compute_in1k_top1(logits: Tensor, labels: Tensor) -> float:
 
 
 def get_top_k_predictions(logits: Tensor, k: int = 5) -> list[list[TopKPrediction]]:
-    """Get top-k predictions with class names and probabilities.
-
-    Args:
-        logits: [B, num_classes] logits tensor
-        k: number of top predictions to return
-
-    Returns:
-        List of length B, each containing k TopKPrediction items.
-    """
+    """Top-k predictions with class names and probabilities from [B, num_classes] logits."""
     class_names = get_imagenet_class_names()
     probs = F.softmax(logits, dim=-1)
     top_probs, top_indices = probs.topk(k, dim=-1)

@@ -30,16 +30,7 @@ def plot_trajectory(
     boxes: list[PixelBox],
     names: list[str],
 ) -> Figure:
-    """Plot image with viewpoint boxes overlaid.
-
-    Args:
-        img: [H, W, 3] numpy array in [0, 1]
-        boxes: List of PixelBox defining regions
-        names: List of names for each box (same length as boxes)
-
-    Returns:
-        matplotlib Figure
-    """
+    """Plot [H, W, 3] image (values in [0, 1]) with viewpoint boxes overlaid."""
     assert len(boxes) == len(names)
     colors = timestep_colors(len(boxes))
 
@@ -80,18 +71,7 @@ def plot_pca_grid(
     grid_size: int,
     titles: list[str],
 ) -> Figure:
-    """Plot PCA visualization comparing reference to samples.
-
-    Args:
-        pca: Fitted PCA (fit on reference)
-        reference: [G*G, D] numpy array (teacher features)
-        samples: List of [G*G, D] numpy arrays (model outputs)
-        grid_size: G for reshaping to [G, G, 3]
-        titles: Titles for each sample (same length as samples)
-
-    Returns:
-        matplotlib Figure
-    """
+    """Plot PCA viz comparing [G*G, D] reference (teacher) to samples (model outputs); PCA must be pre-fit on reference."""
     assert len(samples) == len(titles)
     n_cols = 1 + len(samples)
 

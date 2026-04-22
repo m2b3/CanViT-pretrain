@@ -87,15 +87,7 @@ def scene_size_px(grid_size: int, patch_size: int) -> int:
 
 
 def create_loaders(cfg: "Config", start_step: int) -> Loaders:
-    """Create train and validation data loaders.
-
-    Train uses precomputed features (ShardedFeatureLoader).
-    Val uses raw images (InfiniteLoader over IndexedImageFolder).
-
-    Args:
-        cfg: Training config
-        start_step: Step to resume from (0 for fresh start). CRITICAL for correct shard positioning.
-    """
+    """Train + val loaders; train reads precomputed features, val reads raw images. start_step positions the shard cursor on resume (0 for fresh)."""
     from ..config import Config
     assert isinstance(cfg, Config)
     log.info(f"=== CREATE_LOADERS: start_step={start_step} ===")

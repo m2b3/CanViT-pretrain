@@ -12,15 +12,7 @@ def _pca_proj_to_rgb(proj: NDArray[np.floating], H: int, W: int) -> NDArray[np.f
 
 
 def fit_pca(features: NDArray[np.floating], n_components: int = 12) -> PCA | None:
-    """Fit PCA on features for RGB visualization.
-
-    Args:
-        features: [N, D] numpy array of features (already on CPU)
-        n_components: Number of components to fit (default 12 to support offset viewing)
-
-    Returns:
-        Fitted PCA, or None if features have zero variance (e.g., constant init).
-    """
+    """Fit PCA on [N, D] features; returns None if zero variance (e.g., constant init). Default 12 components supports offset viewing."""
     if features.var(axis=0).max() < 1e-5:
         return None
     n_components = min(n_components, features.shape[0], features.shape[1])
@@ -37,17 +29,7 @@ def pca_rgb(
     normalize: bool = False,
     pc_offset: int = 0,
 ) -> NDArray[np.floating]:
-    """Project features to RGB via PCA, reshape to [H, W, 3].
-
-    Args:
-        pca: Fitted PCA, or None (returns gray image).
-        features: [H*W, D] numpy array (already on CPU)
-        normalize: If True, normalize projection to std=1 before sigmoid.
-        pc_offset: Which PC to start from (0=PC1-3, 1=PC2-4, etc.)
-
-    Returns:
-        [H, W, 3] numpy array with sigmoid-scaled values in [0, 1]
-    """
+    """Project [H*W, D] features to [H, W, 3] RGB via PCA. None pca → gray. pc_offset picks window (0=PC1-3, 1=PC2-4, ...)."""
     if pca is None:
         return np.full((H, W, 3), 0.5, dtype=np.float32)
     proj = pca.transform(features)
