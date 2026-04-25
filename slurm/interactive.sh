@@ -1,5 +1,4 @@
 #!/bin/bash
-# Interactive GPU session on Nibi
 # Usage (from repo root): bash slurm/interactive.sh [time] [mem]
 
 TIME="${1:-0:20:00}"
