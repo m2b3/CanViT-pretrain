@@ -35,12 +35,6 @@ class Config:
     start_lr: float | None = 1e-7  # None = peak_lr / warmup_steps
     peak_lr: float = 4e-4
     cosine_total_steps: int | None = None  # None = constant after warmup; set to enable cosine decay
-    # weight_decay: float = 0.05  # standard in ViTs
-    # we can use a much lower weight decay due to the richness of our training signal
-    # and we *should*, due to the use of small batches
-    # 1e-4 was used for the published 2M-step flagship run
-    # mid-February for a few days, while having RoPE bugs: 1e-3 consistently
-    # Feb 14: this is enough, back to what we know works: 1e-4
     weight_decay: float = 1e-4
     min_viewpoint_scale: float = 0.05  # Minimum scale for random viewpoints
     n_full_start_branches: int = 1  # branches starting with FULL viewpoint at t0
