@@ -19,7 +19,7 @@ cp .envrc.example .envrc && direnv allow
 # Edit .envrc to adapt to your environment.
 ```
 
-Please ensure that `HF_TOKEN` and `COMET_API_KEY` are set.
+Please ensure that `HF_TOKEN`, `COMET_API_KEY`, and `COMET_WORKSPACE` are set.
 
 ## Run
 
