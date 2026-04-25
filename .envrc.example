@@ -25,7 +25,7 @@ export CANVIT_FLAGSHIP_CKPT="$CHECKPOINTS_DIR/CanViT-flagship.pt"
 
 # Comet
 export COMET_WORKSPACE=m2b3-ava
-export COMET_PROJECT=canvit-pretrain
+export COMET_PROJECT_NAME=canvit-pretrain
 
 # Credentials (optional)
 # NOTE: every line must be safe under `set -e`. A bare `cmd1 && cmd2` that

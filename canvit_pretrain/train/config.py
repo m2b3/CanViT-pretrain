@@ -78,8 +78,6 @@ class Config:
     scene_resolution: int = 512
     dataset: str = "in21k"
     # Logging
-    comet_project: str = "canvit-pretrain"
-    comet_workspace: str = "m2b3-ava"
     log_every: int = 20
     val_every: int = 1000
     n_eval_viewpoints: int = 10  # Number of viewpoints in validation (quadtree)
