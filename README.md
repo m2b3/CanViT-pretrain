@@ -1,97 +1,46 @@
 # CanViT-pretrain
 
-Pretraining for CanViT: passive-to-active dense latent distillation from DINOv3.
+Passive-to-active dense latent distillation
+of CanViT
 
-## Prerequisites
 
-### Env
+from DINOv3.
 
-```bash
-uv sync
-```
-Requires Python 3.12+. Deps (including git-pulled `canvit-pytorch`, `dinov3`, etc.) live in `pyproject.toml`.
+Model lives in [CanViT-PyTorch](https://github.com/m2b3/CanViT-PyTorch).
 
-### Credentials
+This repository
+was originally designed to run on [the Nibi SLURM cluster](https://docs.alliancecan.ca/wiki/Nibi)
+using its [hosted ImageNet-21k `winter21_whole` replica](https://docs.alliancecan.ca/wiki/ImageNet).
 
-Read from the launching shell via `direnv` (`.envrc.nibi` is the Nibi template):
-
-- **`HF_TOKEN`** — required. Pulls the DINOv3 teacher from HF Hub.
-- **`COMET_API_KEY`** — optional. Without it, Comet logging is skipped.
-
-### Data + cache paths
+## Setup
 
 ```bash
-cp .envrc.nibi .envrc && direnv allow
+cp .envrc.example .envrc && direnv allow
+# Edit .envrc to adapt to your environment.
 ```
 
-`.envrc.nibi` documents every variable (IN21k images, IN1k val, parquet indexes, features dir, checkpoints, HF/Torch caches) with the Nibi defaults. Re-tailor per cluster as needed.
+Please ensure that `HF_TOKEN` and `COMET_API_KEY` are set.
 
-## Workflow
+## Run
 
-Two stages: export teacher features once per (teacher, dataset, resolution); then repeated training runs that consume the cached features.
-
-### Export DINOv3 teacher features
-
-Build the shuffled parquet index, then submit the export array job:
+Export DINOv3 teacher features once:
 
 ```bash
 uv run python scripts/build_shuffled_index.py \
   --image-root $IN21K_IMAGE_DIR --index-dir $INDEX_DIR --dataset in21k
-
 sbatch --array=0-99%20 slurm/export_features.sh
 ```
 
-See `slurm/export_features.sh` for the teacher/image-size/shard constants and `scripts/export_in21k_features.py`'s header comment for atomic-write guarantees, resume semantics, and monitor commands.
-
-### Train
+Pretraining:
 
 ```bash
 sbatch slurm/train.sbatch [--flag value ...]
 ```
 
-Every field of `canvit_pretrain.train.config.Config` is a `--kebab-case-flag` via `tyro`:
-```bash
-uv run python -m canvit_pretrain.train --help
-```
-
-The sbatch passes `"$@"` straight through. See `slurm/train.sbatch`'s header for array-sizing, run-name derivation, and override examples (CanViT-S, resuming, quick smoke).
-
-Switching teacher / resolution / dataset requires re-running the feature export.
-
-### Ablations
-
-Each ablation is a variant of the flagship run (same harness, one parameter
-changed). Submit individually:
+Ablations:
 
 ```bash
 bash slurm/ablations/baseline.sh
 bash slurm/ablations/no-bptt.sh
-# ... one script per variant
+# ...
 ```
-
-Shared config (array size, warmup, run-name prefix) lives in
-`slurm/ablations/common.sh`; each variant script documents what it changes
-in a one-line header comment.
-
-## Interactive dev
-
-```bash
-bash slurm/interactive.sh
-```
-`salloc` wrapper. Inside the allocation, `.envrc` is sourced by `slurm/env.sh`; run the same `uv run python -m canvit_pretrain.train ...` the sbatch runs.
-
-## Repository layout
-
-```bash
-uv run pypatree
-```
-
-## Related repos
-
-| Repo | Role |
-|------|------|
-| [CanViT-PyTorch](https://github.com/m2b3/CanViT-PyTorch) (public, canonical) | Core model + policies |
-| [CanViT-specialize](https://github.com/m2b3/CanViT-specialize) | Probes, datasets, IoU metrics, IN1k finetuning |
-| [CanViT-eval](https://github.com/m2b3/CanViT-eval) | Evaluation (produces `.pt` result files) |
-| [dinov3-in1k-probes](https://github.com/yberreby/dinov3-in1k-probes) | DINOv3 IN1k linear probes (baselines) |
-| [CanViT-Toward-AVFMs](https://github.com/m2b3/CanViT-Toward-AVFMs) | Paper pipeline |
