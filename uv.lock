@@ -118,7 +118,7 @@ requires-dist = [
     { name = "canvit-pytorch", git = "https://github.com/m2b3/CanViT-PyTorch.git" },
     { name = "comet-ml" },
     { name = "dacite" },
-    { name = "dinov3", git = "https://github.com/yberreby/dinov3.git" },
+    { name = "dinov3", git = "https://github.com/facebookresearch/dinov3.git?rev=54694f7627fd815f62a5dcc82944ffa6153bbb76" },
     { name = "dinov3-in1k-probes", git = "https://github.com/m2b3/dinov3-in1k-probes.git" },
     { name = "huggingface-hub" },
     { name = "matplotlib" },
@@ -569,7 +569,7 @@ wheels = [
 [[package]]
 name = "dinov3"
 version = "0.0.1"
-source = { git = "https://github.com/yberreby/dinov3.git#54694f7627fd815f62a5dcc82944ffa6153bbb76" }
+source = { git = "https://github.com/facebookresearch/dinov3.git?rev=54694f7627fd815f62a5dcc82944ffa6153bbb76#54694f7627fd815f62a5dcc82944ffa6153bbb76" }
 dependencies = [
     { name = "ftfy" },
     { name = "omegaconf" },
