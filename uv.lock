@@ -152,7 +152,7 @@ dev = [
 [[package]]
 name = "canvit-pytorch"
 version = "0.1.9"
-source = { git = "https://github.com/m2b3/CanViT-PyTorch.git#96f91f9860c0cd5d380cf8610e1abe433627cc20" }
+source = { git = "https://github.com/m2b3/CanViT-PyTorch.git#10deb59d708354fa13a3b0aa4db6226729fc7fd6" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },
