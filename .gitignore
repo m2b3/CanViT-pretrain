@@ -24,7 +24,7 @@ checkpoints/
 # macOS
 *.DS_Store
 
-# Environment (machine-specific, see .envrc.nibi)
+# Environment (machine-specific; start from .envrc.example)
 .envrc
 
 # Misc

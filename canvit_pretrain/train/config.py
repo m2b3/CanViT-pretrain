@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
-from ytch.device import get_sensible_device
 
 from canvit_pretrain import CanViTForPretrainingConfig
+from canvit_pretrain.train.utils import get_sensible_device
 
 # Default HF repo for the teacher model
 TEACHER_REPO_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"

@@ -25,7 +25,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import tyro
 
-from drac_imagenet import IndexedImageFolder
+from canvit_pretrain.datasets import IndexedImageFolder
 
 
 @dataclass

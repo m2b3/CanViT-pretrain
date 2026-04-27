@@ -40,7 +40,6 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
 from canvit_pytorch import CLSStandardizer, PatchStandardizer  # noqa: E402
 from canvit_pytorch.backbone.vit import NormFeatures  # noqa: E402
-from ytch.model import count_parameters  # noqa: E402
 
 from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
 from canvit_pretrain.checkpoint import (  # noqa: E402
@@ -60,6 +59,7 @@ from .model import compile_model, compile_teacher, create_model, load_student_ba
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noqa: E402
 from .step import training_step  # noqa: E402
+from .utils import count_parameters  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
 log = logging.getLogger(__name__)

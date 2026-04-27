@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=canvit-sa1b
-#SBATCH --account=rrg-skrishna_gpu
 #SBATCH --time=01:00:00
 #SBATCH --array=0-99%1
 #SBATCH --gres=gpu:h100:1
@@ -16,6 +15,7 @@
 #
 # First run (seed from HF Hub):
 #   sbatch sa1b/train.sh
+#   sbatch --account=my_project_name sa1b/train.sh
 #
 # Continue existing run:
 #   sbatch --array=0-99%1 sa1b/train.sh --run-name sa1b-train-XXXXXXX

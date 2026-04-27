@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --account=rrg-skrishna_gpu
 #SBATCH --gres=gpu:h100:1
 #SBATCH --mem=48G
 #SBATCH --cpus-per-task=8
@@ -13,6 +12,7 @@
 #
 # USAGE:
 #   sbatch --array=0-999 sa1b/export_features.sh          # all 1000 tars
+#   sbatch --account=my_project_name --array=0-999 sa1b/export_features.sh
 #   sbatch --array=0-2   sa1b/export_features.sh          # first 3 tars
 #   sbatch --array=20    sa1b/export_features.sh          # single tar
 # ==============================================================================

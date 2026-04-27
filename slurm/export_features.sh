@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --account=rrg-skrishna_gpu
 #SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_1g.10gb:1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=8
@@ -21,6 +20,9 @@
 # USAGE:
 #   # Submit array job (over-estimate is fine, empty jobs exit quickly)
 #   sbatch --array=0-99%20 slurm/export_features.sh
+#
+#   # If your cluster requires an allocation account:
+#   sbatch --account=my_project_name --array=0-99%20 slurm/export_features.sh
 #
 # MONITOR:
 #   squeue -u $USER                                    # job status

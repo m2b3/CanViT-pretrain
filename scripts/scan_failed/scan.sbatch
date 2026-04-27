@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=scan-failed
-#SBATCH --account=def-skrishna
 #SBATCH --time=00:30:00
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=16G
@@ -11,6 +10,7 @@
 #
 # Usage:
 #   sbatch scripts/scan_failed/scan.sbatch
+#   sbatch --account=my_project_name scripts/scan_failed/scan.sbatch
 #   sbatch scripts/scan_failed/scan.sbatch --time=01:00:00  # more time if needed
 
 set -eux

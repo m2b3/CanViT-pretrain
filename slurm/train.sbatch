@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=canvit-in21k-pretrain
-#SBATCH --account=rrg-skrishna_gpu
 #SBATCH --time=00:45:00
 #SBATCH --array=0-400%1
 #SBATCH --gres=gpu:h100:1
@@ -15,6 +14,9 @@
 #
 # Default (CanViT-B):
 #   sbatch slurm/train.sbatch
+#
+# If your cluster requires an allocation account:
+#   sbatch --account=my_project_name slurm/train.sbatch
 #
 # CanViT-S:
 #   sbatch slurm/train.sbatch --backbone-name vits16

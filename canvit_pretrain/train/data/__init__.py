@@ -11,9 +11,8 @@ from torch import Tensor
 if TYPE_CHECKING:
     from ..config import Config
 from canvit_pytorch.preprocess import preprocess
+from canvit_pretrain.datasets import IndexedImageFolder
 from torch.utils.data import DataLoader, Dataset
-
-from drac_imagenet import IndexedImageFolder
 
 from .shards import ShardedFeatureLoader
 

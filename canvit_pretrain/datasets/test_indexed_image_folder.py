@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from . import SCHEMA_VERSION, IndexedImageFolder, IndexMetadata
+from .indexed_image_folder import SCHEMA_VERSION, IndexedImageFolder, IndexMetadata
 
 
 def test_index_metadata_fields() -> None:
@@ -66,7 +66,6 @@ def test_root_mismatch_raises(tmp_path: Path) -> None:
     (root2 / "d").mkdir()
     (root2 / "d" / "y.JPEG").write_bytes(b"")
 
-    # Copy index from dataset1 to dataset2's expected path
     index_file = index_dir / "dataset1.parquet"
     wrong_index = index_dir / "dataset2.parquet"
     wrong_index.write_bytes(index_file.read_bytes())

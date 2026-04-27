@@ -1,7 +1,7 @@
-"""Indexed ImageFolder for large datasets (e.g., ImageNet-21k on DRAC clusters).
+"""Parquet-indexed ImageFolder dataset for large class-folder image trees.
 
-First use: scans filesystem, saves parquet index (~8 min for 13M files).
-Subsequent: loads from parquet (~8s for 13M files).
+First use scans the filesystem and saves a parquet index. Later runs load the
+index directly, avoiding repeated metadata walks over millions of image files.
 """
 
 import logging
@@ -33,7 +33,7 @@ class IndexedImageFolder(Dataset):
 
     classes: list[str]
     class_to_idx: dict[str, int]
-    samples: list[tuple[str, int]]  # (path, class_idx)
+    samples: list[tuple[str, int]]
 
     def __init__(
         self,
@@ -78,7 +78,6 @@ class IndexedImageFolder(Dataset):
 
         log.info(f"  {meta.n_samples:,} samples, {meta.n_classes:,} classes")
 
-        # Stay in Arrow, convert to Python at the end
         paths = table.column("path").to_pylist()
         class_names = table.column("class_name").to_pylist()
         class_idxs = table.column("class_idx").to_pylist()
