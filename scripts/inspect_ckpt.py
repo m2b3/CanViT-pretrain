@@ -57,7 +57,7 @@ def print_info(path: Path) -> None:
             print(f"  {ts}  git={git_s}  host={host}  task={task}{marker}")
             prev = p
     else:
-        # Old checkpoint without provenance_history — show last-save fields
+        # No provenance_history — show last-save fields.
         print(f"hostname:   {ckpt.get('hostname', 'n/a')}")
         print(f"git:        {git_str}")
         print(f"slurm_job:  {ckpt.get('slurm_job_id', 'n/a')}")
