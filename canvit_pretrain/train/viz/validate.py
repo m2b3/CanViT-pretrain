@@ -193,7 +193,8 @@ def validate(
                     images, size=(probe_res, probe_res), mode="bilinear", align_corners=False
                 )
                 teacher_cls = teacher.forward_norm_features(images_at_probe_res).cls
-                teacher_logits = probe(teacher_cls)
+                with torch.autocast(device_type=teacher_cls.device.type, enabled=False):
+                    teacher_logits = probe(teacher_cls.float())
                 assert labels is not None
                 teacher_acc = compute_in1k_top1(teacher_logits, labels)
                 exp.log_metric(f"{prefix}/in1k_teacher_top1", teacher_acc, step=step)
@@ -232,7 +233,8 @@ def validate(
 
                     if has_probe:
                         assert probe is not None and labels is not None
-                        logits = probe(cls_pred_raw)
+                        with torch.autocast(device_type=cls_pred_raw.device.type, enabled=False):
+                            logits = probe(cls_pred_raw.float())
                         acc.in1k_accs.append(compute_in1k_top1(logits, labels))
 
                         if log_pca:
