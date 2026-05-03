@@ -122,7 +122,7 @@ def make_eval_viewpoints(
 ) -> list[Viewpoint]:
     """Generate quadtree viewpoints with random ordering WITHIN each level, per batch item.
 
-    Wraps canvit_utils.policies.coarse_to_fine_viewpoints and adds names for debugging.
+    Wraps canvit_pytorch.policies.coarse_to_fine_viewpoints and adds names for debugging.
     """
     core_vps = _coarse_to_fine(B, device, n_viewpoints)
     result: list[Viewpoint] = []
