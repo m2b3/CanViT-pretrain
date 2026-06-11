@@ -52,14 +52,20 @@ timed uv sync
 # Ensure logs dir exists
 mkdir -p logs
 
-# Training with precomputed features (teacher loaded from HF Hub)
+# Training with precomputed features (teacher loaded from HF Hub).
+# DATASET selects the feature-shard tree and is recorded in checkpoint
+# metadata; FEATURE_IMAGE_ROOT must point at the matching image tree when
+# DATASET != in21k. Both come from the submission environment, e.g.:
+#   DATASET=in1k FEATURE_IMAGE_ROOT=/path/to/in1k/train sbatch slurm/train.sbatch
 log "Starting training..."
+DATASET=${DATASET:-in21k}
 RUN_NAME_ARG=()
 [ -n "$RUN_NAME" ] && RUN_NAME_ARG=(--run-name "$RUN_NAME")
 exec uv run python -m canvit_pretrain.train \
     "${RUN_NAME_ARG[@]}" \
-    --feature-base-dir "$FEATURES_DIR/in21k" \
-    --feature-image-root "$IN21K_IMAGE_DIR" \
+    --dataset "$DATASET" \
+    --feature-base-dir "$FEATURES_DIR/$DATASET" \
+    --feature-image-root "${FEATURE_IMAGE_ROOT:-$IN21K_IMAGE_DIR}" \
     --val-dir "$IN1K_VAL_IMAGE_DIR" \
     --train-index-dir "$INDEX_DIR" \
     --ckpt-dir "$CHECKPOINTS_DIR" \

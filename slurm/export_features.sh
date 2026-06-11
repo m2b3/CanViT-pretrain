@@ -49,8 +49,10 @@ mkdir -p logs
 # CONFIG
 # ==============================================================================
 
-# Experiment-specific
-DATASET=in21k
+# Experiment-specific. DATASET + IMAGE_ROOT are overridable from the
+# submission environment for non-in21k exports, e.g.:
+#   DATASET=in1k IMAGE_ROOT=/path/to/in1k/train sbatch --array=0-8 slurm/export_features.sh
+DATASET=${DATASET:-in21k}
 TEACHER_REPO_ID="facebook/dinov3-vitb16-pretrain-lvd1689m"
 IMAGE_SIZE=512
 SHARD_SIZE=4096
@@ -58,7 +60,7 @@ SHARDS_PER_JOB=36
 
 # Derived from env.sh
 PARQUET="$INDEX_DIR/${DATASET}-shuffled.parquet"
-IMAGE_ROOT="$IN21K_IMAGE_DIR"
+IMAGE_ROOT="${IMAGE_ROOT:-$IN21K_IMAGE_DIR}"
 OUT_DIR="$FEATURES_DIR/${DATASET}/dinov3_vitb16/${IMAGE_SIZE}"
 
 JOB_ID=${SLURM_ARRAY_TASK_ID:?Must run as array job}
