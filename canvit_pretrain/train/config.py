@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import torch
 
@@ -13,10 +14,15 @@ TEACHER_REPO_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"
 # Short name used for shard paths and probe lookup (matches precomputed feature directories)
 TEACHER_NAME = "dinov3_vitb16"
 
+Objective = Literal["distillation", "rgb_recon"]
+
 
 @dataclass
 class Config:
-    # Teacher
+    # Pretraining objective: DINOv3-feature distillation (flagship) or teacher-free RGB
+    # pixel reconstruction (MAE-style control). rgb_recon ignores the teacher entirely.
+    objective: Objective = "distillation"
+    # Teacher (unused when objective == "rgb_recon")
     teacher_repo_id: str = TEACHER_REPO_ID
     teacher_name: str = TEACHER_NAME
     # Student
