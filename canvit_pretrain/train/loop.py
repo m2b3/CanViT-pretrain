@@ -79,7 +79,7 @@ from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noq
 from .step import LossFn, training_step  # noqa: E402
 from .utils import count_parameters  # noqa: E402
 from .viewpoint import Viewpoint as NamedViewpoint  # noqa: E402
-from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
+from .viz import log_figure, plot_multistep_pca, plot_multistep_recon, validate  # noqa: E402
 from .viz.image import imagenet_denormalize_to_numpy  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -626,6 +626,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 pixel_target = patchify(images, model.patch_px)
                 loss_fn = rgb_loss_fn(model=model, pixel_target=pixel_target)
                 branch_metrics_fn = rgb_branch_metrics_fn(model=model, pixel_target=pixel_target)
+                viz_predict_fn = model.predict_rgb_patches
+                viz_target = pixel_target
             else:
                 assert isinstance(model, CanViTForPretraining)
                 assert scene_norm is not None and cls_norm is not None
@@ -662,7 +664,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 continue_prob=cfg.continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 amp_ctx=amp_ctx,
-                collect_viz=do_pca and not is_rgb,
+                collect_viz=do_pca,
                 viz_predict_fn=viz_predict_fn,
                 viz_target=viz_target,
             )
@@ -726,7 +728,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                     exp.end()
                     raise optuna.TrialPruned()
 
-            # Training batch PCA visualization (same data as training, no recomputation)
+            # Training-batch trajectory viz (same data as training, no recomputation).
+            # Distillation: PCA of teacher-feature predictions. RGB: pixel reconstructions.
             if step_metrics.viz_data is not None:
                 vd = step_metrics.viz_data
                 assert vd.image.ndim == 3 and vd.image.shape[2] == 3, f"Expected [H,W,3], got {vd.image.shape}"
@@ -735,22 +738,35 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 names = [vp.name for vp in vd.viewpoints]
                 scenes = [vs.predicted_scene for vs in vd.viz_samples]
                 glimpses = [vs.glimpse for vs in vd.viz_samples]
-                canvas_spatials = [vs.canvas_spatial for vs in vd.viz_samples]
                 assert vd.initial_scene is not None
-                fig = plot_multistep_pca(
-                    full_img=vd.image,
-                    teacher=vd.target_features,
-                    scenes=scenes,
-                    glimpses=glimpses,
-                    boxes=boxes,
-                    names=names,
-                    scene_grid_size=G,
-                    glimpse_grid_size=cfg.glimpse_grid_size,
-                    initial_scene=vd.initial_scene,
-                    hidden_spatials=canvas_spatials if canvas_spatials[0] is not None else None,
-                    initial_hidden_spatial=vd.initial_canvas_spatial,
-                )
-                log_figure(exp, fig, "train/pca", step)
+                if is_rgb:
+                    fig = plot_multistep_recon(
+                        full_img=vd.image,
+                        target_patches=vd.target_features,
+                        scenes=scenes,
+                        glimpses=glimpses,
+                        boxes=boxes,
+                        names=names,
+                        scene_grid_size=G,
+                        initial_scene=vd.initial_scene,
+                    )
+                    log_figure(exp, fig, "train/reconstruction", step)
+                else:
+                    canvas_spatials = [vs.canvas_spatial for vs in vd.viz_samples]
+                    fig = plot_multistep_pca(
+                        full_img=vd.image,
+                        teacher=vd.target_features,
+                        scenes=scenes,
+                        glimpses=glimpses,
+                        boxes=boxes,
+                        names=names,
+                        scene_grid_size=G,
+                        glimpse_grid_size=cfg.glimpse_grid_size,
+                        initial_scene=vd.initial_scene,
+                        hidden_spatials=canvas_spatials if canvas_spatials[0] is not None else None,
+                        initial_hidden_spatial=vd.initial_canvas_spatial,
+                    )
+                    log_figure(exp, fig, "train/pca", step)
 
     # End-of-job checkpoint (always saved)
     do_save(make_ckpt_path(end_step), end_step)
