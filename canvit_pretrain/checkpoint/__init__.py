@@ -153,7 +153,7 @@ def find_latest(run_dir: Path) -> Path | None:
 
 def save(
     path: Path,
-    model: CanViTForPretraining,
+    model: CanViT,
     backbone_name: str,
     *,
     objective: str = "distillation",
@@ -177,6 +177,7 @@ def save(
     (which has no standardizers; ``canvas_patch_grid_sizes`` must be passed explicitly).
     """
     if objective == "distillation":
+        assert isinstance(model, CanViTForPretraining)
         assert isinstance(model.cfg, CanViTForPretrainingConfig)
         assert teacher_repo_id is not None and teacher_name is not None, "distillation save needs teacher fields"
         teacher_dim: int | None = model.cfg.teacher_dim

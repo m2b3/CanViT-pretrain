@@ -38,7 +38,18 @@ class TrainBatch(NamedTuple):
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(False)
-from canvit_pytorch import CLSStandardizer, PatchStandardizer  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from canvit_pytorch import (  # noqa: E402
+    CanViT,
+    CanViTConfig,
+    CanViTForPretraining,
+    CanViTForRGBReconstruction,
+    CLSStandardizer,
+    PatchStandardizer,
+    Viewpoint,
+    patchify,
+    sample_at_viewpoint,
+)
 from canvit_pytorch.backbone.vit import NormFeatures  # noqa: E402
 
 from canvit_pretrain import CanViTForPretrainingConfig  # noqa: E402
@@ -56,10 +67,17 @@ from .config import Config  # noqa: E402
 from .data import ShardedFeatureLoader, create_loaders, scene_size_px  # noqa: E402
 from .ema import EMATracker  # noqa: E402
 from .model import compile_model, compile_teacher, create_model, load_student_backbone, load_teacher  # noqa: E402
+from .objective import (  # noqa: E402
+    distillation_branch_metrics_fn,
+    distillation_loss_fn,
+    rgb_branch_metrics_fn,
+    rgb_loss_fn,
+)
 from .probe import load_probe  # noqa: E402
 from .scheduler import warmup_constant_scheduler, warmup_cosine_scheduler  # noqa: E402
-from .step import training_step  # noqa: E402
+from .step import LossFn, training_step  # noqa: E402
 from .utils import count_parameters  # noqa: E402
+from .viewpoint import Viewpoint as NamedViewpoint  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -113,6 +131,45 @@ def init_normalizer_stats_from_shard(
     log.info(f"  Scene/CLS stats from {n}/{n_total} samples")
     del shard, patches, cls
     torch.cuda.empty_cache()
+
+
+def rgb_validate(
+    *,
+    exp: comet_ml.CometExperiment,
+    step: int,
+    model: CanViTForRGBReconstruction,
+    images: Tensor,
+    canvas_grid_size: int,
+    glimpse_size_px: int,
+    n_steps: int,
+    min_viewpoint_scale: float,
+) -> None:
+    """Validation for rgb_recon: pixel reconstruction MSE over a held-out rollout.
+
+    Mirrors training (full-scene t0, then random glimpses) and logs recon MSE at t0
+    and at the final timestep — the teacher-free analog of the distillation val metrics.
+    """
+    was_training = model.training
+    model.eval()
+    target = patchify(images, model.patch_px)
+    B = images.shape[0]
+    state = model.init_state(batch_size=B, canvas_grid_size=canvas_grid_size)
+    mse_t0: Tensor | None = None
+    mse: Tensor | None = None
+    with torch.inference_mode():
+        for t in range(n_steps):
+            named = NamedViewpoint.full_scene(batch_size=B, device=images.device) if t == 0 \
+                else NamedViewpoint.random(batch_size=B, device=images.device, min_scale=min_viewpoint_scale)
+            vp = Viewpoint(centers=named.centers, scales=named.scales)
+            glimpse = sample_at_viewpoint(spatial=images, viewpoint=vp, glimpse_size_px=glimpse_size_px)
+            state = model(glimpse=glimpse, state=state, viewpoint=vp).state
+            mse = F.mse_loss(model.predict_rgb_patches(state.canvas), target)
+            if t == 0:
+                mse_t0 = mse
+    assert mse is not None and mse_t0 is not None
+    exp.log_metrics({"val/recon_loss": mse.item(), "val/recon_loss_t0": mse_t0.item()}, step=step)
+    if was_training:
+        model.train()
 
 
 def train(cfg: Config, trial: optuna.Trial) -> float:
@@ -174,6 +231,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 flat[key] = str(v) if not isinstance(v, (int, float, bool, str, type(None))) else v
         return flat
 
+    is_rgb = cfg.objective == "rgb_recon"
+
     # Determine checkpoint source and load mode
     # Priority: run_dir/latest.pt (RESUME) > seed_ckpt (SEED) > hf_seed_ckpt (HF SEED) > fresh
     assert not (cfg.seed_ckpt and cfg.hf_seed_ckpt), "seed_ckpt and hf_seed_ckpt are mutually exclusive"
@@ -190,6 +249,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         is_seeding = True
         log.info(f"SEED mode: loading weights from {ckpt_path_to_load} (fresh opt/sched/step)")
     elif cfg.hf_seed_ckpt is not None:
+        assert not is_rgb, "hf_seed_ckpt is distillation-only; rgb_recon starts fresh or resumes a local ckpt"
         from canvit_pytorch.model.pretraining.hub import CanViTForPretrainingHFHub
         log.info(f"HF SEED mode: loading from {cfg.hf_seed_ckpt}")
         hf_model = CanViTForPretrainingHFHub.from_pretrained(cfg.hf_seed_ckpt)
@@ -211,11 +271,13 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         # Override cfg.model from checkpoint — model arch MUST match saved weights.
         # Without this, CLI defaults (e.g. convex) override the checkpoint's config
         # (e.g. additive), causing missing/unexpected keys on load_state_dict.
-        ckpt_model_cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt_data["model_config"])
-        if ckpt_model_cfg != cfg.model:
-            log.warning(f"Overriding cfg.model from checkpoint (was {cfg.model.canvas_update_mode}, "
-                        f"now {ckpt_model_cfg.canvas_update_mode})")
-            cfg.model = ckpt_model_cfg
+        # rgb_recon rebuilds its CanViTConfig from ckpt model_config at model creation.
+        if not is_rgb:
+            ckpt_model_cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt_data["model_config"])
+            if ckpt_model_cfg != cfg.model:
+                log.warning(f"Overriding cfg.model from checkpoint (was {cfg.model.canvas_update_mode}, "
+                            f"now {ckpt_model_cfg.canvas_update_mode})")
+                cfg.model = ckpt_model_cfg
 
     # === COMET EXPERIMENT ===
     # RESUME mode: continue existing experiment. SEED/FRESH mode: new experiment.
@@ -238,30 +300,48 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
     if slurm_job_id := os.environ.get("SLURM_JOB_ID"):
         exp.log_parameters({"slurm_job_id": slurm_job_id})
 
-    teacher = load_teacher(cfg)
-    log.info(f"Teacher params: {count_parameters(teacher):,}")
-
-    probe = load_probe(cfg.teacher_name, cfg.device)
+    # Teacher + IN1k probe exist only for the distillation objective. rgb_recon is teacher-free.
+    teacher = None if is_rgb else load_teacher(cfg)
+    probe = None if is_rgb else load_probe(cfg.teacher_name, cfg.device)
+    if teacher is not None:
+        log.info(f"Teacher params: {count_parameters(teacher):,}")
     if probe is not None:
         log.info(f"Loaded IN1k probe for {cfg.teacher_name}")
 
     student_backbone = load_student_backbone(cfg)
     log.info(f"Student backbone params: {count_parameters(student_backbone):,}")
 
-    bundle = create_model(student_backbone, teacher.embed_dim, cfg)
-    model, glimpse_size_px = bundle.model, bundle.glimpse_size_px
-
-    if cfg.compile:
-        if cfg.combo_kernels:
-            torch._inductor.config.combo_kernels = True  # type: ignore[attr-defined]
-            log.info("Compiling teacher and model (combo_kernels=True, backward_pass_autocast=off)")
+    model: CanViT
+    if is_rgb:
+        # rgb model config: from checkpoint when resuming, else from cfg.model's base fields.
+        if ckpt_data is not None and not is_seeding:
+            rgb_cfg = dacite.from_dict(CanViTConfig, ckpt_data["model_config"])
         else:
-            log.info("Compiling teacher and model (backward_pass_autocast=off)")
-        compile_teacher(teacher)
-        compile_model(model)
+            rgb_cfg = CanViTConfig(**{k: getattr(cfg.model, k) for k in CanViTConfig.__dataclass_fields__})
+        model = CanViTForRGBReconstruction(
+            backbone=student_backbone, cfg=rgb_cfg, backbone_name=cfg.backbone_name,
+        ).to(cfg.device)
+        glimpse_size_px = cfg.glimpse_grid_size * student_backbone.patch_size_px
+        log.info(f"RGB-reconstruction model: glimpse={glimpse_size_px}px, patch={model.patch_px}px")
+        if cfg.compile:
+            log.info("Compiling model (rgb_recon, no teacher)")
+            model.compile()
+        patch_size = student_backbone.patch_size_px
+    else:
+        assert teacher is not None
+        bundle = create_model(student_backbone, teacher.embed_dim, cfg)
+        model, glimpse_size_px = bundle.model, bundle.glimpse_size_px
+        if cfg.compile:
+            if cfg.combo_kernels:
+                torch._inductor.config.combo_kernels = True  # type: ignore[attr-defined]
+                log.info("Compiling teacher and model (combo_kernels=True, backward_pass_autocast=off)")
+            else:
+                log.info("Compiling teacher and model (backward_pass_autocast=off)")
+            compile_teacher(teacher)
+            compile_model(model)
+        patch_size = teacher.model.config.patch_size
 
     G = cfg.canvas_patch_grid_size
-    patch_size = teacher.model.config.patch_size
     scene_size = scene_size_px(G, patch_size)
     log.info(f"Grid size: {G}, scene size: {scene_size}px")
 
@@ -328,7 +408,12 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         weights_to_load = hf_seed_state_dict
 
     if weights_to_load is not None:
-        load_state_dict_flexible(model, weights_to_load)
+        if is_rgb:
+            # rgb_recon has no standardizers; require an exact match.
+            model.load_state_dict(weights_to_load)
+        else:
+            assert isinstance(model, CanViTForPretraining)
+            load_state_dict_flexible(model, weights_to_load)
 
     # === RESTORE OPTIMIZER/SCHEDULER (RESUME mode only) ===
     if ckpt_data is not None and not is_seeding:
@@ -360,6 +445,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         return run_dir / f"step-{step}.pt"
 
     def compute_raw_targets(images: Tensor, sz: int) -> NormFeatures:
+        assert teacher is not None
         with amp_ctx:
             if images.shape[-1] != sz:
                 images = torch.nn.functional.interpolate(
@@ -368,22 +454,30 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             feats = teacher.forward_norm_features(images)
             return NormFeatures(patches=feats.patches.float(), cls=feats.cls.float())
 
-    # Use model's own standardizers — their state is part of model.state_dict(),
-    # so it travels correctly with HF Hub upload/download and checkpoint save/load.
-    cls_norm, scene_norm = model.standardizers(G)
+    # Teacher feature standardizers exist only for distillation. rgb_recon reconstructs
+    # raw pixels and has no standardizers.
+    cls_norm: CLSStandardizer | None = None
+    scene_norm: PatchStandardizer | None = None
+    if not is_rgb:
+        # Use model's own standardizers — their state is part of model.state_dict(),
+        # so it travels correctly with HF Hub upload/download and checkpoint save/load.
+        assert isinstance(model, CanViTForPretraining)
+        cls_norm, scene_norm = model.standardizers(G)
 
-    need_init = cfg.reset_normalizer or not scene_norm.initialized
-    if cfg.reset_normalizer:
-        log.info("Reset normalizer: will re-init from shard")
-    elif scene_norm.initialized:
-        log.info("Standardizer stats loaded from model state_dict")
+        need_init = cfg.reset_normalizer or not scene_norm.initialized
+        if cfg.reset_normalizer:
+            log.info("Reset normalizer: will re-init from shard")
+        elif scene_norm.initialized:
+            log.info("Standardizer stats loaded from model state_dict")
 
-    if need_init:
-        assert cfg.feature_base_dir is not None, "feature_base_dir required for standardizer init"
-        shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
-        shard_files = sorted(shards_dir.glob("*.pt"))
-        assert shard_files, f"No shards in {shards_dir}"
-        init_normalizer_stats_from_shard(shard_files[0], scene_norm, cls_norm, cfg.device, cfg.normalizer_max_samples)
+        if need_init:
+            assert cfg.feature_base_dir is not None, "feature_base_dir required for standardizer init"
+            shards_dir = cfg.feature_base_dir / cfg.teacher_name / str(cfg.scene_resolution) / "shards"
+            shard_files = sorted(shards_dir.glob("*.pt"))
+            assert shard_files, f"No shards in {shards_dir}"
+            init_normalizer_stats_from_shard(
+                shard_files[0], scene_norm, cls_norm, cfg.device, cfg.normalizer_max_samples,
+            )
 
     log.info(
         f"Training: {cfg.n_full_start_branches} full + {cfg.n_random_start_branches} random branches,"
@@ -395,8 +489,30 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
     nb = cfg.non_blocking_transfer  # Ablation flag for async transfers
 
+    def do_save(ckpt_path: Path, save_step: int) -> None:
+        """Save a checkpoint (objective-aware) and repoint latest.pt."""
+        ema_loss = ema.get("total_loss")
+        save_checkpoint(
+            ckpt_path, model, cfg.backbone_name,
+            objective=cfg.objective,
+            teacher_repo_id=None if is_rgb else cfg.teacher_repo_id,
+            teacher_name=None if is_rgb else cfg.teacher_name,
+            dataset=cfg.dataset,
+            glimpse_grid_size=cfg.glimpse_grid_size,
+            scene_resolution=cfg.scene_resolution,
+            canvas_patch_grid_sizes=[G] if is_rgb else None,
+            step=save_step, train_loss=ema_loss.item() if ema_loss is not None else None,
+            comet_id=exp.get_key(),
+            optimizer_state=optimizer.state_dict(),
+            scheduler_state=scheduler.state_dict(),
+            training_config_history=training_config_history,
+            provenance_history=provenance_history,
+        )
+        update_symlink(run_dir / "latest.pt", ckpt_path)
+
     def load_train_batch() -> TrainBatch:
-        """Load training batch from precomputed features."""
+        """Load distillation training batch (precomputed teacher features + standardization)."""
+        assert scene_norm is not None and cls_norm is not None
         # non_blocking=True: CPU returns immediately, GPU ops serialize on same stream
         # Safe because we don't mutate source tensors after transfer
         images, raw_patches, raw_cls, labels = train_loader.next()
@@ -408,6 +524,11 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         norm_patches = scene_norm(raw_patches)
         norm_cls = cls_norm(raw_cls.unsqueeze(1)).squeeze(1)
         return TrainBatch(images, labels, norm_patches, norm_cls, raw_patches, raw_cls)
+
+    def load_rgb_images() -> Tensor:
+        """rgb_recon needs only the scene images; teacher features in the shards are ignored."""
+        images = train_loader.next()[0]
+        return images.to(cfg.device, non_blocking=nb)
 
     # Timing accumulators for data vs GPU bottleneck analysis
     t_data_total = 0.0
@@ -441,28 +562,38 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
             val_labels = val_labels.to(cfg.device, non_blocking=nb) if probe is not None else None
             try:
                 with amp_ctx:
-                    validate(
-                        exp=exp,
-                        step=step,
-                        model=model,
-                        compute_raw_targets=compute_raw_targets,
-                        scene_normalizer=scene_norm,
-                        cls_normalizer=cls_norm,
-                        images=val_images,
-                        canvas_grid_size=G,
-                        scene_size_px=scene_size,
-                        glimpse_size_px=glimpse_size_px,
-                        n_eval_viewpoints=cfg.n_eval_viewpoints,
-                        min_viewpoint_scale=cfg.min_viewpoint_scale,
-                        prefix="val",
-                        probe=probe,
-                        labels=val_labels,
-                        log_curves=do_curves,
-                        log_pca=do_pca,
-                        teacher=teacher,
-                        log_spatial_stats=cfg.log_spatial_stats,
-                        teacher_name=cfg.teacher_name,
-                    )
+                    if is_rgb:
+                        assert isinstance(model, CanViTForRGBReconstruction)
+                        rgb_validate(
+                            exp=exp, step=step, model=model, images=val_images,
+                            canvas_grid_size=G, glimpse_size_px=glimpse_size_px,
+                            n_steps=cfg.n_eval_viewpoints, min_viewpoint_scale=cfg.min_viewpoint_scale,
+                        )
+                    else:
+                        assert isinstance(model, CanViTForPretraining)
+                        assert scene_norm is not None and cls_norm is not None
+                        validate(
+                            exp=exp,
+                            step=step,
+                            model=model,
+                            compute_raw_targets=compute_raw_targets,
+                            scene_normalizer=scene_norm,
+                            cls_normalizer=cls_norm,
+                            images=val_images,
+                            canvas_grid_size=G,
+                            scene_size_px=scene_size,
+                            glimpse_size_px=glimpse_size_px,
+                            n_eval_viewpoints=cfg.n_eval_viewpoints,
+                            min_viewpoint_scale=cfg.min_viewpoint_scale,
+                            prefix="val",
+                            probe=probe,
+                            labels=val_labels,
+                            log_curves=do_curves,
+                            log_pca=do_pca,
+                            teacher=teacher,
+                            log_spatial_stats=cfg.log_spatial_stats,
+                            teacher_name=cfg.teacher_name,
+                        )
             except Exception:
                 log.error(f"!!! VALIDATION FAILED at step {step} !!!\n{traceback.format_exc()}")
 
@@ -471,29 +602,37 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         if _checkpoint_requested:
             log.info(f"Saving signal-triggered checkpoint at step {step}")
             _checkpoint_requested = False
-            ema_loss = ema.get("total_loss")
-            ckpt_path = make_ckpt_path(step)
-            save_checkpoint(
-                ckpt_path, model, cfg.backbone_name,
-                teacher_repo_id=cfg.teacher_repo_id,
-                teacher_name=cfg.teacher_name,
-                dataset=cfg.dataset,
-                glimpse_grid_size=cfg.glimpse_grid_size,
-                scene_resolution=cfg.scene_resolution,
-                step=step, train_loss=ema_loss.item() if ema_loss is not None else None,
-                comet_id=exp.get_key(),
-                optimizer_state=optimizer.state_dict(),
-                scheduler_state=scheduler.state_dict(),
-                training_config_history=training_config_history,
-                provenance_history=provenance_history,
-            )
-            update_symlink(run_dir / "latest.pt", ckpt_path)
+            do_save(make_ckpt_path(step), step)
 
         # === TRAINING PHASE (only for step < end_step) ===
         if step < end_step:
             t_data_start = time.perf_counter()
-            if batch is None:
+            loss_fn: LossFn
+            viz_predict_fn = None
+            viz_target = None
+            if is_rgb:
+                assert isinstance(model, CanViTForRGBReconstruction)
+                images = load_rgb_images()
+                pixel_target = patchify(images, model.patch_px)
+                loss_fn = rgb_loss_fn(model=model, pixel_target=pixel_target)
+                branch_metrics_fn = rgb_branch_metrics_fn(model=model, pixel_target=pixel_target)
+            else:
+                assert isinstance(model, CanViTForPretraining)
+                assert scene_norm is not None and cls_norm is not None
                 batch = load_train_batch()
+                images = batch.images
+                loss_fn = distillation_loss_fn(
+                    model=model, scene_target=batch.scene_target, cls_target=batch.cls_target,
+                    enable_scene_patches_loss=cfg.enable_scene_patches_loss,
+                    enable_scene_cls_loss=cfg.enable_scene_cls_loss,
+                )
+                branch_metrics_fn = distillation_branch_metrics_fn(
+                    model=model, scene_target=batch.scene_target, cls_target=batch.cls_target,
+                    raw_scene_target=batch.raw_scene_target, raw_cls_target=batch.raw_cls_target,
+                    scene_denorm=scene_norm.destandardize, cls_denorm=cls_norm.destandardize,
+                )
+                viz_predict_fn = model.predict_teacher_scene
+                viz_target = batch.scene_target
             t_data = time.perf_counter() - t_data_start
             t_data_total += t_data
 
@@ -502,15 +641,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
 
             step_metrics = training_step(
                 model=model,
-                images=batch.images,
-                scene_target=batch.scene_target,
-                cls_target=batch.cls_target,
-                raw_scene_target=batch.raw_scene_target,
-                raw_cls_target=batch.raw_cls_target,
-                scene_denorm=scene_norm.destandardize,
-                cls_denorm=cls_norm.destandardize,
-                enable_scene_patches_loss=cfg.enable_scene_patches_loss,
-                enable_scene_cls_loss=cfg.enable_scene_cls_loss,
+                images=images,
+                loss_fn=loss_fn,
+                branch_metrics_fn=branch_metrics_fn,
                 glimpse_size_px=glimpse_size_px,
                 canvas_grid_size=G,
                 n_full_start_branches=cfg.n_full_start_branches,
@@ -519,8 +652,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 continue_prob=cfg.continue_prob,
                 min_viewpoint_scale=cfg.min_viewpoint_scale,
                 amp_ctx=amp_ctx,
-
-                collect_viz=do_pca,
+                collect_viz=do_pca and not is_rgb,
+                viz_predict_fn=viz_predict_fn,
+                viz_target=viz_target,
             )
 
             grad_norm_t = torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip)
@@ -539,14 +673,8 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 if m is None:
                     continue
                 ema.update(f"{prefix}/loss", m.loss)
-                if cfg.enable_scene_patches_loss:
-                    ema.update(f"{prefix}/scene_patches_loss", m.scene_patches_loss)
-                if cfg.enable_scene_cls_loss:
-                    ema.update(f"{prefix}/scene_cls_loss", m.scene_cls_loss)
-                ema.update(f"{prefix}/scene_cos_raw", m.scene_cos_raw)
-                ema.update(f"{prefix}/scene_cos_norm", m.scene_cos_norm)
-                ema.update(f"{prefix}/cls_cos_raw", m.cls_cos_raw)
-                ema.update(f"{prefix}/cls_cos_norm", m.cls_cos_norm)
+                for key, val in m.metrics.items():
+                    ema.update(f"{prefix}/{key}", val)
 
             if step % cfg.log_every == 0:
                 grad_norm = grad_norm_t.item()
@@ -601,7 +729,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 assert vd.initial_scene is not None
                 fig = plot_multistep_pca(
                     full_img=vd.image,
-                    teacher=vd.teacher_features,
+                    teacher=vd.target_features,
                     scenes=scenes,
                     glimpses=glimpses,
                     boxes=boxes,
@@ -615,23 +743,7 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
                 log_figure(exp, fig, "train/pca", step)
 
     # End-of-job checkpoint (always saved)
-    ema_loss = ema.get("total_loss")
-    ckpt_path = make_ckpt_path(end_step)
-    save_checkpoint(
-        ckpt_path, model, cfg.backbone_name,
-        teacher_repo_id=cfg.teacher_repo_id,
-        teacher_name=cfg.teacher_name,
-        dataset=cfg.dataset,
-        glimpse_grid_size=cfg.glimpse_grid_size,
-        scene_resolution=cfg.scene_resolution,
-        step=end_step, train_loss=ema_loss.item() if ema_loss is not None else None,
-        comet_id=exp.get_key(),
-        optimizer_state=optimizer.state_dict(),
-        scheduler_state=scheduler.state_dict(),
-        training_config_history=training_config_history,
-        provenance_history=provenance_history,
-    )
-    update_symlink(run_dir / "latest.pt", ckpt_path)
+    do_save(make_ckpt_path(end_step), end_step)
 
     ema_loss = ema.get("total_loss")
     final_loss = ema_loss.item() if ema_loss is not None else float("inf")
