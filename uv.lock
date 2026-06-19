@@ -114,7 +114,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "canvit-pytorch", git = "https://github.com/m2b3/CanViT-PyTorch.git" },
+    { name = "canvit-pytorch", git = "https://github.com/m2b3/CanViT-PyTorch.git?branch=rgb-recon" },
     { name = "comet-ml" },
     { name = "dacite" },
     { name = "dinov3", git = "https://github.com/facebookresearch/dinov3.git?rev=54694f7627fd815f62a5dcc82944ffa6153bbb76" },
@@ -149,8 +149,8 @@ dev = [
 
 [[package]]
 name = "canvit-pytorch"
-version = "0.1.9"
-source = { git = "https://github.com/m2b3/CanViT-PyTorch.git#7937b73b97a8896ba10b89b3c70af5f38247f22f" }
+version = "0.1.10"
+source = { git = "https://github.com/m2b3/CanViT-PyTorch.git?branch=rgb-recon#9d1e213cd288f28a4d29a53c0ccbd37815912d8a" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },

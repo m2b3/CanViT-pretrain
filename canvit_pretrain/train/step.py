@@ -1,4 +1,9 @@
-"""Training step with truncated BPTT and independent branches."""
+"""Training step with truncated BPTT and independent branches.
+
+Objective-agnostic: the per-timestep loss and the end-of-branch metrics are injected
+(see :mod:`canvit_pretrain.train.objective`). The TBPTT / independent-branch control flow
+here does not know whether it is distilling teacher features or reconstructing pixels.
+"""
 
 import random
 from collections.abc import Callable
@@ -8,11 +13,8 @@ from typing import NamedTuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from canvit_pytorch import CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
+from canvit_pytorch import CanViT, CanViTOutput, RecurrentState, Viewpoint, sample_at_viewpoint
 from torch import Tensor
-
-from canvit_pretrain import CanViTForPretraining
 
 from .viewpoint import Viewpoint as NamedViewpoint
 from .viewpoint import ViewpointType
@@ -21,25 +23,25 @@ from .viz.sample import VizSampleData, extract_sample0_viz
 
 
 class LossOutput(NamedTuple):
-    """Output from compute_loss - individual losses + combined mean."""
+    """Per-timestep loss: a backward target plus named scalar components for logging."""
 
-    scene_patches_loss: Tensor
-    scene_cls_loss: Tensor
-    combined: Tensor  # sum of active losses
-    scene_pred: Tensor  # for cosine similarity metrics
-    cls_pred: Tensor
+    combined: Tensor  # summed active losses, carries grad
+    components: dict[str, Tensor]  # named per-step scalar losses (e.g. scene_patches_loss)
 
 
 class BranchMetrics(NamedTuple):
-    """Metrics for a branch type."""
+    """Aggregated metrics for one branch: the scalar loss + named EMA scalars."""
 
     loss: Tensor
-    scene_patches_loss: Tensor
-    scene_cls_loss: Tensor
-    scene_cos_raw: Tensor
-    scene_cos_norm: Tensor
-    cls_cos_raw: Tensor
-    cls_cos_norm: Tensor
+    metrics: dict[str, Tensor]
+
+
+# Per-timestep loss given the model output. Built by the objective (closes over targets/model).
+LossFn = Callable[[CanViTOutput], LossOutput]
+# End-of-branch metrics from the final recurrent state (e.g. teacher cosine sims).
+BranchMetricsFn = Callable[[RecurrentState], dict[str, Tensor]]
+# Maps final canvas -> a per-sample prediction for the viz panel (objective-specific).
+VizPredictFn = Callable[[Tensor], Tensor]
 
 
 @dataclass
@@ -47,7 +49,7 @@ class TrainVizData:
     """Viz data collected during one training branch (sample 0 only)."""
 
     image: np.ndarray  # [H, W, 3] denormalized input
-    teacher_features: np.ndarray  # [G², D] normalized teacher features (target)
+    target_features: np.ndarray  # [G², D] reconstruction target (teacher features or pixels)
     viewpoints: list[NamedViewpoint]  # viewpoints used at each timestep
     viz_samples: list[VizSampleData] = field(default_factory=list)  # per-timestep
     initial_scene: np.ndarray | None = None  # [G², D] initial scene prediction
@@ -72,11 +74,8 @@ class ChunkState:
     vpe: Tensor | None
     chunk_combined_loss: Tensor  # with grad
     total_combined_loss: Tensor  # detached
-    total_scene_patches_loss: Tensor
-    total_scene_cls_loss: Tensor
+    component_totals: dict[str, Tensor]  # detached, per named component
     n_steps: int
-    scene_pred: Tensor
-    cls_pred: Tensor
 
 
 class StepOutput(NamedTuple):
@@ -88,16 +87,10 @@ class StepOutput(NamedTuple):
 
 def training_step(
     *,
-    model: CanViTForPretraining,
+    model: CanViT,
     images: Tensor,
-    scene_target: Tensor,
-    cls_target: Tensor,
-    raw_scene_target: Tensor,
-    raw_cls_target: Tensor,
-    scene_denorm: Callable[[Tensor], Tensor],
-    cls_denorm: Callable[[Tensor], Tensor],
-    enable_scene_patches_loss: bool,
-    enable_scene_cls_loss: bool,
+    loss_fn: LossFn,
+    branch_metrics_fn: BranchMetricsFn,
     glimpse_size_px: int,
     canvas_grid_size: int,
     n_full_start_branches: int,
@@ -107,16 +100,24 @@ def training_step(
     min_viewpoint_scale: float,
     amp_ctx: AbstractContextManager,
     collect_viz: bool = False,
+    viz_predict_fn: VizPredictFn | None = None,
+    viz_target: Tensor | None = None,
 ) -> StepMetrics:
     """Training with truncated BPTT and independent branches.
 
     Each branch is fully independent: own t0, own trajectory, own backward.
     No retain_graph needed. Memory is O(chunk_size), not O(n_branches).
+
+    ``loss_fn`` and ``branch_metrics_fn`` are supplied by the objective. Viz (sample-0
+    PCA panels) is teacher/RGB-specific via ``viz_predict_fn`` + ``viz_target`` and only
+    runs when ``collect_viz`` is set; callers that don't want viz pass ``collect_viz=False``.
     """
     n_branches = n_full_start_branches + n_random_start_branches
     assert n_branches >= 1
     assert chunk_size >= 1
     assert 0.0 <= continue_prob <= 1.0
+    if collect_viz:
+        assert viz_predict_fn is not None and viz_target is not None, "viz needs viz_predict_fn + viz_target"
     device = images.device
     B = images.shape[0]
 
@@ -154,33 +155,10 @@ def training_step(
         out = model(glimpse=glimpse, state=state, viewpoint=vp)
         return StepOutput(out=out, glimpse=glimpse)
 
-    def compute_loss(out: CanViTOutput) -> LossOutput:
-        scene_pred = model.predict_teacher_scene(out.state.canvas)
-        cls_pred = model.predict_scene_teacher_cls(out.state.recurrent_cls)
-
-        scene_patches_loss = torch.zeros((), device=device)
-        scene_cls_loss = torch.zeros((), device=device)
-
-        if enable_scene_patches_loss:
-            scene_patches_loss = F.mse_loss(scene_pred, scene_target)
-        if enable_scene_cls_loss:
-            scene_cls_loss = F.mse_loss(cls_pred, cls_target)
-
-        active: list[Tensor] = []
-        if enable_scene_patches_loss:
-            active.append(scene_patches_loss)
-        if enable_scene_cls_loss:
-            active.append(scene_cls_loss)
-        assert len(active) > 0, "At least one loss must be enabled"
-        combined = torch.stack(active).sum()
-
-        return LossOutput(
-            scene_patches_loss=scene_patches_loss,
-            scene_cls_loss=scene_cls_loss,
-            combined=combined,
-            scene_pred=scene_pred,
-            cls_pred=cls_pred,
-        )
+    def record_viz_sample(out: CanViTOutput, glimpse: Tensor) -> None:
+        assert viz_data is not None and viz_predict_fn is not None
+        pred = viz_predict_fn(out.state.canvas)
+        viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, pred, model))
 
     def run_branch(t0_type: ViewpointType, branch_idx: int) -> BranchMetrics:
         nonlocal viz_data
@@ -188,11 +166,12 @@ def training_step(
 
         # Capture initial state for viz (before any glimpses)
         if do_viz:
-            init_scene = model.predict_teacher_scene(state_init.canvas)
+            assert viz_predict_fn is not None and viz_target is not None
+            init_scene = viz_predict_fn(state_init.canvas)
             init_spatial = model.get_spatial(state_init.canvas[0:1])[0]
             viz_data = TrainVizData(
                 image=imagenet_denormalize_to_numpy(images[0]),
-                teacher_features=scene_target[0].cpu().float().numpy(),
+                target_features=viz_target[0].cpu().float().numpy(),
                 viewpoints=[],
                 viz_samples=[],
                 initial_scene=init_scene[0].detach().cpu().float().numpy(),
@@ -205,23 +184,20 @@ def training_step(
             vp0 = to_canvit_vp(vp0_named)
             step_out = forward_glimpse(state=state_init, vp=vp0)
             out, glimpse = step_out.out, step_out.glimpse
-            L = compute_loss(out)
+            L = loss_fn(out)
 
         if do_viz:
             assert viz_data is not None
             viz_data.viewpoints.append(vp0_named)
-            viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, model))
+            record_viz_sample(out, glimpse)
 
         chunk = ChunkState(
             state=out.state,
             vpe=out.vpe,
             chunk_combined_loss=L.combined.float(),
             total_combined_loss=L.combined.detach().float(),
-            total_scene_patches_loss=L.scene_patches_loss.detach().float(),
-            total_scene_cls_loss=L.scene_cls_loss.detach().float(),
+            component_totals={k: v.detach().float() for k, v in L.components.items()},
             n_steps=1,
-            scene_pred=L.scene_pred,
-            cls_pred=L.cls_pred,
         )
 
         # t=0 constitutes a complete chunk when chunk_size=1.
@@ -245,18 +221,17 @@ def training_step(
             with amp_ctx:
                 step_out = forward_glimpse(state=chunk.state, vp=vp)
                 out, glimpse = step_out.out, step_out.glimpse
-                L = compute_loss(out)
+                L = loss_fn(out)
 
             if do_viz:
                 assert viz_data is not None
                 viz_data.viewpoints.append(vp_named)
-                viz_data.viz_samples.append(extract_sample0_viz(out, glimpse, L.scene_pred, model))
+                record_viz_sample(out, glimpse)
 
             chunk.chunk_combined_loss = chunk.chunk_combined_loss + L.combined.float()
             chunk.total_combined_loss = chunk.total_combined_loss + L.combined.detach().float()
-            chunk.total_scene_patches_loss = chunk.total_scene_patches_loss + L.scene_patches_loss.detach().float()
-            chunk.total_scene_cls_loss = chunk.total_scene_cls_loss + L.scene_cls_loss.detach().float()
-            chunk.scene_pred, chunk.cls_pred = L.scene_pred, L.cls_pred
+            for k, v in L.components.items():
+                chunk.component_totals[k] = chunk.component_totals[k] + v.detach().float()
             chunk.n_steps += 1
 
             is_chunk_end = ((t + 1) % chunk_size == 0)
@@ -281,17 +256,9 @@ def training_step(
                 chunk.vpe = out.vpe
 
         n = chunk.n_steps
-        scene_pred_raw = scene_denorm(chunk.scene_pred)
-        cls_pred_raw = cls_denorm(chunk.cls_pred.unsqueeze(1)).squeeze(1)
-        return BranchMetrics(
-            loss=chunk.total_combined_loss / n,
-            scene_patches_loss=chunk.total_scene_patches_loss / n,
-            scene_cls_loss=chunk.total_scene_cls_loss / n,
-            scene_cos_raw=F.cosine_similarity(scene_pred_raw, raw_scene_target, dim=-1).mean(),
-            scene_cos_norm=F.cosine_similarity(chunk.scene_pred, scene_target, dim=-1).mean(),
-            cls_cos_raw=F.cosine_similarity(cls_pred_raw, raw_cls_target, dim=-1).mean(),
-            cls_cos_norm=F.cosine_similarity(chunk.cls_pred, cls_target, dim=-1).mean(),
-        )
+        metrics: dict[str, Tensor] = {k: v / n for k, v in chunk.component_totals.items()}
+        metrics.update(branch_metrics_fn(chunk.state))
+        return BranchMetrics(loss=chunk.total_combined_loss / n, metrics=metrics)
 
     # Run all branches (full-start first, then random-start)
     branch_idx = 0
@@ -306,14 +273,10 @@ def training_step(
     def aggregate(metrics: list[BranchMetrics]) -> BranchMetrics | None:
         if not metrics:
             return None
+        keys = metrics[0].metrics.keys()
         return BranchMetrics(
             loss=torch.stack([m.loss for m in metrics]).mean(),
-            scene_patches_loss=torch.stack([m.scene_patches_loss for m in metrics]).mean(),
-            scene_cls_loss=torch.stack([m.scene_cls_loss for m in metrics]).mean(),
-            scene_cos_raw=torch.stack([m.scene_cos_raw for m in metrics]).mean(),
-            scene_cos_norm=torch.stack([m.scene_cos_norm for m in metrics]).mean(),
-            cls_cos_raw=torch.stack([m.cls_cos_raw for m in metrics]).mean(),
-            cls_cos_norm=torch.stack([m.cls_cos_norm for m in metrics]).mean(),
+            metrics={k: torch.stack([m.metrics[k] for m in metrics]).mean() for k in keys},
         )
 
     full_start = aggregate(full_metrics)
