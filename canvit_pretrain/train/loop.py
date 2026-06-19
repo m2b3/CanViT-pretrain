@@ -19,6 +19,7 @@ from typing import NamedTuple
 
 import comet_ml
 import dacite
+import numpy as np
 import optuna
 import torch
 from torch import Tensor, nn
@@ -79,6 +80,7 @@ from .step import LossFn, training_step  # noqa: E402
 from .utils import count_parameters  # noqa: E402
 from .viewpoint import Viewpoint as NamedViewpoint  # noqa: E402
 from .viz import log_figure, plot_multistep_pca, validate  # noqa: E402
+from .viz.image import imagenet_denormalize_to_numpy  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -166,8 +168,16 @@ def rgb_validate(
             mse = F.mse_loss(model.predict_rgb_patches(state.canvas), target)
             if t == 0:
                 mse_t0 = mse
+        recon_img = model.predict_rgb_image(state.canvas)[0]  # [3, H, W] after the full rollout
     assert mse is not None and mse_t0 is not None
     exp.log_metrics({"val/recon_loss": mse.item(), "val/recon_loss_t0": mse_t0.item()}, step=step)
+
+    # Reconstruction panel: target | reconstruction (sample 0), the natural viz for a pixel objective.
+    target_np = imagenet_denormalize_to_numpy(images[0])
+    recon_np = imagenet_denormalize_to_numpy(recon_img)
+    panel = np.concatenate([target_np, recon_np], axis=1).clip(0.0, 1.0)
+    exp.log_image((panel * 255).astype(np.uint8), name="val/reconstruction", step=step)
+
     if was_training:
         model.train()
 
