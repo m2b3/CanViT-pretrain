@@ -21,6 +21,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", type=Path, required=True)
     ap.add_argument("--out-dir", type=Path, required=True)
+    ap.add_argument("--fix-fingers", action="store_true",
+                    help="use fix_fingers='clip_xmax' for reliable alpha (removes spurious >8 'fingers')")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -30,7 +32,7 @@ def main() -> None:
 
     model, ckpt = load_model(args.ckpt, "cpu")
     watcher = ww.WeightWatcher(model=model)
-    details = watcher.analyze()
+    details = watcher.analyze(fix_fingers="clip_xmax") if args.fix_fingers else watcher.analyze()
     summary = watcher.get_summary(details)
 
     details["step"] = step
