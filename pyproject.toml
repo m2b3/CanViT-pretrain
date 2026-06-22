@@ -27,6 +27,7 @@ dependencies = [
     "matplotlib",
     "xxhash",
     "opencv-python-headless>=4.13.0.90",
+    "weightwatcher>=0.7.7",
 ]
 
 [build-system]
