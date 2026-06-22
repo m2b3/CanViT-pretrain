@@ -13,7 +13,8 @@
 set -eu
 source slurm/env.sh
 mkdir -p logs
-SCRIPT="$1"; MANIFEST="$2"; OUT="$3"
+read -ra SCRIPT <<< "$1"   # "$1" may be "script.py --flag" -> split into argv
+MANIFEST="$2"; OUT="$3"
 CKPT=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$MANIFEST")
 echo "[$(date '+%H:%M:%S')] task ${SLURM_ARRAY_TASK_ID} -> ${CKPT}"
-exec uv run python "$SCRIPT" --ckpt "$CKPT" --out-dir "$OUT"
+exec uv run python "${SCRIPT[@]}" --ckpt "$CKPT" --out-dir "$OUT"
