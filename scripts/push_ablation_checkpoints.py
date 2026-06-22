@@ -1,10 +1,7 @@
 """Push ablation checkpoints to HuggingFace Hub.
 
-Migrates legacy standardizers in-memory, so the same script handles raw
-and migrated checkpoints uniformly.
-
-Naming: {owner}/canvitb16-abl-{slug}-{YYYYMMDD}
-  Date from checkpoint timestamp. Slug from registry.
+Naming: {owner}/canvitb16-abl-{slug}-{YYYY-MM-DD} (date from checkpoint
+timestamp, slug from the registry below).
 
 Usage:
     uv run python scripts/push_ablation_checkpoints.py --ckpt-dir <path> --dry-run
@@ -17,8 +14,11 @@ from pathlib import Path
 
 import torch
 import tyro
-from canvit_pytorch.model.pretraining.hub import upload_to_hf
-from canvit_pytorch.model.pretraining.impl import CanViTForPretraining
+from canvit_pytorch.model.pretraining.hub import (
+    descriptive_metadata,
+    reconstruct_pretrain_model,
+    upload_to_hf,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -38,44 +38,6 @@ _SLUG: dict[str, str] = {
     "abl-rw-stride6-200k": "rw-stride6",
     "abl-vit-s-200k": "vit-s",
 }
-
-# Keys that are large/non-serializable — excluded from HF metadata.
-_SKIP_METADATA = {"state_dict", "optimizer_state", "scheduler_state"}
-
-
-def _migrate_standardizers_in_place(raw: dict) -> None:
-    """Migrate legacy standardizer keys into state_dict if needed. Mutates raw."""
-    scene_legacy = raw.get("scene_norm_state")
-    cls_legacy = raw.get("cls_norm_state")
-    if scene_legacy is None:
-        return  # Already migrated or current format
-
-    assert cls_legacy is not None, "scene_norm_state present but cls_norm_state missing"
-    assert scene_legacy["_initialized"].item(), "Legacy scene stats not initialized"
-    assert cls_legacy["_initialized"].item(), "Legacy cls stats not initialized"
-
-    grids = raw["canvas_patch_grid_sizes"]
-    assert len(grids) == 1, f"Expected 1 grid size, got {grids}"
-    G = str(grids[0])
-    sd = raw["state_dict"]
-
-    for prefix, legacy in [("scene_standardizers", scene_legacy), ("cls_standardizers", cls_legacy)]:
-        for stat_name in ["mean", "var", "_initialized"]:
-            sd[f"{prefix}.{G}.{stat_name}"] = legacy[stat_name]
-
-    del raw["scene_norm_state"]
-    del raw["cls_norm_state"]
-    log.info("    migrated standardizers in-memory (grid=%s)", G)
-
-
-def _verify_standardizers(model: CanViTForPretraining) -> None:
-    """Assert all standardizers are initialized."""
-    for G in model.canvas_patch_grid_sizes:
-        _, scene_std = model.standardizers(G)
-        assert scene_std.initialized, (
-            f"Standardizer not initialized for grid {G} after loading. "
-            "Checkpoint may be corrupt."
-        )
 
 
 @dataclass
@@ -101,36 +63,15 @@ def main(args: Args) -> None:
         )
 
         raw = torch.load(f, map_location="cpu", weights_only=False)
-        _migrate_standardizers_in_place(raw)
-
-        step = raw["step"]
         ts = datetime.fromisoformat(raw["timestamp"])
-        date_str = ts.strftime("%Y-%m-%d")
-        repo_id = f"{args.owner}/canvitb16-abl-{slug}-{date_str}"
-
-        log.info("  %s → %s (step=%d, %s)", stem, repo_id, step, ts.date())
+        repo_id = f"{args.owner}/canvitb16-abl-{slug}-{ts:%Y-%m-%d}"
+        log.info("  %s → %s (step=%d, %s)", stem, repo_id, raw["step"], ts.date())
 
         if args.dry_run:
             continue
 
-        # Reconstruct model from (possibly migrated) raw checkpoint
-        import dacite
-        from canvit_pytorch.backbone import create_backbone
-        from canvit_pytorch.model.pretraining.impl import CanViTForPretrainingConfig
-
-        cfg = dacite.from_dict(CanViTForPretrainingConfig, raw["model_config"])
-        model = CanViTForPretraining(
-            backbone=create_backbone(raw["backbone_name"]),
-            cfg=cfg,
-            backbone_name=raw["backbone_name"],
-            canvas_patch_grid_sizes=raw["canvas_patch_grid_sizes"],
-        )
-        model.load_state_dict(raw["state_dict"])
-        _verify_standardizers(model)
-
-        meta = {k: v for k, v in raw.items() if k not in _SKIP_METADATA}
-        upload_to_hf(model, repo_id, private=True, extra_metadata=meta)
-
+        model = reconstruct_pretrain_model(raw)
+        upload_to_hf(model, repo_id, private=True, extra_metadata=descriptive_metadata(raw))
         del model, raw
         torch.cuda.empty_cache()
 
