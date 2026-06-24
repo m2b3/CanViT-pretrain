@@ -27,11 +27,10 @@ import torch
 from canvit_pretrain.checkpoint import load
 
 
-def discover_num_heads(model_config: dict) -> int:
-    """Find the canvas-attention head count in the (possibly nested) config dict.
-
-    Collects every value under a key containing 'head' (e.g. 'num_heads',
-    'canvas_num_heads'); asserts they agree on a single positive int.
+def discover_num_heads(model_config: dict, out_dim: int) -> int | None:
+    """Find the canvas-write head count: a 'head'-keyed config value that divides
+    out_dim into a sane head_dim (16..256). Non-fatal: returns None if unresolved
+    (global SVD does not need it; only per-head breakdown does).
     """
     found: set[int] = set()
 
@@ -46,8 +45,12 @@ def discover_num_heads(model_config: dict) -> int:
                 walk(v)
 
     walk(model_config)
-    assert len(found) == 1, f"ambiguous/absent head count in config: {sorted(found)}"
-    return next(iter(found))
+    candidates = [c for c in found if out_dim % c == 0 and 16 <= out_dim // c <= 256]
+    if len(candidates) == 1:
+        return candidates[0]
+    print(f"  [warn] head count unresolved from {sorted(found)} (out_dim={out_dim}, "
+          f"candidates={sorted(candidates)}); skipping per-head analysis")
+    return None
 
 
 def top_singular(weight: torch.Tensor) -> tuple[float, float, torch.Tensor]:
@@ -69,16 +72,18 @@ def abscos(a: torch.Tensor, b: torch.Tensor) -> float:
     return float(torch.abs(torch.nn.functional.cosine_similarity(a, b, dim=0)).item())
 
 
-def analyze_layer(weight: torch.Tensor, num_heads: int) -> dict:
+def analyze_layer(weight: torch.Tensor, num_heads: int | None) -> dict:
     out_dim, in_dim = weight.shape
-    assert out_dim % num_heads == 0, f"{out_dim} not divisible by {num_heads}"
-    head_dim = out_dim // num_heads
     g_sigma1, g_sr, g_v1 = top_singular(weight)
     heads = []
-    for h in range(num_heads):
-        wh = weight[h * head_dim : (h + 1) * head_dim, :]
-        s1, sr, v1 = top_singular(wh)
-        heads.append({"sigma1": s1, "stable_rank": sr, "v1": v1})
+    head_dim = None
+    if num_heads is not None:
+        assert out_dim % num_heads == 0, f"{out_dim} not divisible by {num_heads}"
+        head_dim = out_dim // num_heads
+        for h in range(num_heads):
+            wh = weight[h * head_dim : (h + 1) * head_dim, :]
+            s1, sr, v1 = top_singular(wh)
+            heads.append({"sigma1": s1, "stable_rank": sr, "v1": v1})
     return {
         "out_dim": out_dim,
         "in_dim": in_dim,
@@ -109,11 +114,12 @@ def main() -> None:
     for label, path in pairs:
         print(f"\n=== loading {label}: {path}", flush=True)
         ckpt = load(path, "cpu")
-        num_heads = discover_num_heads(ckpt["model_config"])
         sd = ckpt["state_dict"]
         kproj = {k: v for k, v in sd.items()
                  if "canvas_write" in k and k.endswith("k_proj.weight")}
         assert kproj, f"no canvas_write k_proj weights in {label}"
+        out_dim = next(iter(kproj.values())).shape[0]
+        num_heads = discover_num_heads(ckpt["model_config"], out_dim)
         print(f"    step={ckpt['step']} num_heads={num_heads} "
               f"k_proj layers={sorted(kproj)}", flush=True)
         results[label] = {"step": ckpt["step"], "num_heads": num_heads,
@@ -134,29 +140,12 @@ def main() -> None:
             row += f"{g['stable_rank']:>9.2f}/s{g['sigma1']:<7.1f}"
         print(row)
 
-    # ---- Report: per-head stable_rank for the deepest write layer (the canonical collapse site) ----
     deepest = layer_names[-1]
-    print(f"\n########## PER-HEAD stable_rank for {deepest} ##########")
     nh = results[labels[0]]["num_heads"]
-    print("head".ljust(8) + "".join(f"{lbl[:16]:>18}" for lbl in labels))
-    for h in range(nh):
-        row = f"{h}".ljust(8)
-        for lbl in labels:
-            row += f"{results[lbl]['layers'][deepest]['heads'][h]['stable_rank']:>18.3f}"
-        print(row)
 
-    # ---- The key tests: cross-checkpoint v1 alignment ----
-    def collapsed_heads(label: str, name: str) -> list[int]:
-        return [h for h, hd in enumerate(results[label]["layers"][name]["heads"])
-                if hd["stable_rank"] < args.collapse_sr]
-
-    print(f"\n########## COLLAPSED heads (stable_rank < {args.collapse_sr}) for {deepest} ##########")
-    for lbl in labels:
-        print(f"  {lbl}: collapsed={collapsed_heads(lbl, deepest)} "
-              f"surviving={[h for h in range(nh) if h not in collapsed_heads(lbl, deepest)]}")
-
-    print(f"\n########## CROSS-CHECKPOINT |cos(v1)| for {deepest} ##########")
-    print("Global v1 alignment (input-space top right-singular vector):")
+    # ---- KEY TEST 1: cross-checkpoint GLOBAL v1 alignment (no head count needed) ----
+    print(f"\n########## CROSS-CHECKPOINT |cos(v1)| for {deepest} (GLOBAL) ##########")
+    print("Global v1 = top right-singular vector in k_proj INPUT space (glimpse-feature space):")
     align: dict[str, dict] = {"global": {}, "per_head": {}}
     for i, a in enumerate(labels):
         for b in labels[i + 1:]:
@@ -166,20 +155,40 @@ def main() -> None:
             align["global"][f"{a}|{b}"] = c
             print(f"  |cos(v1)|  {a:>22} vs {b:<22} = {c:.4f}")
 
-    print("\nPer-head v1 alignment (only heads collapsed in BOTH are meaningful):")
-    for i, a in enumerate(labels):
-        for b in labels[i + 1:]:
-            ca, cb = collapsed_heads(a, deepest), collapsed_heads(b, deepest)
-            shared = [h for h in ca if h in cb]
-            per = {}
-            for h in range(nh):
-                va = results[a]["layers"][deepest]["heads"][h]["v1"]
-                vb = results[b]["layers"][deepest]["heads"][h]["v1"]
-                per[h] = abscos(va, vb)
-            align["per_head"][f"{a}|{b}"] = {"cos": per, "shared_collapsed": shared}
-            shared_cos = [f"h{h}:{per[h]:.3f}" for h in shared]
-            print(f"  {a:>22} vs {b:<22} shared_collapsed={shared} "
-                  f"-> {' '.join(shared_cos) if shared_cos else '(none)'}")
+    if nh is None:
+        print("\n[per-head analysis skipped: head count unresolved]")
+    else:
+        print(f"\n########## PER-HEAD stable_rank for {deepest} ##########")
+        print("head".ljust(8) + "".join(f"{lbl[:16]:>18}" for lbl in labels))
+        for h in range(nh):
+            row = f"{h}".ljust(8)
+            for lbl in labels:
+                row += f"{results[lbl]['layers'][deepest]['heads'][h]['stable_rank']:>18.3f}"
+            print(row)
+
+        def collapsed_heads(label: str, name: str) -> list[int]:
+            return [h for h, hd in enumerate(results[label]["layers"][name]["heads"])
+                    if hd["stable_rank"] < args.collapse_sr]
+
+        print(f"\n########## COLLAPSED heads (stable_rank < {args.collapse_sr}) for {deepest} ##########")
+        for lbl in labels:
+            print(f"  {lbl}: collapsed={collapsed_heads(lbl, deepest)} "
+                  f"surviving={[h for h in range(nh) if h not in collapsed_heads(lbl, deepest)]}")
+
+        print("\nPer-head v1 alignment (only heads collapsed in BOTH are meaningful):")
+        for i, a in enumerate(labels):
+            for b in labels[i + 1:]:
+                ca, cb = collapsed_heads(a, deepest), collapsed_heads(b, deepest)
+                shared = [h for h in ca if h in cb]
+                per = {}
+                for h in range(nh):
+                    va = results[a]["layers"][deepest]["heads"][h]["v1"]
+                    vb = results[b]["layers"][deepest]["heads"][h]["v1"]
+                    per[h] = abscos(va, vb)
+                align["per_head"][f"{a}|{b}"] = {"cos": per, "shared_collapsed": shared}
+                shared_cos = [f"h{h}:{per[h]:.3f}" for h in shared]
+                print(f"  {a:>22} vs {b:<22} shared_collapsed={shared} "
+                      f"-> {' '.join(shared_cos) if shared_cos else '(none)'}")
 
     # ---- Serialize (v1 vectors -> lists so the result is fully reproducible) ----
     def to_serializable(obj: object) -> object:
