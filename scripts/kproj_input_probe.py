@@ -22,11 +22,12 @@ import math
 from pathlib import Path
 
 import torch
-from canvit_pretrain.checkpoint import load_model
-from canvit_pretrain.train.viewpoint import Viewpoint as NamedViewpoint
 from canvit_pytorch import Viewpoint, sample_at_viewpoint
 from canvit_pytorch.preprocess import preprocess
 from PIL import Image
+
+from canvit_pretrain.checkpoint import load_model
+from canvit_pretrain.train.viewpoint import Viewpoint as NamedViewpoint
 
 
 def find_kproj(model: torch.nn.Module, idx: int) -> tuple[str, torch.nn.Module]:
@@ -119,13 +120,13 @@ def main() -> None:
     rand_floor = 1 / math.sqrt(D)
     energy_in_topk = {k: float((coords[:k] ** 2).sum()) for k in [1, 5, 10, 20, 50, 100]}
     # "effective input variance v1 carries" = variance along v1 / top eigval
-    var_along_v1 = float((v1 @ cov @ v1))
+    var_along_v1 = float(v1 @ cov @ v1)
     print(f"\nrandom |cos| floor ~ {rand_floor:.4f}")
     print(f"input participation ratio = {float(eigval.sum()**2/eigval.pow(2).sum()):.1f}/{D}")
     print(f"input top1 var share = {float(eigval[0]/total):.3f}  top10 = {float(eigval[:10].sum()/total):.3f}")
     print(f"\n|cos(v1, input_top_PCA_1)| = {acos(v1, eigvec[:,0]):.4f}")
     print(f"|cos(v1, input_mean_dir)|  = {acos(v1, input_mean_dir):.4f}")
-    print(f"\nfraction of v1 energy in top-k input PCA subspace:")
+    print("\nfraction of v1 energy in top-k input PCA subspace:")
     for k, e in energy_in_topk.items():
         print(f"  top-{k:>3}: {e:.3f}   (random expectation ~ {k/D:.3f})")
     print(f"\nvariance along v1 = {var_along_v1:.4g}   top eigval = {float(eigval[0]):.4g}   "
