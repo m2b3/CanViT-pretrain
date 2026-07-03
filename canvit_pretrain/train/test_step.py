@@ -15,6 +15,7 @@ from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 
+from .objective import distillation_branch_metrics_fn, distillation_loss_fn
 from .step import training_step
 
 _DEVICE = torch.device("cpu")
@@ -85,18 +86,28 @@ def _run_step(
     else:
         ctx = nullcontext()
 
+    loss_fn = distillation_loss_fn(
+        model=model,
+        scene_target=tensors["scene_target"],
+        cls_target=tensors["cls_target"],
+        enable_scene_patches_loss=True,
+        enable_scene_cls_loss=True,
+    )
+    branch_metrics_fn = distillation_branch_metrics_fn(
+        model=model,
+        scene_target=tensors["scene_target"],
+        cls_target=tensors["cls_target"],
+        raw_scene_target=tensors["raw_scene_target"],
+        raw_cls_target=tensors["raw_cls_target"],
+        scene_denorm=lambda x: x,
+        cls_denorm=lambda x: x,
+    )
     with ctx:
         metrics = training_step(
             model=model,
             images=tensors["images"],
-            scene_target=tensors["scene_target"],
-            cls_target=tensors["cls_target"],
-            raw_scene_target=tensors["raw_scene_target"],
-            raw_cls_target=tensors["raw_cls_target"],
-            scene_denorm=lambda x: x,
-            cls_denorm=lambda x: x,
-            enable_scene_patches_loss=True,
-            enable_scene_cls_loss=True,
+            loss_fn=loss_fn,
+            branch_metrics_fn=branch_metrics_fn,
             glimpse_size_px=128,
             canvas_grid_size=_G,
             n_full_start_branches=0,
@@ -114,6 +125,49 @@ def _run_step(
         if p.grad is not None
     }
     return metrics.total_loss.item(), grads
+
+
+class TestRGBObjective:
+    """The RGB-reconstruction objective trains through the same TBPTT core."""
+
+    def test_rgb_step_produces_finite_loss_and_gradients(self) -> None:
+        from canvit_pytorch import CanViTConfig, CanViTForRGBReconstruction, patchify
+
+        from .objective import rgb_branch_metrics_fn, rgb_loss_fn
+
+        backbone = create_backbone("vits16").to(_DEVICE)
+        model = CanViTForRGBReconstruction(
+            backbone=backbone, cfg=CanViTConfig(), backbone_name="vits16",
+        ).to(_DEVICE)
+        torch.manual_seed(0)
+        scene_px = _G * backbone.patch_size_px
+        images = torch.randn(_B, 3, scene_px, scene_px, device=_DEVICE)
+        pixel_target = patchify(images, backbone.patch_size_px)
+
+        model.zero_grad()
+        metrics = training_step(
+            model=model,
+            images=images,
+            loss_fn=rgb_loss_fn(model=model, pixel_target=pixel_target),
+            branch_metrics_fn=rgb_branch_metrics_fn(model=model, pixel_target=pixel_target),
+            glimpse_size_px=128,
+            canvas_grid_size=_G,
+            n_full_start_branches=1,
+            n_random_start_branches=1,
+            chunk_size=2,
+            continue_prob=0.0,
+            min_viewpoint_scale=0.1,
+            amp_ctx=nullcontext(),
+            collect_viz=False,
+        )
+        assert torch.isfinite(metrics.total_loss)
+        assert metrics.total_loss.item() > 0
+        assert metrics.random_start is not None
+        assert "recon_loss" in metrics.random_start.metrics
+        grads = [p.grad for p in model.parameters() if p.grad is not None]
+        assert grads and any(g.abs().sum() > 0 for g in grads)
+        # The RGB head must receive gradient.
+        assert model.rgb_head["proj"].weight.grad is not None
 
 
 def _has_grads(grads: dict[str, Tensor]) -> bool:

@@ -24,6 +24,31 @@ def timestep_colors(n: int) -> list[RGBA]:
     return [cmap(i / max(1, n - 1)) for i in range(n)]
 
 
+def draw_trajectory_axis(ax, full_img: NDArray[np.floating], boxes: list[PixelBox], colors: list[RGBA], t: int) -> None:
+    """Draw full_img with viewpoint boxes accumulated up to (and including) timestep t.
+
+    Current step (i==t) is opaque, earlier steps faded; centers connected by a path.
+    t == -1 draws the bare image (the 'init' row, before any glimpse). Shared by the
+    PCA and pixel-reconstruction multistep plotters.
+    """
+    ax.imshow(full_img)
+    for i in range(t + 1):
+        box = boxes[i]
+        alpha = 1.0 if i == t else 0.4
+        ax.add_patch(Rectangle(
+            (box.left, box.top), box.width, box.height,
+            linewidth=2, edgecolor=colors[i], facecolor="none", alpha=alpha,
+        ))
+        ax.plot(box.center_x, box.center_y, "o", color=colors[i], markersize=5, alpha=alpha)
+    for i in range(1, t + 1):
+        ax.plot(
+            [boxes[i - 1].center_x, boxes[i].center_x],
+            [boxes[i - 1].center_y, boxes[i].center_y],
+            "-", color=colors[i], linewidth=1.5, alpha=0.7,
+        )
+    ax.axis("off")
+
+
 def plot_trajectory(
     *,
     img: NDArray[np.floating],
@@ -71,7 +96,7 @@ def plot_pca_grid(
     grid_size: int,
     titles: list[str],
 ) -> Figure:
-    """Plot PCA viz comparing [G*G, D] reference (teacher) to samples (model outputs); PCA must be pre-fit on reference."""
+    """Plot PCA viz: [G*G, D] reference (teacher) vs samples (model outputs). PCA pre-fit on reference."""
     assert len(samples) == len(titles)
     n_cols = 1 + len(samples)
 
@@ -89,6 +114,81 @@ def plot_pca_grid(
         axes[i + 1].imshow(sample_rgb)
         axes[i + 1].set_title(f"{title}\nMSE={mse:.4f}")
         axes[i + 1].axis("off")
+
+    plt.tight_layout()
+    return fig
+
+
+def _recon_patches_to_img(patches: NDArray[np.floating], grid: int) -> NDArray[np.floating]:
+    """[G^2, 3*p*p] normalized pixel patches -> [H, W, 3] denormalized image in [0, 1]."""
+    import torch
+    from canvit_pytorch.preprocess import imagenet_denormalize
+
+    d = patches.shape[1]
+    p = int(round((d // 3) ** 0.5))
+    assert 3 * p * p == d, f"patch dim {d} not 3*p^2"
+    t = torch.from_numpy(np.ascontiguousarray(patches)).reshape(grid, grid, 3, p, p)
+    img = t.permute(2, 0, 3, 1, 4).reshape(3, grid * p, grid * p)  # [C, H, W]
+    return imagenet_denormalize(img).clip(0, 1).permute(1, 2, 0).numpy()
+
+
+def plot_multistep_recon(
+    *,
+    full_img: NDArray[np.floating],
+    target_patches: NDArray[np.floating],
+    scenes: list[NDArray[np.floating]],
+    glimpses: list[NDArray[np.floating]],
+    boxes: list[PixelBox],
+    names: list[str],
+    scene_grid_size: int,
+    initial_scene: NDArray[np.floating],
+) -> Figure:
+    """Pixel-space trajectory viz for RGB reconstruction (analog of plot_multistep_pca).
+
+    Row 0 = init (reconstruction before any glimpse); rows 1+ = after each glimpse.
+    Columns: Trajectory (accumulating viewpoint boxes) | Glimpse | Target | Reconstruction | Error.
+    """
+    n_views = len(scenes)
+    assert len(glimpses) == n_views == len(boxes) == len(names)
+    S = scene_grid_size
+    colors = timestep_colors(n_views)
+
+    target_img = _recon_patches_to_img(target_patches, S)
+    recon_imgs = [_recon_patches_to_img(initial_scene, S)] + [_recon_patches_to_img(s, S) for s in scenes]
+    # Per-patch reconstruction MSE vs target, reshaped to the canvas grid.
+    err_maps = [((initial_scene - target_patches) ** 2).mean(1).reshape(S, S)]
+    err_maps += [((s - target_patches) ** 2).mean(1).reshape(S, S) for s in scenes]
+
+    C_TRAJ, C_GLIMPSE, C_TARGET, C_RECON, C_ERR = range(5)
+    n_rows = n_views + 1
+    fig, axes = plt.subplots(n_rows, 5, figsize=(4 * 5, 4 * n_rows), squeeze=False)
+
+    for row in range(n_rows):
+        t = row - 1  # row 0 = init (t == -1 -> no boxes)
+        ax_traj = axes[row, C_TRAJ]
+        draw_trajectory_axis(ax_traj, full_img, boxes, colors, t)
+        ax_traj.set_title("init" if row == 0 else f"t={t}")
+
+        ax_g = axes[row, C_GLIMPSE]
+        if row == 0:
+            ax_g.set_title("(no glimpse)")
+        else:
+            ax_g.imshow(glimpses[t])
+            ax_g.set_title(f"Glimpse ({names[t]})")
+        ax_g.axis("off")
+
+        axes[row, C_TARGET].imshow(target_img)
+        axes[row, C_TARGET].set_title("Target")
+        axes[row, C_TARGET].axis("off")
+
+        axes[row, C_RECON].imshow(recon_imgs[row])
+        axes[row, C_RECON].set_title("Recon (init)" if row == 0 else f"Recon t={t}")
+        axes[row, C_RECON].axis("off")
+
+        im_err = axes[row, C_ERR].imshow(err_maps[row], cmap="hot")
+        axes[row, C_ERR].set_title(f"MSE ({float(err_maps[row].mean()):.4f})")
+        axes[row, C_ERR].axis("off")
+        fig.colorbar(im_err, ax=axes[row, C_ERR], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     return fig
@@ -228,9 +328,8 @@ def plot_multistep_pca(
         assert C_PREDS is not None
         axes[row, C_PREDS].axis("off")
         axes[row, C_PREDS].set_title("Predictions")
-    axes[row, C_TRAJ].imshow(full_img)
+    draw_trajectory_axis(axes[row, C_TRAJ], full_img, boxes, colors, -1)
     axes[row, C_TRAJ].set_title("init")
-    axes[row, C_TRAJ].axis("off")
 
     axes[row, C_GLIMPSE].axis("off")
     axes[row, C_GLIMPSE].set_title("(no glimpse)")
@@ -327,25 +426,8 @@ def plot_multistep_pca(
             if not gt_in_topk:
                 ax.set_title(f"GT: {preds_t.gt_name[:15]}", fontsize=8, color="green")
 
-        ax = axes[row, C_TRAJ]
-        ax.imshow(full_img)
-        for i in range(t + 1):
-            box = boxes[i]
-            alpha = 1.0 if i == t else 0.4
-            rect = Rectangle(
-                (box.left, box.top), box.width, box.height,
-                linewidth=2, edgecolor=colors[i], facecolor="none", alpha=alpha,
-            )
-            ax.add_patch(rect)
-            ax.plot(box.center_x, box.center_y, "o", color=colors[i], markersize=5, alpha=alpha)
-        for i in range(1, t + 1):
-            ax.plot(
-                [boxes[i - 1].center_x, boxes[i].center_x],
-                [boxes[i - 1].center_y, boxes[i].center_y],
-                "-", color=colors[i], linewidth=1.5, alpha=0.7,
-            )
-        ax.set_title(f"t={t}")
-        ax.axis("off")
+        draw_trajectory_axis(axes[row, C_TRAJ], full_img, boxes, colors, t)
+        axes[row, C_TRAJ].set_title(f"t={t}")
 
         axes[row, C_GLIMPSE].imshow(glimpses[t])
         axes[row, C_GLIMPSE].set_title(f"Glimpse ({names[t]})")

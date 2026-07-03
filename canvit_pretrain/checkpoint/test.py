@@ -57,6 +57,40 @@ def test_save_load_roundtrip() -> None:
         model2.load_state_dict(data["state_dict"])
 
 
+def test_rgb_recon_save_load_roundtrip() -> None:
+    """RGB-reconstruction checkpoints round-trip with no teacher fields."""
+    from canvit_pytorch import CanViTConfig, CanViTForRGBReconstruction
+
+    from canvit_pretrain.checkpoint import load_model
+
+    device = torch.device("cpu")
+    backbone = create_backbone("vits16").to(device)
+    model = CanViTForRGBReconstruction(
+        backbone=backbone, cfg=CanViTConfig(), backbone_name="vits16",
+    ).to(device)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "rgb.pt"
+        save(
+            path, model, backbone_name="vits16",
+            objective="rgb_recon", dataset="in1k",
+            glimpse_grid_size=8, scene_resolution=512,
+            canvas_patch_grid_sizes=[32], step=10,
+        )
+        data = load(path, device)
+        assert data["objective"] == "rgb_recon"
+        assert data["teacher_dim"] is None
+        assert data["teacher_name"] is None
+        assert data["canvas_patch_grid_sizes"] == [32]
+
+        loaded, _ = load_model(path, device)
+        assert isinstance(loaded, CanViTForRGBReconstruction)
+        # Reconstruction head weights survive the round-trip.
+        assert torch.allclose(
+            loaded.rgb_head["proj"].weight, model.rgb_head["proj"].weight,
+        )
+
+
 def test_strips_orig_mod() -> None:
     """Verify _orig_mod prefix stripping works."""
     device = torch.device("cpu")
@@ -71,6 +105,7 @@ def test_strips_orig_mod() -> None:
             "state_dict": state_dict,
             "model_config": {},
             "backbone_name": "vits16",
+            "objective": "distillation",
             "canvas_patch_grid_sizes": [8, 16, 32],
             "teacher_dim": 384,
             "teacher_repo_id": _TEACHER_REPO,

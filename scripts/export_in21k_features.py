@@ -51,8 +51,8 @@ import pyarrow.parquet as pq
 import torch
 import tyro
 import xxhash
-from canvit_pytorch.teacher import load_teacher
 from canvit_pytorch.preprocess import preprocess
+from canvit_pytorch.teacher import load_teacher
 from PIL import Image, ImageFile
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset

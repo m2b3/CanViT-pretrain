@@ -11,8 +11,9 @@ from torch import Tensor
 if TYPE_CHECKING:
     from ..config import Config
 from canvit_pytorch.preprocess import preprocess
-from canvit_pretrain.datasets import IndexedImageFolder
 from torch.utils.data import DataLoader, Dataset
+
+from canvit_pretrain.datasets import IndexedImageFolder
 
 from .shards import ShardedFeatureLoader
 
@@ -86,7 +87,10 @@ def scene_size_px(grid_size: int, patch_size: int) -> int:
 
 
 def create_loaders(cfg: "Config", start_step: int) -> Loaders:
-    """Train + val loaders; train reads precomputed features, val reads raw images. start_step positions the shard cursor on resume (0 for fresh)."""
+    """Train + val loaders; train reads precomputed features, val reads raw images.
+
+    start_step positions the shard cursor on resume (0 for fresh).
+    """
     from ..config import Config
     assert isinstance(cfg, Config)
     log.info(f"=== CREATE_LOADERS: start_step={start_step} ===")

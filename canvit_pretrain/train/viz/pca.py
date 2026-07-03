@@ -12,7 +12,10 @@ def _pca_proj_to_rgb(proj: NDArray[np.floating], H: int, W: int) -> NDArray[np.f
 
 
 def fit_pca(features: NDArray[np.floating], n_components: int = 12) -> PCA | None:
-    """Fit PCA on [N, D] features; returns None if zero variance (e.g., constant init). Default 12 components supports offset viewing."""
+    """Fit PCA on [N, D] features; returns None if zero variance (e.g., constant init).
+
+    Default 12 components supports offset viewing.
+    """
     if features.var(axis=0).max() < 1e-5:
         return None
     n_components = min(n_components, features.shape[0], features.shape[1])
@@ -29,7 +32,10 @@ def pca_rgb(
     normalize: bool = False,
     pc_offset: int = 0,
 ) -> NDArray[np.floating]:
-    """Project [H*W, D] features to [H, W, 3] RGB via PCA. None pca → gray. pc_offset picks window (0=PC1-3, 1=PC2-4, ...)."""
+    """Project [H*W, D] features to [H, W, 3] RGB via PCA. None pca → gray.
+
+    pc_offset picks the component window (0=PC1-3, 1=PC2-4, ...).
+    """
     if pca is None:
         return np.full((H, W, 3), 0.5, dtype=np.float32)
     proj = pca.transform(features)

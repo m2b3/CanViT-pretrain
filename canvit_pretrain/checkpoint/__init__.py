@@ -14,6 +14,7 @@ from typing import TypedDict
 
 import dacite
 import torch
+from canvit_pytorch import CanViT
 from torch import Tensor
 
 from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
@@ -21,16 +22,21 @@ from canvit_pretrain import CanViTForPretraining, CanViTForPretrainingConfig
 log = logging.getLogger(__name__)
 
 class CheckpointData(TypedDict):
-    """Checkpoint structure. All fields present; None where not applicable."""
+    """Checkpoint structure. All fields present; None where not applicable.
+
+    Teacher fields are None for the teacher-free ``rgb_recon`` objective.
+    ``objective`` is absent in pre-objective checkpoints and defaults to "distillation".
+    """
 
     # --- Model reconstruction (required) ---
     state_dict: dict[str, Tensor]
     model_config: dict
     backbone_name: str
+    objective: str
     canvas_patch_grid_sizes: list[int]
-    teacher_dim: int
-    teacher_repo_id: str
-    teacher_name: str
+    teacher_dim: int | None
+    teacher_repo_id: str | None
+    teacher_name: str | None
     dataset: str
 
     # --- Training context ---
@@ -147,14 +153,16 @@ def find_latest(run_dir: Path) -> Path | None:
 
 def save(
     path: Path,
-    model: CanViTForPretraining,
+    model: CanViT,
     backbone_name: str,
     *,
-    teacher_repo_id: str,
-    teacher_name: str,
+    objective: str = "distillation",
+    teacher_repo_id: str | None = None,
+    teacher_name: str | None = None,
     dataset: str,
     glimpse_grid_size: int,
     scene_resolution: int,
+    canvas_patch_grid_sizes: list[int] | None = None,
     step: int | None = None,
     train_loss: float | None = None,
     comet_id: str | None = None,
@@ -163,8 +171,21 @@ def save(
     training_config_history: dict[str, dict] | None = None,
     provenance_history: dict[str, dict] | None = None,
 ) -> None:
-    """Save checkpoint with all info needed to reconstruct model and push to hub."""
-    assert isinstance(model.cfg, CanViTForPretrainingConfig)
+    """Save checkpoint with all info needed to reconstruct model and push to hub.
+
+    Teacher fields are required for ``distillation`` and unused for ``rgb_recon``
+    (which has no standardizers; ``canvas_patch_grid_sizes`` must be passed explicitly).
+    """
+    if objective == "distillation":
+        assert isinstance(model, CanViTForPretraining)
+        assert isinstance(model.cfg, CanViTForPretrainingConfig)
+        assert teacher_repo_id is not None and teacher_name is not None, "distillation save needs teacher fields"
+        teacher_dim: int | None = model.cfg.teacher_dim
+        grids = canvas_patch_grid_sizes if canvas_patch_grid_sizes is not None else model.canvas_patch_grid_sizes
+    else:
+        teacher_dim = None
+        assert canvas_patch_grid_sizes is not None, "rgb_recon save needs canvas_patch_grid_sizes"
+        grids = canvas_patch_grid_sizes
     git_commit, git_dirty = _git_info()
     hostname, slurm_job_id, slurm_array_task_id, cmdline = get_env_metadata()
 
@@ -172,8 +193,9 @@ def save(
         "state_dict": model.state_dict(),
         "model_config": asdict(model.cfg),
         "backbone_name": backbone_name,
-        "canvas_patch_grid_sizes": model.canvas_patch_grid_sizes,
-        "teacher_dim": model.cfg.teacher_dim,
+        "objective": objective,
+        "canvas_patch_grid_sizes": grids,
+        "teacher_dim": teacher_dim,
         "teacher_repo_id": teacher_repo_id,
         "teacher_name": teacher_name,
         "dataset": dataset,
@@ -200,7 +222,7 @@ def save(
 
     log.info(f"Checkpoint saved: {path} ({size_mb:.1f} MB)")
     log.info(
-        f"  backbone={backbone_name}, canvas_patch_grid_sizes={model.canvas_patch_grid_sizes},"
+        f"  backbone={backbone_name}, objective={objective}, canvas_patch_grid_sizes={grids},"
         f" teacher={teacher_name}, dataset={dataset},"
         f" glimpse={glimpse_grid_size}, scene={scene_resolution}px"
     )
@@ -211,25 +233,28 @@ def save(
 
 
 def load(path: Path, device: torch.device | str = "cpu") -> CheckpointData:
-    """Load checkpoint data. All fields are required."""
+    """Load checkpoint data. Teacher fields are required only for distillation checkpoints."""
     log.info(f"Loading checkpoint: {path}")
     raw = torch.load(path, weights_only=False, map_location=device)
 
-    # Required model fields — fail loudly if missing
-    for key in (
-        "state_dict", "model_config", "backbone_name", "canvas_patch_grid_sizes",
-        "teacher_dim", "teacher_repo_id", "teacher_name", "dataset",
-    ):
+    # Pre-objective checkpoints (flagship, ablations) have no "objective" key.
+    objective = raw.get("objective", "distillation")
+
+    required = ["state_dict", "model_config", "backbone_name", "dataset"]
+    if objective == "distillation":
+        required += ["canvas_patch_grid_sizes", "teacher_dim", "teacher_repo_id", "teacher_name"]
+    for key in required:
         assert key in raw, f"Checkpoint {path.name} missing required field: {key!r}"
 
     data: CheckpointData = {
         "state_dict": raw["state_dict"],
         "model_config": raw["model_config"],
         "backbone_name": raw["backbone_name"],
-        "canvas_patch_grid_sizes": raw["canvas_patch_grid_sizes"],
-        "teacher_dim": raw["teacher_dim"],
-        "teacher_repo_id": raw["teacher_repo_id"],
-        "teacher_name": raw["teacher_name"],
+        "objective": objective,
+        "canvas_patch_grid_sizes": raw.get("canvas_patch_grid_sizes", []),
+        "teacher_dim": raw.get("teacher_dim"),
+        "teacher_repo_id": raw.get("teacher_repo_id"),
+        "teacher_name": raw.get("teacher_name"),
         "dataset": raw["dataset"],
         "glimpse_grid_size": raw["glimpse_grid_size"],
         "scene_resolution": raw["scene_resolution"],
@@ -290,22 +315,34 @@ def load_state_dict_flexible(
 
 def load_model(
     path: Path, device: torch.device | str = "cpu",
-) -> tuple[CanViTForPretraining, CheckpointData]:
-    """Load CanViTForPretraining from checkpoint. Returns (model, checkpoint_data)."""
-    from canvit_pytorch import create_backbone
+) -> tuple[CanViT, CheckpointData]:
+    """Load the pretraining model (distillation or RGB) from checkpoint. Returns (model, data)."""
+    from typing import cast
+
+    from canvit_pytorch import CanViTConfig, CanViTForRGBReconstruction, create_backbone
+    from canvit_pytorch.backbone import BackboneName
 
     ckpt = load(path, device)
+    backbone_name = cast(BackboneName, ckpt["backbone_name"])
 
-    backbone_name = ckpt["backbone_name"]
-    cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt["model_config"])
-
-    model = CanViTForPretraining(
-        backbone=create_backbone(backbone_name),
-        cfg=cfg,
-        backbone_name=backbone_name,
-        canvas_patch_grid_sizes=ckpt["canvas_patch_grid_sizes"],
-    )
-    load_state_dict_flexible(model, ckpt["state_dict"])
+    model: CanViT
+    if ckpt["objective"] == "distillation":
+        cfg = dacite.from_dict(CanViTForPretrainingConfig, ckpt["model_config"])
+        model = CanViTForPretraining(
+            backbone=create_backbone(backbone_name),
+            cfg=cfg,
+            backbone_name=backbone_name,
+            canvas_patch_grid_sizes=ckpt["canvas_patch_grid_sizes"],
+        )
+        load_state_dict_flexible(model, ckpt["state_dict"])
+    else:
+        rgb_cfg = dacite.from_dict(CanViTConfig, ckpt["model_config"])
+        model = CanViTForRGBReconstruction(
+            backbone=create_backbone(backbone_name),
+            cfg=rgb_cfg,
+            backbone_name=backbone_name,
+        )
+        model.load_state_dict(ckpt["state_dict"])
 
     if isinstance(device, str):
         device = torch.device(device)
