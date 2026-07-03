@@ -472,7 +472,9 @@ def training_loop(*, cfg: Config, trial: optuna.Trial, run_name: str, run_dir: P
         # Use model's own standardizers — their state is part of model.state_dict(),
         # so it travels correctly with HF Hub upload/download and checkpoint save/load.
         assert isinstance(model, CanViTForPretraining)
-        cls_norm, scene_norm = model.standardizers(G)
+        # create_missing: a new canvas grid (e.g. higher-res continual pretraining)
+        # gets fresh standardizers here; need_init below fills their statistics.
+        cls_norm, scene_norm = model.standardizers(G, create_missing=True)
 
         need_init = cfg.reset_normalizer or not scene_norm.initialized
         if cfg.reset_normalizer:
