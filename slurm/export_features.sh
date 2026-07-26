@@ -24,6 +24,16 @@
 #   # If your cluster requires an allocation account:
 #   sbatch --account=my_project_name --array=0-99%20 slurm/export_features.sh
 #
+#   # IN1k VALIDATION, for held-out evaluation of a distilled arm. 50,000
+#   # images -> 13 shards -> ~79 GB, one array task. The index is the existing
+#   # UNshuffled val.parquet and the destination is scratch, because this
+#   # artifact's real home is GCS.
+#   DATASET=in1k_val \
+#   PARQUET=$INDEX_DIR/val.parquet \
+#   IMAGE_ROOT=$IN1K_VAL_IMAGE_DIR \
+#   OUT_DIR=$SCRATCH/dinov3_in1k_val_vitb16_512 \
+#     sbatch --array=0-0 slurm/export_features.sh
+#
 # MONITOR:
 #   squeue -u $USER                                    # job status
 #   ls $OUT_DIR/shards/*.pt 2>/dev/null | wc -l        # completed shards
@@ -58,10 +68,23 @@ IMAGE_SIZE=512
 SHARD_SIZE=4096
 SHARDS_PER_JOB=36
 
-# Derived from env.sh
-PARQUET="$INDEX_DIR/${DATASET}-shuffled.parquet"
+# Derived from env.sh, and OVERRIDABLE — the derivation encodes two
+# assumptions that hold for the IN21k and IN1k TRAIN exports and for nothing
+# else:
+#
+#   * that the index is SHUFFLED. A training loader reads shards sequentially
+#     and needs mixed classes per shard; an evaluation export is joined by
+#     filename and does not care, so `val.parquet` has no `-shuffled` twin and
+#     needs none.
+#   * that the destination is the shared PROJECT allocation. Right for a
+#     durable corpus, wrong for a transient artifact whose destination is GCS —
+#     and def-skrishna sits at 26 of 33 TiB.
+#
+# Left as bare assignments these were not defaults but hardcodes: they do not
+# fail when they become wrong, they silently point the job somewhere else.
+PARQUET="${PARQUET:-$INDEX_DIR/${DATASET}-shuffled.parquet}"
 IMAGE_ROOT="${IMAGE_ROOT:-$IN21K_IMAGE_DIR}"
-OUT_DIR="$FEATURES_DIR/${DATASET}/dinov3_vitb16/${IMAGE_SIZE}"
+OUT_DIR="${OUT_DIR:-$FEATURES_DIR/${DATASET}/dinov3_vitb16/${IMAGE_SIZE}}"
 
 JOB_ID=${SLURM_ARRAY_TASK_ID:?Must run as array job}
 START_SHARD=$((JOB_ID * SHARDS_PER_JOB))

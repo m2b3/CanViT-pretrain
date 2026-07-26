@@ -17,8 +17,19 @@ USAGE:
 
 SHARD SCHEMA:
     # Data
-    patches: [N, n_patches, embed_dim] STORAGE_DTYPE  - patch features (L2-normalized)
-    cls: [N, embed_dim] STORAGE_DTYPE                 - CLS token (L2-normalized)
+    # 🔴 POST-LAYERNORM hidden states, NOT L2-normalized. This said
+    # "L2-normalized" until 2026-07-26 and it was simply wrong:
+    # `DINOv3Teacher.forward_norm_features` returns
+    # `model(images).last_hidden_state` split into CLS and patches, with no
+    # normalization step anywhere (read from
+    # CanViT-PyTorch/canvit_pytorch/teacher/__init__.py, 2026-07-26 ~17:35 EDT;
+    # that method's own docstring already said "post-norm"). Measured on shard
+    # 00000 row 0: patch L2 = 12.13, CLS L2 = 17.31, against 1.0 for a unit
+    # vector. Consumers standardize per position, so training is unaffected —
+    # but any claim about feature scale or cosine similarity that assumes unit
+    # norm is false, and one was written down before this was checked.
+    patches: [N, n_patches, embed_dim] STORAGE_DTYPE  - patch features
+    cls: [N, embed_dim] STORAGE_DTYPE                 - CLS token
     paths: list[str]                                  - relative paths within image_root
     class_idxs: [N] int32                             - class indices from parquet
     image_hashes: list[str]                           - xxh64 of decoded pixels (empty string if failed)
